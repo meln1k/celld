@@ -191,6 +191,15 @@ impl SimDisk {
         }
     }
 
+    /// The machine died and came back with an empty disk, as a replaced
+    /// volume or an operator's `rm -rf` leaves it.
+    pub fn wipe(&self) {
+        self.crash();
+        let mut state = self.inner.state.lock().unwrap();
+        state.files.clear();
+        state.dirs = BTreeSet::from([PathBuf::from("/")]);
+    }
+
     /// Every file on the disk with its current length, for a trace.
     pub fn listing(&self) -> Vec<(PathBuf, usize)> {
         let state = self.inner.state.lock().unwrap();

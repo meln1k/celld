@@ -7,16 +7,16 @@
 // armed on the domain's monotonic clock. The node's core events go to an
 // observer, so a run's history is the events every node applied, in order.
 
+#[path = "composed_simulation/storage.rs"]
+mod storage;
+
+#[path = "composed_simulation/fleet.rs"]
+mod fleet;
+
 use crate::actor::{
-    Actor, ActorIdentity, ActorInput, AdmissionLimits, AppHandle, Message, Ownership, StepOutput,
-    TimerArm, TimerSlots,
+    Actor, ActorIdentity, ActorInput, AdmissionLimits, Message, StepOutput, TimerArm, TimerSlots,
 };
-use crate::asyncrt::{self, sim::Domain, sim::DomainOptions, sim::Simulation};
-use crate::conformance_sim_cell_host::SimCellHost;
-use crate::conformance_sim_store::{SimDisk, SimStore, StoreFaults};
-use crate::engine_api::{RequestBody, RuntimeFetch};
-use anyhow::Context as _;
-use celld_logic::Route;
+use crate::asyncrt::{self, sim::Domain, sim::Simulation};
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -240,14 +240,23 @@ fn a_seed_replays_the_same_run_in_process() {
     assert_eq!(first, fleet_run(5));
     assert_ne!(first, fleet_run(6));
 
-    let first = power_loss_run(5, "n1").history;
+    let first = storage::power_loss_run(5, "n1").history;
     assert!(
         first.len() > 1_000,
         "the power-loss run ran {} lines",
         first.len()
     );
-    assert_eq!(first, power_loss_run(5, "n1").history);
-    assert_ne!(first, power_loss_run(6, "n1").history);
+    assert_eq!(first, storage::power_loss_run(5, "n1").history);
+    assert_ne!(first, storage::power_loss_run(6, "n1").history);
+
+    let first = fleet::run(5, None).trace;
+    assert!(
+        first.len() > 1_000,
+        "the faulted fleet ran {} lines",
+        first.len()
+    );
+    assert_eq!(first, fleet::run(5, None).trace);
+    assert_ne!(first, fleet::run(6, None).trace);
 }
 
 /// The child half of `a_seed_replays_across_processes`: write the run of
@@ -264,10 +273,12 @@ fn replay_child() {
     let out = std::env::var("CELLD_SIM_TRACE_OUT").expect("CELLD_SIM_TRACE_OUT");
     let mut lines = fleet_run(seed);
     lines.push("== power loss".into());
-    let run = power_loss_run(seed, "n1");
+    let run = storage::power_loss_run(seed, "n1");
     lines.extend(run.history);
     lines.push("== bucket".into());
     lines.extend(run.objects);
+    lines.push("== faulted fleet".into());
+    lines.extend(fleet::run(seed, None).trace);
     let mut text = lines.join("\n");
     text.push('\n');
     std::fs::write(&out, text).unwrap();
@@ -316,270 +327,4 @@ fn a_seed_replays_across_processes() {
         "seed 11 ran differently in two processes"
     );
     assert_ne!(first, run(12, "other"), "seeds 11 and 12 ran the same");
-}
-
-// ── nodes with storage ──────────────────────────────────────────────────────
-
-/// A node that owns cells through the shared bucket and keeps them on its
-/// own disk, and the shell's handle to it.
-struct StorageNode {
-    domain: Domain,
-    app: AppHandle,
-}
-
-/// Start node `name` over `store` and `disk`: a scripted cell host on the
-/// real replicator, bucket ownership, and the actor driven as in
-/// `start_node`.
-fn start_storage_node(
-    sim: &Simulation,
-    name: &str,
-    store: &SimStore,
-    disk: &SimDisk,
-    history: &History,
-) -> StorageNode {
-    let domain = sim.domain_with(
-        name,
-        DomainOptions {
-            filesystem: Some(disk.filesystem()),
-            ..Default::default()
-        },
-    );
-    let (messages, inbox) = mpsc::unbounded_channel();
-    let (fence, _fenced) = mpsc::unbounded_channel();
-    let node = name.to_string();
-    let history = history.clone();
-    let (store, disk) = (store.clone(), disk.clone());
-    let (actor, host) = sim.block_on(&domain, async move {
-        let host = SimCellHost::start(std::path::Path::new("/data"), &store, &disk)
-            .expect("the cell host starts");
-        let bucket = crate::conformance_sim_store::bucket(&store, "");
-        // The probe key doubles as the lease generation, so each process
-        // draws its own, as a restarted node does.
-        let ownership = crate::ownership_store::BucketOwnership::new(
-            bucket.clone(),
-            bucket,
-            node.clone(),
-            crate::machine::random_process_generation(),
-        )
-        .with_lease_ttl_ms(10_000);
-        let mut actor = Actor::from_environment_with_scripted_host(
-            AdmissionLimits {
-                resident: 4,
-                activations: 2,
-                evictions: 2,
-                releases: 2,
-                placement_weight: 1,
-            },
-            false,
-            fence,
-            host.clone(),
-            Some(Ownership::Bucket(Arc::new(ownership))),
-            ActorIdentity {
-                node: node.clone(),
-                advertise: format!("{node}:4000"),
-                region: "sim".into(),
-            },
-            None,
-        )
-        .await
-        .expect("the actor builds");
-        actor.observe_core_for_test(Arc::new(move |event, effects| {
-            history
-                .lock()
-                .unwrap()
-                .push(format!("{node}: {event:?} => {effects:?}"));
-        }));
-        (actor, host)
-    });
-    let app = AppHandle {
-        tx: messages,
-        runtime: None,
-        scripted_activity_host: Some(host),
-        reload: crate::generation::reload_channel().0,
-        peer_http: reqwest::Client::new(),
-        peer_auth: Arc::new(crate::peer_auth::PeerAuth::new([0; 32], name).unwrap()),
-        advertise: format!("{name}:4000"),
-        websockets: mpsc::unbounded_channel().0,
-        max_outbound_websockets: 0,
-        draining: Arc::default(),
-        fleet_ready: Arc::default(),
-        public_in_flight: Arc::default(),
-        drain_pins: actor.drain_pins_for_test(),
-        follower: None,
-        trust_forwarded_headers: false,
-        max_request_body_bytes: 1 << 20,
-        operation_deadline_ms: 30_000,
-    };
-    domain.spawn(drive(actor, inbox)).detach();
-    StorageNode { domain, app }
-}
-
-/// One request to `cell` through the shell's local path: route, run the
-/// handler, and hold the answer behind the output gate. A cell owned
-/// elsewhere answers with its route instead.
-async fn call(app: &AppHandle, cell: &str, method: &str, body: &str) -> anyhow::Result<String> {
-    let routed = app
-        .request(cell.to_string())
-        .await
-        .map_err(|error| anyhow::anyhow!("route: {error:?}"))?;
-    anyhow::ensure!(routed.route == Route::Local, "routed to {:?}", routed.route);
-    let completed = app
-        .local_request(routed.request, cell.to_string(), None, "sim")
-        .run(async {
-            let host = app.execution_host().context("no cell host")?;
-            host.fetch_cell(
-                cell.to_string(),
-                None,
-                RuntimeFetch {
-                    url: format!("http://sim/{cell}"),
-                    method: method.to_string(),
-                    body: RequestBody::Bytes(body.to_string().into()),
-                    headers: Vec::new(),
-                    request_id: None,
-                    order: None,
-                    parent: None,
-                },
-                None,
-            )
-            .await
-        })
-        .await;
-    let response = completed
-        .result
-        .map_err(crate::cell_dispatch::local_request_error)?;
-    Ok(String::from_utf8_lossy(&response.body).into_owned())
-}
-
-/// Read `cell`'s log through `node`, retrying while ownership settles.
-fn read_log(sim: &Simulation, node: &StorageNode, cell: &str) -> Vec<String> {
-    let app = node.app.clone();
-    let cell = cell.to_string();
-    sim.block_on(&node.domain, async move {
-        for _ in 0..200 {
-            match call(&app, &cell, "GET", "").await {
-                Ok(log) => {
-                    return log
-                        .split(',')
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string)
-                        .collect();
-                }
-                Err(_) => asyncrt::sleep(std::time::Duration::from_millis(500)).await,
-            }
-        }
-        panic!("{cell} never served a read");
-    })
-}
-
-/// What a power-loss run did.
-struct PowerLossRun {
-    /// Per cell, the writes n0 acknowledged and the log the successor read.
-    cells: Vec<(Vec<String>, Vec<String>)>,
-    /// Every core event of both nodes, then every change to the bucket.
-    history: Vec<String>,
-    /// Every object left in the bucket, with a hash of its bytes. The bytes
-    /// carry SQLite's WAL salts, which come from a process-wide generator,
-    /// so they repeat only in a process of their own.
-    objects: Vec<String>,
-}
-
-/// One power-loss run: three clients append to their own cells on n0, n0
-/// loses power at a seeded instant mid-stream, and after its lease runs
-/// out `successor` serves the cells, from n0's disk when it is n0 itself
-/// and from the bucket alone otherwise.
-fn power_loss_run(seed: u64, successor: &str) -> PowerLossRun {
-    const CELLS: [&str; 3] = ["do:c0", "do:c1", "do:c2"];
-    let sim = Simulation::new(seed);
-    let store = SimStore::new(StoreFaults {
-        latency_ms: 5..40,
-        unavailable_per_mille: 10,
-        lost_response_per_mille: 10,
-    });
-    let history = History::default();
-    let disk = SimDisk::new();
-    let n0 = start_storage_node(&sim, "n0", &store, &disk, &history);
-    let acked: Vec<Arc<Mutex<Vec<String>>>> = CELLS.iter().map(|_| Arc::default()).collect();
-    for (cell, writes) in CELLS.into_iter().zip(&acked) {
-        let (app, writes) = (n0.app.clone(), writes.clone());
-        n0.domain
-            .spawn(async move {
-                let mut write = 0;
-                loop {
-                    write += 1;
-                    let value = format!("{cell}/w{write}");
-                    match call(&app, cell, "POST", &value).await {
-                        Ok(_) => writes.lock().unwrap().push(value),
-                        // A node refuses at once until it holds its lease,
-                        // and a client waits before it tries again.
-                        Err(_) => asyncrt::sleep(std::time::Duration::from_millis(50)).await,
-                    }
-                }
-            })
-            .detach();
-    }
-    sim.run_for(2_000 + seed.wrapping_mul(7_919) % 3_000);
-    disk.power_loss();
-    n0.domain.crash();
-    drop(n0);
-
-    // Past the dead node's lease, so a successor may take the cells.
-    sim.run_for(15_000);
-    let disk = if successor == "n0" {
-        disk
-    } else {
-        SimDisk::new()
-    };
-    let next = start_storage_node(&sim, successor, &store, &disk, &history);
-    let cells = CELLS
-        .iter()
-        .zip(&acked)
-        .map(|(cell, acked)| (acked.lock().unwrap().clone(), read_log(&sim, &next, cell)))
-        .collect();
-    let mut history = history.lock().unwrap().clone();
-    history.extend(
-        store
-            .mutations()
-            .iter()
-            .map(|mutation| format!("{mutation:?}")),
-    );
-    let objects = store
-        .keys("")
-        .into_iter()
-        .map(|key| {
-            use std::hash::{Hash as _, Hasher as _};
-            let mut hasher = std::hash::DefaultHasher::new();
-            store.object(&key).unwrap().hash(&mut hasher);
-            format!("{key} {:016x}", hasher.finish())
-        })
-        .collect();
-    PowerLossRun {
-        cells,
-        history,
-        objects,
-    }
-}
-
-/// Writes acknowledged before a power loss come back, whether the node
-/// restarts on what its disk kept or another node restores from the
-/// bucket. The node dies mid-stream, so some writes were in flight.
-#[test]
-fn an_acknowledged_write_survives_a_power_loss() {
-    let mut acknowledged = 0;
-    for seed in 0..6 {
-        for successor in ["n0", "n1"] {
-            for (acked, log) in power_loss_run(seed, successor).cells {
-                acknowledged += acked.len();
-                let lost: Vec<&String> =
-                    acked.iter().filter(|value| !log.contains(value)).collect();
-                assert!(
-                    lost.is_empty(),
-                    "seed {seed}: {successor} lost acknowledged writes {lost:?}; read {log:?}"
-                );
-            }
-        }
-    }
-    assert!(
-        acknowledged >= 1_000,
-        "only {acknowledged} writes were acknowledged"
-    );
 }

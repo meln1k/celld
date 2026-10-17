@@ -242,6 +242,7 @@ impl Simulation {
             seed,
             rng_streams: Mutex::new(BTreeMap::new()),
             closed: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
         });
         inner.services.bind_domain(super::DomainToken::new(&inner));
         Domain { inner }
@@ -260,10 +261,12 @@ impl Simulation {
             .into_iter()
             .collect();
         let mut state = self.inner.state.lock().unwrap();
-        let mut runnable: Vec<u64> = ready
+        // A paused domain's tasks stay ready, unpolled, until it resumes.
+        let (mut runnable, waiting): (Vec<u64>, Vec<u64>) = ready
             .into_iter()
             .filter(|id| state.tasks.contains_key(id))
-            .collect();
+            .partition(|id| !state.tasks[id].domain.paused.load(Ordering::SeqCst));
+        self.inner.ready.lock().unwrap().extend(waiting);
         if runnable.is_empty() {
             let Some((&(deadline, _), _)) = state.timers.iter().next() else {
                 return false;
@@ -572,6 +575,8 @@ pub(super) struct DomainInner {
     /// How many streams each consumer label drew so far.
     pub(super) rng_streams: Mutex<BTreeMap<&'static str, u64>>,
     pub(super) closed: AtomicBool,
+    /// Stopped, as by SIGSTOP: its clocks run on, its tasks do not.
+    pub(super) paused: AtomicBool,
 }
 
 impl DomainInner {
@@ -606,7 +611,8 @@ impl Domain {
         f()
     }
 
-    /// Spawn `future` on this domain.
+    /// Spawn `future` on this domain. A crashed domain runs nothing: the
+    /// handle settles as cancelled at once.
     #[track_caller]
     pub fn spawn<T, F>(&self, future: F) -> super::TaskHandle<T>
     where
@@ -615,8 +621,18 @@ impl Domain {
     {
         let sim = self.inner.sim.upgrade().expect("the simulation is alive");
         let (handle, task) = joinable(future);
+        if self.is_crashed() {
+            drop(task);
+            return handle;
+        }
         Simulation { inner: sim }.spawn_on(&self.inner, None, Location::caller(), task);
         handle
+    }
+
+    /// Stop polling this domain's tasks, as a stopped or suspended process
+    /// runs nothing while its clocks move on; or let them run again.
+    pub fn set_paused(&self, paused: bool) {
+        self.inner.paused.store(paused, Ordering::SeqCst);
     }
 
     /// Move this domain's wall clock by `delta_ms`.

@@ -41,6 +41,9 @@ pub struct StoreFaults {
     /// Requests per thousand that the store applies and whose response is
     /// then lost.
     pub lost_response_per_mille: u32,
+    /// Requests per thousand that take ten times their drawn latency, as a
+    /// store's tail does.
+    pub slow_per_mille: u32,
 }
 
 impl Default for StoreFaults {
@@ -49,6 +52,7 @@ impl Default for StoreFaults {
             latency_ms: 5..30,
             unavailable_per_mille: 0,
             lost_response_per_mille: 0,
+            slow_per_mille: 0,
         }
     }
 }
@@ -78,6 +82,7 @@ struct StoreState {
     objects: BTreeMap<Path, Object>,
     faults: StoreFaults,
     partitioned: BTreeSet<String>,
+    blind_writes: bool,
     mutations: Vec<Mutation>,
 }
 
@@ -137,6 +142,12 @@ impl SimStore {
     }
 
     /// Cut `domain` off from the store, or reconnect it.
+    /// A planted bug: conditional writes apply whatever the object's tag,
+    /// so two nodes can both win one compare-and-swap.
+    pub fn set_blind_writes(&self, blind: bool) {
+        self.inner.lock().unwrap().blind_writes = blind;
+    }
+
     pub fn set_partitioned(&self, domain: &str, partitioned: bool) {
         let mut state = self.inner.lock().unwrap();
         if partitioned {
@@ -181,12 +192,15 @@ impl SimStore {
         let (latency, unavailable, lost) = {
             let faults = self.inner.lock().unwrap().faults.clone();
             let mut rng = asyncrt::rng("sim-store");
-            let latency = if faults.latency_ms.is_empty() {
+            let mut latency = if faults.latency_ms.is_empty() {
                 faults.latency_ms.start
             } else {
                 rng.gen_range(faults.latency_ms.clone())
             };
             let fate = rng.gen_range(0..1_000);
+            if rng.gen_range(0..1_000) < faults.slow_per_mille {
+                latency *= 10;
+            }
             let unavailable = fate < faults.unavailable_per_mille;
             let lost = !unavailable
                 && fate < faults.unavailable_per_mille + faults.lost_response_per_mille;
@@ -263,6 +277,7 @@ impl StoreState {
         stamp: &Stamp,
     ) -> object_store::Result<PutResult> {
         match (&opts.mode, self.objects.get(location)) {
+            _ if self.blind_writes => {}
             (PutMode::Overwrite, _) => {}
             (PutMode::Create, Some(_)) => {
                 return Err(object_store::Error::AlreadyExists {

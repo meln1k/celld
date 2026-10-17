@@ -139,7 +139,8 @@ A request can fail before the store applies it, or after, with its response
 lost. Each node keeps its cells on a `SimDisk`. SQLite reaches the disk
 through a VFS of its own, and the replicator through `asyncrt::fs()`. A
 process crash leaves the disk as it was, and the dead process's open files
-go inert. A power loss also takes every byte that was never synced.
+go inert. A power loss also takes every byte that was never synced, and a
+wipe takes the whole disk.
 `SimCellHost` runs scripted cells without V8 on the real replicator, so
 ownership, restore and the output gate are production code.
 `an_acknowledged_write_survives_a_power_loss` cuts a node's power in the
@@ -148,9 +149,38 @@ another node restores from the bucket. Every write the client saw
 acknowledged must come back. An output gate that acknowledges a write
 before its proof fails this test.
 
+`composed_simulation::fleet` runs three such nodes on one bucket. Clients
+append to and read six cells through any node and follow its redirects.
+Each seed draws process crashes, power losses, machines that return with an
+empty disk, pauses, partitions from the bucket, wall-clock steps, and
+failed, lost and slow store requests. Most faults land on a node that runs
+cells. A node that fences itself exits, and a supervisor restarts it. The
+checks are:
+
+- **lost-write**: a read that began after a write was acknowledged holds
+  it.
+- **fork**: any two reads of a cell agree on their common prefix, and no
+  read repeats a value.
+- **one-writer**: no two processes run a cell at one epoch.
+- **liveness**: once the faults heal, every node serves every cell.
+
+Two planted bugs must fail them. An output gate that acknowledges before
+its proof loses a write. A bucket that ignores compare-and-swap guards lets
+two nodes run one epoch. The fleet does not yet run alarms, the node log,
+or drains.
+
 ```
 RUSTFLAGS="--cfg celld_internal_tests" CARGO_TARGET_DIR=target/internal \
   CARGO_PROFILE_DEV_DEBUG=0 cargo test -p celld --lib
+```
+
+A sweep runs on demand. `CELLD_SIM_MUTATION=early-ack` or `blind-cas`
+plants a bug, and `CELLD_SIM_TRACE=1` prints a failing seed's trace:
+
+```
+CELLD_SIM_SEEDS=0..200 RUSTFLAGS="--cfg celld_internal_tests" \
+  CARGO_TARGET_DIR=target/internal CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo test -p celld --lib fleet_sweep -- --ignored --nocapture
 ```
 
 A separate target directory keeps the flagged build from evicting the normal

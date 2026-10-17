@@ -21,6 +21,9 @@ struct HostInner {
     vfs: String,
     ltx: Arc<LtxRepl>,
     cells: Mutex<BTreeMap<String, Resident>>,
+    /// A planted bug: the output gate starts the durability proof and
+    /// releases the answer without waiting for it.
+    ack_before_proof: std::sync::atomic::AtomicBool,
 }
 
 /// A started cell: its open database, and whether requests may reach it.
@@ -61,8 +64,21 @@ impl SimCellHost {
                 vfs: disk.vfs_name().to_string(),
                 ltx: Arc::new(ltx),
                 cells: Mutex::new(BTreeMap::new()),
+                ack_before_proof: Default::default(),
             }),
         })
+    }
+
+    /// Plant the early-acknowledgement bug; see `HostInner`.
+    pub fn set_ack_before_proof(&self, early: bool) {
+        self.inner
+            .ack_before_proof
+            .store(early, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The cells running here now.
+    pub fn resident_cells(&self) -> Vec<String> {
+        self.inner.cells.lock().unwrap().keys().cloned().collect()
     }
 
     fn db_path(&self, cell: &str, epoch: u64) -> PathBuf {
@@ -230,6 +246,18 @@ impl SimCellHost {
         epoch: u64,
         position: u64,
     ) -> anyhow::Result<(u64, celld_logic::ProofSource)> {
+        if self
+            .inner
+            .ack_before_proof
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let (ltx, cell) = (self.inner.ltx.clone(), cell.to_string());
+            crate::asyncrt::spawn(async move {
+                let _ = ltx.await_durable(&cell, epoch, position).await;
+            })
+            .detach();
+            return Ok((position, celld_logic::ProofSource::Bucket));
+        }
         self.inner.ltx.await_durable(cell, epoch, position).await
     }
 
