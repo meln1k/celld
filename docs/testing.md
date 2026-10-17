@@ -77,6 +77,25 @@ node after a crash). A property must survive tens of thousands of seeds, and
 the core protocols have run through millions of schedules. Deliberately broken
 protocol variants verify that the checkers detect the faults.
 
+In this repository the simulator is [`crates/sim`](../crates/sim). It runs a
+fleet of `celld-logic` cores against a simulated bucket, with a shell that
+follows `crates/celld/actor.rs` effect by effect, and checks one writer per
+epoch, no runtime without its own claim, no acknowledgement before the write is
+in its epoch's prefix, no lost acknowledged write, `State::validate` after
+every event, and that every cell serves again once the faults heal. Each seed
+draws its own mix of crashes, disk wipes, pauses and suspends, partitions,
+clock steps and skew, and bucket loss and latency.
+
+```
+cargo test -p celld-sim                                   # the suite
+cargo run -p celld-sim --profile sim -- --seeds 0..10000  # a sweep
+cargo run -p celld-sim -- --seed 17 --trace               # replay one seed
+cargo run -p celld-sim -- --seeds 0..100 --mutation shared-prefix
+```
+
+It does not yet model alarms, WebSockets, fleet durability (the node log and
+its followers), drains and adoption, or generation swaps.
+
 ## Live fleets: what simulation cannot see
 
 Simulation cannot see real S3 tail latency, real kernel and filesystem
