@@ -624,7 +624,18 @@ pub(crate) fn decode_durable_object_id(value: &str) -> Option<[u8; 32]> {
     }
     Some(output)
 }
-pub type AlarmObserver = Arc<dyn Fn(String, celld_logic::wake::AlarmSnapshot) + Send + Sync>;
+/// Whether a wake entry is known to cover a reported alarm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WakeCoverage {
+    /// A new installation, whose entry may not exist yet.
+    Unconfirmed,
+    /// Wake maintenance confirmed the entry for this installation.
+    Confirmed,
+}
+
+/// Reports an alarm installation to the core.
+pub type AlarmObserver =
+    Arc<dyn Fn(String, celld_logic::wake::AlarmSnapshot, WakeCoverage) + Send + Sync>;
 
 #[derive(Clone)]
 pub(crate) enum StopMode {

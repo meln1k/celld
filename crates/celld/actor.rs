@@ -2263,6 +2263,10 @@ impl Actor {
                 Ok(Err(error)) => tracing::warn!(%cell, %error, "wake maintenance deferred"),
                 Err(_) => tracing::warn!(%cell, "wake maintenance timed out; a later scan retries"),
             }
+            // An entry this published lets the core evict the cell, and only
+            // the shell knows it exists. A later step can fail after the PUT,
+            // so ask the flusher rather than trusting the result.
+            host.report_alarm_coverage(&cell, alarm);
         })
         .detach();
     }

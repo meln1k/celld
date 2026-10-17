@@ -216,6 +216,19 @@ impl CellHost {
         }
     }
 
+    /// Report wake coverage that maintenance just established.
+    pub(crate) fn report_alarm_coverage(
+        &self,
+        cell: &str,
+        maintained: celld_logic::wake::AlarmSnapshot,
+    ) {
+        match self {
+            Self::Engine(runtime) => runtime.report_alarm_coverage(cell, maintained),
+            #[cfg(all(test, celld_internal_tests))]
+            Self::Scripted(_) => {}
+        }
+    }
+
     pub(crate) fn abort_alarm(&self, cell: &str, op: celld_logic::OpId) {
         match self {
             Self::Engine(runtime) => runtime.abort_alarm(cell, op),
