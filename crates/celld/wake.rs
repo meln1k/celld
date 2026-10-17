@@ -9,9 +9,10 @@
 //! whose caller stopped waiting before their remote effect.
 use crate::bucket::Bucket;
 use crate::ownership_store::BucketOwnership;
-use celld_logic::wake::elected_hint_needed;
-use celld_logic::wake::parse_entry_key;
 use celld_logic::wake::WakeCore;
+use celld_logic::wake::{
+    classify_listed, due_entries, parse_entry_key, probe_hint, Listed, ProbedOwner,
+};
 use celld_logic::wake::{AlarmSnapshot, PublicationId, Retirement, ENTRY_PREFIX};
 use futures_util::stream::{self, StreamExt as _};
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,12 +47,12 @@ pub async fn due_scan(bucket: &Bucket, now_ms: i64) -> Vec<(String, i64)> {
     /// once is the thundering herd the eviction bound exists to prevent.
     const BUCKET_READ_CONCURRENCY: usize = 16;
 
-    let mut due = Vec::new();
+    let mut listed = Vec::new();
     let minutes = match bucket.common_prefixes(ENTRY_PREFIX).await {
         Ok(minutes) => minutes,
         Err(e) => {
             warn!(error = %e, "wake due scan bucket listing failed");
-            return due;
+            return Vec::new();
         }
     };
     let overdue: Vec<String> = minutes
@@ -75,17 +76,13 @@ pub async fn due_scan(bucket: &Bucket, now_ms: i64) -> Vec<(String, i64)> {
                 continue;
             }
         };
-        for object in objects {
-            if let Some(entry) = parse_entry_key(object.location.as_ref()) {
-                if entry.minute_ms <= now_ms {
-                    due.push((entry.cell, entry.minute_ms));
-                }
-            }
-        }
+        listed.extend(
+            objects
+                .iter()
+                .filter_map(|object| parse_entry_key(object.location.as_ref())),
+        );
     }
-    due.sort();
-    due.dedup_by(|a, b| a.0 == b.0);
-    due
+    due_entries(listed, now_ms)
 }
 
 /// Owner records the elected waker reads at once while it sorts the fleet's
@@ -140,17 +137,17 @@ pub(crate) async fn probe_entries(
     let mut failed = 0usize;
     let mut hinted: Vec<(String, i64)> = probed
         .into_iter()
-        .filter_map(|(cell, entry_ms, owner)| match owner {
-            Err(_) => {
-                failed += 1;
-                elected.then_some((cell, entry_ms))
-            }
-            Ok(record) => {
-                let owner = record.as_ref().and_then(|record| record.node.as_deref());
-                let owner_live = owner.is_some_and(|owner| live.contains(owner));
-                (owner == Some(node) || (elected && elected_hint_needed(owner, node, owner_live)))
-                    .then_some((cell, entry_ms))
-            }
+        .filter_map(|(cell, entry_ms, owner)| {
+            let owner = match &owner {
+                Err(_) => {
+                    failed += 1;
+                    ProbedOwner::Unread
+                }
+                Ok(record) => {
+                    ProbedOwner::Read(record.as_ref().and_then(|record| record.node.as_deref()))
+                }
+            };
+            probe_hint(owner, node, live, elected).then_some((cell, entry_ms))
         })
         .collect();
     if failed > 0 {
@@ -474,18 +471,7 @@ impl WakeFlusher {
         // Normal churn must not wait behind the fleet's bounded LIST cursor.
         // The same durable proof authorizes these exact immutable names. This
         // advisory batch can be lost or cancelled without blocking later arms.
-        let mut obsolete: BTreeSet<_> = self
-            .core
-            .lock()
-            .unwrap()
-            .take_retired(cell, proof.0)
-            .into_iter()
-            .collect();
-        if let Some(previous) = previous {
-            if let Some(at_ms) = previous.at_ms.filter(|_| proof.0.retires(previous.id)) {
-                obsolete.insert(celld_logic::wake::entry_key(at_ms, cell, previous.id));
-            }
-        }
+        let obsolete = self.core.lock().unwrap().retire(cell, proof.0, previous);
         for key in obsolete {
             if let Err(error) = bucket.delete(&key).await {
                 warn!(%cell, %key, %error, "wake eager entry delete failed; collector will retry");
@@ -643,19 +629,20 @@ impl Collector {
                 };
                 let mut refresh = None;
                 for (key, entry) in entries {
-                    if record.is_some_and(|record| record.retires(entry.id)) {
-                        // No mutation completion changes eligibility. Failure,
-                        // timeout, or task cancellation is retried by another LIST.
-                        if let Err(error) = bucket.delete(&key).await {
-                            warn!(%cell, %key, %error, "wake obsolete entry delete failed");
+                    match classify_listed(record, &entry, now_ms) {
+                        Listed::Retired => {
+                            // No mutation completion changes eligibility. Failure,
+                            // timeout, or task cancellation is retried by another LIST.
+                            if let Err(error) = bucket.delete(&key).await {
+                                warn!(%cell, %key, %error, "wake obsolete entry delete failed");
+                            }
                         }
-                    } else if entry.minute_ms <= now_ms {
-                        // Even a matching certificate can trail an unreported
-                        // consume. A bounded truth refresh also repairs that cut
-                        // after the former owner and its callback inventory vanish.
-                        // Future entries wait until their minute: refreshing them
-                        // now would reactivate every sleeping cell on each sweep.
-                        refresh = Some(refresh.unwrap_or(entry.minute_ms).min(entry.minute_ms));
+                        // A bounded truth refresh also repairs the cut after the
+                        // former owner and its callback inventory vanish.
+                        Listed::Due(minute) => {
+                            refresh = Some(refresh.unwrap_or(minute).min(minute));
+                        }
+                        Listed::Waiting => {}
                     }
                 }
                 refresh.map(|minute| (cell, minute))

@@ -7,7 +7,7 @@
 //! old DELETE cannot name a later installation. LIST, rather than successful
 //! callbacks, supplies the cleanup inventory after a lost response or restart.
 use super::Ms;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A SQLite writer epoch and its persistent, non-repeating alarm sequence.
 /// A publication always belongs to a positive ownership epoch. A listed
@@ -170,6 +170,24 @@ impl WakeCore {
         keys
     }
 
+    /// The names a proven retirement makes obsolete: every confirmed
+    /// publication it retires, and the entry `previous`, the record it
+    /// replaced, still named.
+    pub fn retire(
+        &mut self,
+        cell: &str,
+        proof: Retirement,
+        previous: Option<Retirement>,
+    ) -> BTreeSet<String> {
+        let mut obsolete: BTreeSet<String> = self.take_retired(cell, proof).into_iter().collect();
+        if let Some(previous) = previous {
+            if let Some(at_ms) = previous.at_ms.filter(|_| proof.retires(previous.id)) {
+                obsolete.insert(entry_key(at_ms, cell, previous.id));
+            }
+        }
+        obsolete
+    }
+
     pub fn forget(&mut self, cell: &str) {
         self.confirmed.remove(cell);
     }
@@ -275,6 +293,46 @@ pub fn parse_entry_key(key: &str) -> Option<ListedEntry> {
     })
 }
 
+/// The due scan's answer: one `(cell, minute)` per cell with a due entry,
+/// at its earliest due minute, in cell order.
+pub fn due_entries(
+    entries: impl IntoIterator<Item = ListedEntry>,
+    now_ms: Ms,
+) -> Vec<(String, i64)> {
+    let mut due: Vec<(String, i64)> = entries
+        .into_iter()
+        .filter(|entry| entry.minute_ms <= now_ms)
+        .map(|entry| (entry.cell, entry.minute_ms))
+        .collect();
+    due.sort();
+    due.dedup_by(|a, b| a.0 == b.0);
+    due
+}
+
+/// What the cleanup collector does with one listed entry, given its cell's
+/// retirement record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listed {
+    /// The record retires it: delete it.
+    Retired,
+    /// It stands and is due. Even a matching certificate can trail an
+    /// unreported consume, so the cell gets a truth refresh from this minute.
+    Due(i64),
+    /// It stands and waits for its minute: refreshing it now would
+    /// reactivate every sleeping cell on each sweep.
+    Waiting,
+}
+
+pub fn classify_listed(record: Option<Retirement>, entry: &ListedEntry, now_ms: Ms) -> Listed {
+    if record.is_some_and(|record| record.retires(entry.id)) {
+        Listed::Retired
+    } else if entry.minute_ms <= now_ms {
+        Listed::Due(entry.minute_ms)
+    } else {
+        Listed::Waiting
+    }
+}
+
 pub fn parse_minute_prefix(prefix: &str) -> Option<i64> {
     parse_minute(prefix.strip_prefix(ENTRY_PREFIX)?.trim_end_matches('/'))
 }
@@ -303,5 +361,28 @@ pub fn elected_hint_needed(owner: Option<&str>, node: &str, owner_live: bool) ->
         None => true,
         Some(owner) if owner == node => true,
         Some(_) => !owner_live,
+    }
+}
+
+/// What a probe learned about a due entry's owner.
+#[derive(Clone, Copy, Debug)]
+pub enum ProbedOwner<'a> {
+    /// The owner record could not be read.
+    Unread,
+    /// The record names this node, or no node.
+    Read(Option<&'a str>),
+}
+
+/// Does a probing node hint a due entry? Always for its own cell. The
+/// elected scanner also hints what `elected_hint_needed` asks for, and an
+/// entry whose owner read failed: the core's own resolution is the
+/// authority, and an entry dropped on a transient error would wait a tick.
+pub fn probe_hint(owner: ProbedOwner, node: &str, live: &BTreeSet<String>, elected: bool) -> bool {
+    match owner {
+        ProbedOwner::Unread => elected,
+        ProbedOwner::Read(owner) => {
+            let owner_live = owner.is_some_and(|owner| live.contains(owner));
+            owner == Some(node) || (elected && elected_hint_needed(owner, node, owner_live))
+        }
     }
 }
