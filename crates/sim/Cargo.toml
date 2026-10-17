@@ -1,0 +1,18 @@
+[package]
+name = "celld-sim"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94.1"
+license = "Apache-2.0"
+publish = false
+description = "Deterministic simulation of the celld coordination core"
+
+# The simulator drives `celld-logic` directly. It has no dependency beyond
+# the core, so its schedule depends only on the seed: no clock, no system
+# randomness, and no hash iteration order can reach it.
+[dependencies]
+celld-logic.workspace = true
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(celld_internal_tests)"]

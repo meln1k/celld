@@ -25,6 +25,16 @@ incremental = true
 # the shipped release profile stays stripped.
 strip = false
 debug = "line-tables-only"
+# Long simulation sweeps (`cargo run -p celld-sim --profile sim`). Optimized,
+# but keeping debug assertions, because `State::validate` runs only under
+# them, and unwinding, because the simulator reports a core panic with its
+# seed where `release` would abort.
+[profile.sim]
+inherits = "dev"
+opt-level = 2
+debug = false
+incremental = false
+
 [profile.dev.package.sha2]
 opt-level = 3
 [profile.dev.package.rsa]
