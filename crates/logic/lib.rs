@@ -1731,6 +1731,12 @@ impl State {
         Some(id)
     }
 
+    /// Neither memory pressure, a drain, nor a cell waiting for a slot
+    /// needs a resident to leave.
+    fn room_to_spare(&self) -> bool {
+        !self.shedding && !self.draining && self.capacity_waiters.is_empty()
+    }
+
     fn has_capacity(&self) -> bool {
         // Residency is a hard cap, known exactly and counted -- never sampled.
         // A node at its cell cap is at capacity, not overloaded: it refuses
@@ -5875,8 +5881,11 @@ impl State {
         // defaults to an hour, so on an alarm-driven workload this would hold
         // most of the node and pin it at its ceiling -- trading a real
         // admission failure for a saved activation. Under pressure the node
-        // takes the wake.
-        if self.alarm_is_imminent(cell) && !self.shedding && !self.draining {
+        // takes the wake, and so does a node at its resident ceiling with a
+        // cell waiting for the slot: that node has no room to spare either,
+        // and refusing here leaves the waiter parked until its deadline
+        // while every resident holds an alarm due within the window.
+        if self.alarm_is_imminent(cell) && self.room_to_spare() {
             return Err(EvictRefusal::AlarmImminent);
         }
         if self.is_active(id) {
