@@ -116,6 +116,46 @@ alarm path.
 It does not yet model WebSockets, fleet durability (the node log and its
 followers), drains and adoption, or generation swaps.
 
+### The shell on a simulated runtime
+
+`crates/sim` models the shell; the shell itself can also run simulated. Every
+clock, task, timer, random draw and filesystem call in `crates/celld` goes
+through `celld::asyncrt`, and a build with `--cfg celld_internal_tests` swaps
+the Tokio facade for a deterministic one. That build fills its harness slots,
+the `include!(env!("CELLD_INTERNAL_…"))` and `include!(env!("CELLD_CONFORMANCE_…"))`
+sites, from `crates/celld/internal/` and `crates/celld/conformance/`; a slot
+with no file there gets an empty one, and a slot set in the environment wins.
+
+The simulated facade runs every task of every node on one thread in virtual
+time. Each node is a domain with its own services, clocks, counters and
+random streams; the seed picks which ready task runs next, time jumps to the
+next timer when nothing is ready, and a crash drops a domain's tasks where
+they stand. `composed_simulation` drives real `Actor`s on it.
+
+A node can also own its cells for real. The bucket is `SimStore`, an
+in-memory object store the nodes share. It applies compare-and-swap writes,
+stamps objects with virtual time, and makes each request take seeded time.
+A request can fail before the store applies it, or after, with its response
+lost. Each node keeps its cells on a `SimDisk`. SQLite reaches the disk
+through a VFS of its own, and the replicator through `asyncrt::fs()`. A
+process crash leaves the disk as it was, and the dead process's open files
+go inert. A power loss also takes every byte that was never synced.
+`SimCellHost` runs scripted cells without V8 on the real replicator, so
+ownership, restore and the output gate are production code.
+`an_acknowledged_write_survives_a_power_loss` cuts a node's power in the
+middle of a write stream. Then either the node restarts on its own disk or
+another node restores from the bucket. Every write the client saw
+acknowledged must come back. An output gate that acknowledges a write
+before its proof fails this test.
+
+```
+RUSTFLAGS="--cfg celld_internal_tests" CARGO_TARGET_DIR=target/internal \
+  CARGO_PROFILE_DEV_DEBUG=0 cargo test -p celld --lib
+```
+
+A separate target directory keeps the flagged build from evicting the normal
+one, and dropping debug info keeps the link of the V8-sized test binary short.
+
 ## Live fleets: what simulation cannot see
 
 Simulation cannot see real S3 tail latency, real kernel and filesystem
