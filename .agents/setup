@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Amp orb setup: the Rust toolchain the release workflow pins.
+set -euo pipefail
+RUST_VERSION=1.98.1
+if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain none
+fi
+. "$HOME/.cargo/env"
+rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+rustup default "$RUST_VERSION"
