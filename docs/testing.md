@@ -86,6 +86,22 @@ every event, and that every cell serves again once the faults heal. Each seed
 draws its own mix of crashes, disk wipes, pauses and suspends, partitions,
 clock steps and skew, and bucket loss and latency.
 
+Requests also arm and clear alarms. The shell keeps the alarm row in each
+cell's content and models the handler, the wake-entry gate on a reply, wake
+maintenance and retirement, and the waker's boot, due, and cleanup scans. The
+alarm checks are:
+
+- **alarm-undiscoverable**: an acknowledged alarm has no wake entry left that
+  its retirement record does not retire.
+- **alarm-lost**: after the faults heal, a fresh node that restores from the
+  bucket alone never ran an acknowledged alarm overdue by more than a lease
+  and two scan ticks. No request wakes the cell, so only the waker can.
+- **alarm-refired**: the current owner runs an alarm again after its
+  completion was proven. A stale owner, such as one resuming from suspend
+  that judges its own lease on a monotonic clock, can rerun one. The run
+  counts that as `stale_alarm_runs` instead of failing, because alarms are
+  at least once.
+
 ```
 cargo test -p celld-sim                                   # the suite
 cargo run -p celld-sim --profile sim -- --seeds 0..10000  # a sweep
@@ -93,8 +109,12 @@ cargo run -p celld-sim -- --seed 17 --trace               # replay one seed
 cargo run -p celld-sim -- --seeds 0..100 --mutation shared-prefix
 ```
 
-It does not yet model alarms, WebSockets, fleet durability (the node log and
-its followers), drains and adoption, or generation swaps.
+Each mutation plants a protocol bug and must fail its check: `ack-before-wake-entry`,
+`retire-unproven`, `no-orphan-wake`, and `silent-wake-coverage` cover the
+alarm path.
+
+It does not yet model WebSockets, fleet durability (the node log and its
+followers), drains and adoption, or generation swaps.
 
 ## Live fleets: what simulation cannot see
 

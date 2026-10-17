@@ -86,7 +86,16 @@ fn main() {
 
 fn config_summary(config: &SimConfig) -> String {
     format!(
-        "nodes={} cells={} ttl={} sticky={} faults={:?}",
-        config.nodes, config.cells, config.ttl_ms, config.sticky_eviction, config.faults
+        "nodes={} cells={} ttl={} max_resident={} sticky={} alarms={} alarm_resident_ms={} \
+         wake_tick_ms={} faults={:?}",
+        config.nodes,
+        config.cells,
+        config.ttl_ms,
+        config.max_resident,
+        config.sticky_eviction,
+        config.alarm_probability,
+        config.alarm_resident_ms,
+        config.wake_tick_ms,
+        config.faults
     )
 }

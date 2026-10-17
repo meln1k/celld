@@ -21,14 +21,28 @@
 //! - **No local route without a runtime.** A request routed locally finds a
 //!   published runtime.
 //! - **Core invariants.** `State::validate` after every event.
+//! - **An acknowledged alarm stays discoverable.** Whenever the alarm a
+//!   restore would load was armed by an acknowledged write, the bucket holds
+//!   a wake entry for the cell that its retirement record leaves standing.
+//! - **A proven alarm never runs again on its owner.** Alarms are
+//!   at-least-once: a run whose consuming commit was never proven may repeat
+//!   on a later owner, and the simulator counts those. Once a run's commit is
+//!   verified durable at its epoch, no current owner runs that alarm
+//!   installation again. A superseded owner that still trusts its lease (a
+//!   suspended VM, whose monotonic clock stood still) can, and those runs are
+//!   counted as `stale_alarm_runs`.
 //! - **Liveness.** After the faults heal, every cell serves a write, and a
-//!   fresh node that restores every cell from the bucket alone serves it too.
+//!   fresh node that restores every cell from the bucket alone fires every
+//!   overdue alarm the bucket can find, with no request to wake its cell,
+//!   and then serves every cell.
 //!
 //! [`Mutation`] plants a known bug in the simulated shell or bucket, so the
 //! tests can show each checker catches the failure it exists for.
 //!
 //! V8 is not part of the simulation. A cell is a scripted handler that
-//! commits writes, runs for a while, and answers through the output gate.
+//! commits writes, sets or deletes its alarm, runs for a while, and answers
+//! through the output gate; its alarm handler consumes the alarm, re-arms
+//! it, or fails into the retry backoff.
 
 mod rng;
 mod store;
@@ -57,27 +71,37 @@ pub enum Mutation {
     IgnoreCasGuard,
     /// `AwaitDurable` reports the position durable before any upload.
     AckBeforeUpload,
+    /// An event that armed an alarm answers without waiting for the alarm's
+    /// wake-entry PUT.
+    AckBeforeWakeEntry,
+    /// Wake maintenance retires older entries without first proving the new
+    /// alarm state durable or reading the owner record.
+    RetireUnproven,
+    /// The elected waker hints only cells its own node owns, so nothing
+    /// brings a dead owner's cell back for its alarm.
+    NoOrphanWake,
+    /// Wake maintenance never tells the core it published an entry, so a
+    /// restored alarm pins its cell until some request finishes.
+    SilentWakeCoverage,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 5] = [
+    pub const ALL: [Mutation; 9] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
         Mutation::IgnoreCasGuard,
         Mutation::AckBeforeUpload,
+        Mutation::AckBeforeWakeEntry,
+        Mutation::RetireUnproven,
+        Mutation::NoOrphanWake,
+        Mutation::SilentWakeCoverage,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "none" => Mutation::None,
-            "skip-verify-ownership" => Mutation::SkipVerifyOwnership,
-            "reuse-older-snapshot" => Mutation::ReuseOlderSnapshot,
-            "shared-prefix" => Mutation::SharedPrefix,
-            "ignore-cas-guard" => Mutation::IgnoreCasGuard,
-            "ack-before-upload" => Mutation::AckBeforeUpload,
-            _ => return None,
-        })
+        std::iter::once(Mutation::None)
+            .chain(Mutation::ALL)
+            .find(|mutation| mutation.name() == name)
     }
 
     pub fn name(self) -> &'static str {
@@ -88,6 +112,10 @@ impl Mutation {
             Mutation::SharedPrefix => "shared-prefix",
             Mutation::IgnoreCasGuard => "ignore-cas-guard",
             Mutation::AckBeforeUpload => "ack-before-upload",
+            Mutation::AckBeforeWakeEntry => "ack-before-wake-entry",
+            Mutation::RetireUnproven => "retire-unproven",
+            Mutation::NoOrphanWake => "no-orphan-wake",
+            Mutation::SilentWakeCoverage => "silent-wake-coverage",
         }
     }
 }
@@ -104,6 +132,12 @@ pub struct SimConfig {
     pub settle_ms: u64,
     pub request_gap_ms: (u64, u64),
     pub write_probability: f64,
+    /// The share of writes that also set or delete the cell's alarm.
+    pub alarm_probability: f64,
+    /// `alarm_resident_ms`: an alarm due this soon holds its cell resident.
+    pub alarm_resident_ms: u64,
+    /// `CELLD_WAKER_TICK_MS`: the due scan and collector period.
+    pub wake_tick_ms: u64,
     pub max_resident: usize,
     pub max_activations: usize,
     pub sticky_eviction: bool,
@@ -176,6 +210,9 @@ impl SimConfig {
             settle_ms: 12_000,
             request_gap_ms: (5, 60),
             write_probability: 0.6,
+            alarm_probability: 0.3,
+            alarm_resident_ms: 1_000,
+            wake_tick_ms: 1_000,
             max_resident: 4,
             max_activations: 4,
             sticky_eviction: true,
@@ -220,7 +257,7 @@ impl SimConfig {
             store_spike_ms: rng.range(500, 4_000),
             store_timeout_ms: rng.range(1_000, 6_000),
         };
-        Self {
+        let mut config = Self {
             nodes: rng.range(2, 5) as usize,
             cells: rng.range(2, 10) as usize,
             ttl_ms,
@@ -228,6 +265,9 @@ impl SimConfig {
             settle_ms: 4 * ttl_ms,
             request_gap_ms: (2, rng.range(20, 120)),
             write_probability: 0.6,
+            alarm_probability: 0.0,
+            alarm_resident_ms: 0,
+            wake_tick_ms: 0,
             max_resident: rng.range(2, 8) as usize,
             max_activations: rng.range(1, 4) as usize,
             sticky_eviction: rng.chance(0.5),
@@ -244,7 +284,12 @@ impl SimConfig {
             faults,
             mutation: Mutation::None,
             trace: false,
-        }
+        };
+        // Drawn last, so the draws above stay what they were before alarms.
+        config.alarm_probability = *rng.pick(&[0.1, 0.3, 0.6]).unwrap();
+        config.alarm_resident_ms = *rng.pick(&[0, 2_000, 3_600_000]).unwrap();
+        config.wake_tick_ms = *rng.pick(&[500, 1_000, 3_000]).unwrap();
+        config
     }
 }
 
@@ -280,6 +325,29 @@ pub struct Stats {
     pub stale_uploads: u64,
     /// Publishes that found the cell already published by another process.
     pub concurrent_serving: u64,
+    /// Writes that installed an alarm.
+    pub alarms_armed: u64,
+    /// Alarm handler runs.
+    pub alarms_fired: u64,
+    /// Runs of an alarm installation that had already run: at-least-once.
+    pub alarm_reruns: u64,
+    /// Handler commits proven durable at their epoch.
+    pub alarms_settled: u64,
+    /// Runs of an already proven alarm by a superseded owner.
+    pub stale_alarm_runs: u64,
+    /// Failed handlers rescheduled by the retry backoff.
+    pub alarm_retries: u64,
+    /// Overdue alarms in the bucket that were never acknowledged or
+    /// published, which the protocol does not promise to find.
+    pub alarms_stranded: u64,
+    /// Wake-entry PUTs that reached the bucket.
+    pub wake_entries: u64,
+    /// Retirement records advanced.
+    pub wake_retirements: u64,
+    /// Wake hints delivered to a core.
+    pub wake_hints: u64,
+    /// Alarms the audit node fired from the bucket alone, with no request.
+    pub audit_alarm_runs: u64,
 }
 
 impl Stats {
@@ -305,6 +373,17 @@ impl Stats {
             evictions_requested,
             stale_uploads,
             concurrent_serving,
+            alarms_armed,
+            alarms_fired,
+            alarm_reruns,
+            alarms_settled,
+            stale_alarm_runs,
+            alarm_retries,
+            alarms_stranded,
+            wake_entries,
+            wake_retirements,
+            wake_hints,
+            audit_alarm_runs,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -325,6 +404,17 @@ impl Stats {
         self.evictions_requested += evictions_requested;
         self.stale_uploads += stale_uploads;
         self.concurrent_serving += concurrent_serving;
+        self.alarms_armed += alarms_armed;
+        self.alarms_fired += alarms_fired;
+        self.alarm_reruns += alarm_reruns;
+        self.alarms_settled += alarms_settled;
+        self.stale_alarm_runs += stale_alarm_runs;
+        self.alarm_retries += alarm_retries;
+        self.alarms_stranded += alarms_stranded;
+        self.wake_entries += wake_entries;
+        self.wake_retirements += wake_retirements;
+        self.wake_hints += wake_hints;
+        self.audit_alarm_runs += audit_alarm_runs;
     }
 }
 

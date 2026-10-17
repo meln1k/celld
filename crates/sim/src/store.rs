@@ -2,12 +2,13 @@
 //!
 //! It provides exactly what `docs/guarantees.md` requires of a real one and
 //! nothing more: conditional create and conditional overwrite on ETags,
-//! read-after-write consistency, and unconditional PUTs for replica data.
-//! Every operation is applied atomically at one simulated instant; the
-//! latency and loss around that instant belong to the world.
+//! read-after-write consistency, and unconditional PUTs for replica data
+//! and wake entries. Every operation is applied atomically at one simulated
+//! instant; the latency and loss around that instant belong to the world.
 
+use celld_logic::wake::{parse_entry_key, Retirement};
 use celld_logic::{CasGuard, CasOutcome, Epoch, LeaseCasOutcome, NodeLeaseRecord, OwnerRecord};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{Mutation, ProcId, WriteId};
 
@@ -73,6 +74,12 @@ pub struct Store {
     leases: BTreeMap<String, LeaseEntry>,
     prefixes: BTreeMap<(String, Epoch), Prefix>,
     pub claims: Vec<Claim>,
+    /// `wake/entries/<minute>/<cell>/<identity>`, by full key.
+    wake_entries: BTreeSet<String>,
+    /// `wake/retired/<cell>.json`: the retirement frontier and its ETag.
+    retirements: BTreeMap<String, (Retirement, u64)>,
+    /// `wake/waker.json`: the advisory waker role.
+    waker: Option<(String, i64, u64)>,
 }
 
 impl Store {
@@ -84,6 +91,9 @@ impl Store {
             leases: BTreeMap::new(),
             prefixes: BTreeMap::new(),
             claims: Vec::new(),
+            wake_entries: BTreeSet::new(),
+            retirements: BTreeMap::new(),
+            waker: None,
         }
     }
 
@@ -257,5 +267,67 @@ impl Store {
 
     pub fn prefix(&self, cell: &str, epoch: Epoch) -> Option<&Prefix> {
         self.prefixes.get(&self.prefix_key(cell, epoch))
+    }
+
+    pub fn put_wake_entry(&mut self, key: &str) {
+        self.wake_entries.insert(key.to_string());
+    }
+
+    pub fn delete_wake_entry(&mut self, key: &str) {
+        self.wake_entries.remove(key);
+    }
+
+    pub fn wake_entries(&self) -> Vec<String> {
+        self.wake_entries.iter().cloned().collect()
+    }
+
+    pub fn read_retirement(&self, cell: &str) -> Option<(Retirement, u64)> {
+        self.retirements.get(cell).copied()
+    }
+
+    /// `put_cas` on `wake/retired/<cell>.json`: `None` creates only if
+    /// absent, `Some(etag)` overwrites only that version.
+    pub fn cas_retirement(
+        &mut self,
+        cell: &str,
+        guard: Option<u64>,
+        retirement: Retirement,
+    ) -> bool {
+        let current = self.retirements.get(cell).map(|(_, etag)| *etag);
+        let guard = guard.map_or(CasGuard::Absent, |etag| CasGuard::Match(etag.to_string()));
+        if !self.guard_matches(&guard, current) {
+            return false;
+        }
+        let etag = self.etag();
+        self.retirements
+            .insert(cell.to_string(), (retirement, etag));
+        true
+    }
+
+    /// `try_hold_waker`'s read and conditional write, applied as one step:
+    /// the role is advisory, so nothing depends on the two halves racing.
+    pub fn claim_waker(&mut self, node: &str, now_ms: i64, ttl_ms: i64) -> bool {
+        let may = match &self.waker {
+            None => true,
+            Some((holder, expires_ms, _)) => {
+                celld_logic::wake::waker_may_claim(holder == node, *expires_ms, now_ms)
+            }
+        };
+        if may {
+            let etag = self.etag();
+            self.waker = Some((node.to_string(), now_ms + ttl_ms, etag));
+        }
+        may
+    }
+
+    /// Whether the collector can still find this cell: some wake entry for
+    /// it that its retirement record does not retire.
+    pub fn discoverable(&self, cell: &str) -> bool {
+        let retirement = self.retirements.get(cell).map(|(record, _)| *record);
+        self.wake_entries.iter().any(|key| {
+            parse_entry_key(key).is_some_and(|entry| {
+                entry.cell == cell && !retirement.is_some_and(|record| record.retires(entry.id))
+            })
+        })
     }
 }
