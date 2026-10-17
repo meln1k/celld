@@ -5122,6 +5122,14 @@ impl State {
                 // node that has already decided it has no room. Publishing it
                 // as unowned is what turns an eviction into shed load.
                 if rebalance {
+                    // A request can reactivate a cell whose earlier release is
+                    // still in flight, and this stop can then end the second
+                    // residency first. The new release supersedes the old
+                    // one: retire its index entry, so its late answer finds
+                    // nothing to settle instead of an op no slot owns.
+                    if let Some(stale) = cell.releasing.take() {
+                        self.cell_ops.remove(&stale);
+                    }
                     let op = self.cell_op(&id);
                     cell.releasing = Some(op);
                     self.releasing_cells.insert(id.clone());

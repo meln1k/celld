@@ -1,0 +1,261 @@
+//! Scripted reproductions of core bugs the deterministic simulator
+//! (`crates/sim`) found. Each drives the core through a minimal shell that
+//! answers every effect at once, except the ones a test holds back to
+//! recreate the interleaving.
+//!
+//! `State::validate` runs after every event in debug builds, which is what
+//! these tests rely on; they also call it directly so a release build still
+//! checks the final state.
+
+use celld_logic::{
+    on_event, pressure, CasOutcome, Config, Effect, Event, LeaseCasOutcome, LocalCell,
+    NodeLeaseSpec, OwnerRecord, OwnershipOnEvict, RestoreOutcome, State, Timer,
+};
+use std::collections::{BTreeMap, VecDeque};
+
+const NOW_MS: u64 = 1_800_000_000_000;
+const MONO_MS: u64 = 1_000;
+const TTL_MS: u64 = 10_000;
+
+fn config(max_resident: usize) -> Config {
+    Config {
+        max_resident,
+        max_activations: 4,
+        max_evictions: 2,
+        max_releases: 2,
+        max_outbound_websockets: 32,
+        ownership_on_evict: OwnershipOnEvict::Release,
+        require_node_lease: true,
+        peer_protocol: 1,
+        operation_deadline_ms: Some(15_000),
+        owner_log_recovery_backoff_ms: 1_000,
+        owner_log_recovery_attempts: 240,
+        alarm_resident_ms: 3_600_000,
+        idle_evict_ms: None,
+        pressure: pressure::PressureConfig::from_limits(None, Some(0)),
+    }
+}
+
+/// A shell that completes every effect immediately against an in-memory
+/// ownership table, except those `hold` selects, which it keeps unanswered.
+struct Shell {
+    state: State,
+    owners: BTreeMap<String, OwnerRecord>,
+    next_etag: u64,
+    local_cells: Vec<LocalCell>,
+    hold: fn(&Effect) -> bool,
+    held: Vec<Effect>,
+    timers: Vec<Timer>,
+}
+
+impl Shell {
+    fn new(max_resident: usize, hold: fn(&Effect) -> bool) -> Self {
+        Self {
+            state: State::new("n0", config(max_resident)),
+            owners: BTreeMap::new(),
+            next_etag: 1,
+            local_cells: Vec::new(),
+            hold,
+            held: Vec::new(),
+            timers: Vec::new(),
+        }
+    }
+
+    fn start(&mut self) {
+        self.send(Event::StartNodeLease {
+            now_ms: NOW_MS,
+            now_mono_ms: MONO_MS,
+            spec: NodeLeaseSpec {
+                addr: "n0".into(),
+                peer_protocol: 1,
+                generation: "g1".into(),
+                resume_generation: None,
+                ttl_ms: TTL_MS,
+            },
+        });
+        assert!(self.state.node_authoritative());
+    }
+
+    fn send(&mut self, event: Event) -> Vec<Effect> {
+        let mut seen = Vec::new();
+        let mut queue = VecDeque::from([event]);
+        while let Some(event) = queue.pop_front() {
+            for effect in on_event(&mut self.state, event) {
+                self.state.validate().expect("state invariant");
+                if (self.hold)(&effect) {
+                    self.held.push(effect.clone());
+                } else if let Some(reply) = self.answer(&effect) {
+                    queue.push_back(reply);
+                }
+                seen.push(effect);
+            }
+            self.state.validate().expect("state invariant");
+        }
+        seen
+    }
+
+    fn answer(&mut self, effect: &Effect) -> Option<Event> {
+        Some(match effect.clone() {
+            Effect::ScheduleTimer { timer, .. } => {
+                self.timers.push(timer);
+                return None;
+            }
+            Effect::ReadSelfNodeLease { op } => Event::SelfNodeLeaseRead {
+                op,
+                now_ms: NOW_MS,
+                now_mono_ms: MONO_MS,
+                result: Ok(None),
+            },
+            Effect::CasNodeLease { op, .. } => Event::NodeLeaseCasCompleted {
+                op,
+                now_mono_ms: MONO_MS,
+                result: Ok(LeaseCasOutcome::Applied {
+                    etag: "lease".into(),
+                }),
+                stamped_log_state: None,
+            },
+            // A fleet of one: no peer can take a cell this node cannot hold.
+            Effect::ReadCapacityPeers { op, .. } => Event::CapacityPeersRead {
+                op,
+                now_ms: NOW_MS,
+                result: Ok(Vec::new()),
+            },
+            Effect::ReadLocalCells => Event::LocalCellsRead {
+                result: Ok(self.local_cells.clone()),
+            },
+            Effect::ReadOwner { op, cell } => Event::OwnerRead {
+                op,
+                now_ms: NOW_MS,
+                result: Ok(self.owners.get(&cell).cloned()),
+            },
+            Effect::CasOwner {
+                op, cell, epoch, ..
+            } => {
+                let etag = self.etag();
+                self.owners.insert(
+                    cell,
+                    OwnerRecord {
+                        node: Some("n0".into()),
+                        epoch,
+                        etag,
+                    },
+                );
+                Event::OwnerCasCompleted {
+                    op,
+                    result: Ok(CasOutcome::Applied),
+                }
+            }
+            Effect::ReleaseOwner { op, cell, epoch } => {
+                let current = self.owners.get(&cell).cloned();
+                let applies = current.is_some_and(|record| {
+                    record.node.as_deref() == Some("n0") && record.epoch == epoch
+                });
+                if applies {
+                    let etag = self.etag();
+                    self.owners.insert(
+                        cell,
+                        OwnerRecord {
+                            node: None,
+                            epoch,
+                            etag,
+                        },
+                    );
+                }
+                Event::OwnerReleased {
+                    op,
+                    result: Ok(if applies {
+                        CasOutcome::Applied
+                    } else {
+                        CasOutcome::Rejected
+                    }),
+                }
+            }
+            Effect::Restore { op, .. } => Event::RestoreCompleted {
+                op,
+                result: Ok(RestoreOutcome {
+                    restored: false,
+                    alarm: None,
+                }),
+            },
+            Effect::StartRuntime { op, .. } => Event::RuntimeStarted {
+                op,
+                isolate: None,
+                generation: self.state.current_generation(),
+                result: Ok(()),
+            },
+            Effect::Publish { op, .. } => Event::Published { op, result: Ok(()) },
+            Effect::EnsureDurable { op, .. } => Event::DurabilityChecked { op, result: Ok(()) },
+            Effect::StopRuntime { op, .. } => Event::RuntimeStopped { op },
+            Effect::Complete { .. }
+            | Effect::Release { .. }
+            | Effect::Halt { .. }
+            | Effect::ReconcileWakeEntry { .. }
+            | Effect::EvictionAdmission { .. }
+            | Effect::EvictionFinished { .. } => return None,
+            other => panic!("unexpected effect {other:?}"),
+        })
+    }
+
+    fn etag(&mut self) -> String {
+        self.next_etag += 1;
+        self.next_etag.to_string()
+    }
+
+    /// Route one request locally and finish its activity.
+    fn serve(&mut self, request: u64, cell: &str) {
+        let effects = self.send(Event::RequestAt {
+            request,
+            cell: cell.into(),
+            now_mono_ms: MONO_MS,
+        });
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Complete { request: r, result: Ok(celld_logic::Route::Local) } if *r == request
+            )),
+            "request {request} was not served locally: {effects:?}"
+        );
+        self.send(Event::ActivityFinished { request });
+    }
+}
+
+/// A full node sheds a resident to admit another cell, and with
+/// `ownership_on_evict = Release` the shed publishes the record as unowned.
+/// A request reactivates the shed cell while that release is still in
+/// flight, and a second shed ends the new residency first. The second
+/// release used to overwrite the first in the cell without retiring it from
+/// the operation index: `validate` failed, and release builds leaked the
+/// entry.
+#[test]
+fn a_second_release_supersedes_one_still_in_flight() {
+    let releases_of = |held: &[Effect], cell: &str| {
+        held.iter()
+            .filter(|effect| matches!(effect, Effect::ReleaseOwner { cell: c, .. } if c == cell))
+            .count()
+    };
+    let mut shell = Shell::new(1, |effect| matches!(effect, Effect::ReleaseOwner { .. }));
+    shell.start();
+    shell.serve(1, "a");
+    shell.serve(2, "b");
+    assert_eq!(releases_of(&shell.held, "a"), 1, "admitting b sheds a");
+    shell.serve(3, "a");
+    shell.serve(4, "b");
+    assert_eq!(
+        releases_of(&shell.held, "a"),
+        2,
+        "a is shed again while its first release is in flight"
+    );
+
+    // The store applies them in order: a's first release finds its epoch
+    // superseded, and every later one releases its record.
+    let held = std::mem::take(&mut shell.held);
+    shell.hold = |_| false;
+    for effect in held {
+        if let Some(reply) = shell.answer(&effect) {
+            shell.send(reply);
+        }
+    }
+    shell.state.validate().expect("state invariant");
+    assert_eq!(shell.owners["a"].node, None);
+    assert_eq!(shell.owners["a"].epoch, 2);
+}
