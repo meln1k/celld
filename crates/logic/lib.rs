@@ -6653,6 +6653,11 @@ impl State {
                 self.cell_ops.remove(&op);
             }
             set_phase(&mut self.occupied, &mut cell, Phase::Fenced);
+            // A startup confirmation read cannot settle a fenced cell: its
+            // answer is stale on arrival, and the node is halting.
+            if std::mem::take(&mut cell.confirming) {
+                self.settle_confirmation(&id);
+            }
             cell.waiting_for = None;
             cell.waiting_activation = None;
             cell.alarm = None;
