@@ -13,14 +13,27 @@
 //! their fsyncs, bundles the same rows to the bucket, and a takeover of a
 //! dead session's cells recovers its log first.
 //!
+//! Half the swarm also stops nodes on purpose ([`Lifecycle`]). A drain
+//! claims the fleet's drain token, sends `ReleaseAll`, and hands each cell
+//! to a peer, which claims it before it answers. A preserve keeps the
+//! owner records and leaves a clean-reload certificate that the next
+//! process on the node resumes from. Nodes also give idle cells to peers
+//! below their share of the fleet.
+//!
 //! What it checks:
 //!
 //! - **One writer per epoch.** No two processes run a runtime for, or
 //!   upload into, the same cell epoch.
 //! - **No runtime without a claim.** A process starts a runtime only at an
-//!   epoch its own ownership compare-and-swap installed.
+//!   epoch its own ownership compare-and-swap installed. A clean reload
+//!   continues its predecessor's claims and its writer.
+//! - **No handoff without a claim.** A successor accepts a cell only at an
+//!   epoch a compare-and-swap installed for its node.
+//! - **A finished drain owns nothing.** A node that reports its drain done
+//!   holds no owner record its core still holds the cell at.
 //! - **No lost acknowledged write.** Every restore at epoch `E` contains every
-//!   write acknowledged at an epoch below `E`.
+//!   write acknowledged at an epoch below `E`, and a clean reload that
+//!   resumes `E` holds every write acknowledged at `E` before it.
 //! - **No acknowledgement before durability.** An acknowledged write is in
 //!   its epoch's bucket prefix at the instant it is acknowledged, or in a
 //!   bundle its session's recovery will read, or fsynced by every follower
@@ -106,10 +119,21 @@ pub enum Mutation {
     /// A follower accepts appends at or below its seal mark, so a fenced
     /// leader keeps completing fleet proofs after recovery cut its log.
     AppendAfterSeal,
+    /// The graceful seal skips the retained bundle scan, so a sealed record
+    /// orphans the acknowledged rows of a cell that left without uploading.
+    SealOverBundles,
+    /// A clean reload keeps the live database of every cell the node no
+    /// longer holds, so the successor resumes an epoch its node gave up.
+    ResumeStaleLive,
+    /// A successor answers a handoff at the next epoch without claiming it.
+    AcceptUnclaimed,
+    /// A drain counts as finished as soon as it releases everything,
+    /// without waiting for the releases to land.
+    DrainEarly,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 12] = [
+    pub const ALL: [Mutation; 16] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
@@ -122,6 +146,10 @@ impl Mutation {
         Mutation::AckOneFollower,
         Mutation::SkipLogRecovery,
         Mutation::AppendAfterSeal,
+        Mutation::SealOverBundles,
+        Mutation::ResumeStaleLive,
+        Mutation::AcceptUnclaimed,
+        Mutation::DrainEarly,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -145,6 +173,10 @@ impl Mutation {
             Mutation::AckOneFollower => "ack-one-follower",
             Mutation::SkipLogRecovery => "skip-log-recovery",
             Mutation::AppendAfterSeal => "append-after-seal",
+            Mutation::SealOverBundles => "seal-over-bundles",
+            Mutation::ResumeStaleLive => "resume-stale-live",
+            Mutation::AcceptUnclaimed => "accept-unclaimed",
+            Mutation::DrainEarly => "drain-early",
         }
     }
 }
@@ -176,10 +208,45 @@ pub struct SimConfig {
     /// followers and flushes them to the bucket in bundles. Off, every proof
     /// is a per-cell upload.
     pub fleet: bool,
+    pub lifecycle: Lifecycle,
     pub faults: Faults,
     pub mutation: Mutation,
     /// Keep a human-readable trace of every event and effect.
     pub trace: bool,
+}
+
+/// How nodes leave the fleet on purpose, and how ownership moves between
+/// the ones that stay.
+#[derive(Clone, Debug)]
+pub struct Lifecycle {
+    /// Graceful shutdowns per simulated minute across the fleet, during the
+    /// chaos window. Zero leaves every node to run until it crashes.
+    pub shutdowns: f64,
+    /// The share of shutdowns that preserve ownership for a same-node
+    /// reload (`/shutdown?handoff=preserve`); the rest drain, handing every
+    /// cell to a peer.
+    pub preserve_probability: f64,
+    /// Each node gives idle cells to peers below their share of the fleet
+    /// (`CELLD_REBALANCE_INTERVAL_MS`).
+    pub rebalance: bool,
+}
+
+impl Lifecycle {
+    /// No shutdowns and no balancing: cells move only by eviction, crash
+    /// and takeover.
+    pub fn off() -> Self {
+        Self {
+            shutdowns: 0.0,
+            preserve_probability: 0.0,
+            rebalance: false,
+        }
+    }
+
+    /// Whether processes accept a signed handoff from a draining or
+    /// balancing peer.
+    pub fn hands_off(&self) -> bool {
+        self.shutdowns > 0.0 || self.rebalance
+    }
 }
 
 /// Fault rates, per simulated minute across the whole fleet, and the bucket's
@@ -252,6 +319,7 @@ impl SimConfig {
             idle_evict_ms: None,
             evict_gap_ms: Some((200, 2_000)),
             fleet: false,
+            lifecycle: Lifecycle::off(),
             faults: Faults::none(),
             mutation: Mutation::None,
             trace: false,
@@ -316,6 +384,7 @@ impl SimConfig {
                 None
             },
             fleet: false,
+            lifecycle: Lifecycle::off(),
             faults,
             mutation: Mutation::None,
             trace: false,
@@ -325,6 +394,13 @@ impl SimConfig {
         config.alarm_resident_ms = *rng.pick(&[0, 2_000, 3_600_000]).unwrap();
         config.wake_tick_ms = *rng.pick(&[500, 1_000, 3_000]).unwrap();
         config.fleet = rng.chance(0.5);
+        if rng.chance(0.5) {
+            config.lifecycle = Lifecycle {
+                shutdowns: rng.range(1, 4) as f64,
+                preserve_probability: *rng.pick(&[0.0, 0.5, 1.0]).unwrap(),
+                rebalance: rng.chance(0.5),
+            };
+        }
         config
     }
 }
@@ -399,6 +475,18 @@ pub struct Stats {
     /// Acknowledged writes lost because every disk that held them was
     /// wiped, which no protocol can recover.
     pub fleet_losses_excused: u64,
+    /// Graceful shutdowns begun.
+    pub shutdowns: u64,
+    /// Shutdowns whose drain released every cell before the process exited.
+    pub drains: u64,
+    /// Processes that started from a clean-reload certificate.
+    pub clean_reloads: u64,
+    /// Balancing batches the core was asked to move.
+    pub rebalances: u64,
+    /// Handoff requests a donor sent to a successor.
+    pub handoff_requests: u64,
+    /// Handoffs a successor acknowledged.
+    pub handoffs_accepted: u64,
 }
 
 impl Stats {
@@ -442,6 +530,12 @@ impl Stats {
             log_recoveries,
             log_loss_records,
             fleet_losses_excused,
+            shutdowns,
+            drains,
+            clean_reloads,
+            rebalances,
+            handoff_requests,
+            handoffs_accepted,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -480,6 +574,12 @@ impl Stats {
         self.log_recoveries += log_recoveries;
         self.log_loss_records += log_loss_records;
         self.fleet_losses_excused += fleet_losses_excused;
+        self.shutdowns += shutdowns;
+        self.drains += drains;
+        self.clean_reloads += clean_reloads;
+        self.rebalances += rebalances;
+        self.handoff_requests += handoff_requests;
+        self.handoffs_accepted += handoffs_accepted;
     }
 }
 

@@ -103,6 +103,10 @@ impl World {
         let Some(&id) = self.work_rng.pick(&live) else {
             return;
         };
+        if self.preserving(id) {
+            // The actor refuses an eviction once a preserve began.
+            return;
+        }
         let residents = self.procs[&id].state.residents();
         if let Some(cell) = self.work_rng.pick(&residents).cloned() {
             self.stats.evictions_requested += 1;

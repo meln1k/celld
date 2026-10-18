@@ -57,6 +57,11 @@ pub(super) struct Checker {
     acks: Vec<Ack>,
     restores: Vec<RestoreRecord>,
     runtime_owner: BTreeMap<(String, Epoch), ProcId>,
+    /// Each process that resumed from a clean-reload certificate, and the
+    /// process that left it. A successor continues its predecessor's epochs
+    /// as the same writer: the predecessor has exited, and the lease CAS
+    /// that replaced its exact generation is the handover.
+    predecessors: BTreeMap<ProcId, ProcId>,
     /// Alarm installations the protocol owes a run: armed by a write a
     /// client saw acknowledged, or by the proven commit of a handler that
     /// ran such an alarm.
@@ -89,8 +94,25 @@ impl Checker {
     // -----------------------------------------------------------------------
     // One writer per epoch
 
-    /// A PUT landed in a cell epoch's prefix, from `writers` processes so far.
-    pub(super) fn on_upload(&mut self, view: View, cell: &str, epoch: Epoch, writers: usize) {
+    /// The first process of `id`'s clean-reload line.
+    fn lineage(&self, mut id: ProcId) -> ProcId {
+        while let Some(predecessor) = self.predecessors.get(&id) {
+            id = *predecessor;
+        }
+        id
+    }
+
+    /// `successor` starts from the clean-reload certificate `predecessor`
+    /// left on its way out.
+    pub(super) fn on_clean_reload(&mut self, predecessor: ProcId, successor: ProcId) {
+        self.predecessors.insert(successor, predecessor);
+    }
+
+    /// A PUT landed in a cell epoch's prefix from `writers`; a clean reload
+    /// continues its predecessor's writer.
+    pub(super) fn on_upload(&mut self, view: View, cell: &str, epoch: Epoch, writers: &[ProcId]) {
+        let lines: BTreeSet<ProcId> = writers.iter().map(|id| self.lineage(*id)).collect();
+        let writers = lines.len();
         if writers > 1 {
             self.flag(
                 view.t,
@@ -107,7 +129,7 @@ impl Checker {
     pub(super) fn on_runtime_start(&mut self, view: View, id: ProcId, cell: &str, epoch: Epoch) {
         let key = (cell.to_string(), epoch);
         match self.runtime_owner.get(&key) {
-            Some(other) if *other != id => {
+            Some(other) if self.lineage(*other) != self.lineage(id) => {
                 let other = *other;
                 self.flag(
                     view.t,
@@ -120,17 +142,68 @@ impl Checker {
                 self.runtime_owner.insert(key, id);
             }
         }
-        let claimed = view
-            .store
-            .claims
-            .iter()
-            .any(|claim| claim.cell == cell && claim.epoch == epoch && claim.proc == id);
+        let line = self.lineage(id);
+        let claimed = view.store.claims.iter().any(|claim| {
+            claim.cell == cell && claim.epoch == epoch && self.lineage(claim.proc) == line
+        });
         if !claimed {
             self.flag(
                 view.t,
                 "unclaimed-runtime",
                 format!("{cell}/{epoch}/{id}"),
                 format!("p{id} started {cell} epoch {epoch} without an applied claim of its own"),
+            );
+        }
+    }
+
+    /// A successor on `node` answered a handoff: a claim for its node
+    /// installed `epoch`. Owner records name nodes, so a restarted process
+    /// holds what its node's earlier processes claimed once it confirms
+    /// the record.
+    pub(super) fn on_handoff_accepted(
+        &mut self,
+        view: View,
+        id: ProcId,
+        node: &str,
+        cell: &str,
+        epoch: Epoch,
+    ) {
+        let claimed = view
+            .store
+            .claims
+            .iter()
+            .any(|claim| claim.cell == cell && claim.epoch == epoch && claim.node == node);
+        if !claimed {
+            self.flag(
+                view.t,
+                "unclaimed-handoff",
+                format!("{cell}/{epoch}/{id}"),
+                format!(
+                    "p{id} accepted {cell} at epoch {epoch} without an applied claim for {node}"
+                ),
+            );
+        }
+    }
+
+    /// `node` finished a drain while its core still holds `held` at the
+    /// epochs their owner records name. A drained node released everything
+    /// it owned, so a successor would wait out its lease for each of them.
+    /// A cell the core gave up without a release, such as one whose
+    /// ownership read failed, keeps its record for lease-expiry recovery.
+    pub(super) fn on_drained(&mut self, view: View, node: &str, held: &[String]) {
+        let held: Vec<&String> = held
+            .iter()
+            .filter(|cell| !self.fleet.excused_cell(cell))
+            .collect();
+        if let Some(cell) = held.first() {
+            self.flag(
+                view.t,
+                "drain-left-owner",
+                format!("{node}/{cell}"),
+                format!(
+                    "{node} finished its drain while {} owner record(s) still name it, first {cell}",
+                    held.len()
+                ),
             );
         }
     }
@@ -245,7 +318,12 @@ impl Checker {
             let missing: Vec<&&Ack> = cell_acks
                 .iter()
                 .filter(|ack| {
-                    ack.epoch < restore.epoch
+                    // A resume continues its epoch, so it holds that
+                    // epoch's acknowledged writes too.
+                    let resumed = restore.source == "resume"
+                        && ack.epoch == restore.epoch
+                        && ack.t <= restore.t;
+                    (ack.epoch < restore.epoch || resumed)
                         && !restore.content.contains(&ack.write)
                         && !self.fleet.excused(ack.write)
                 })

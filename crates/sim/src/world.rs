@@ -13,14 +13,17 @@
 //! too. Each part of the shell has its module: [`process`], the effects in
 //! [`shell`], the bucket calls in [`store_rpc`], databases and their
 //! replication in [`replica`], [`requests`], [`clients`], [`faults`] and
-//! the phases, alarms and their wake entries in [`alarms`], and the fleet
-//! durability tier in [`node_log`]. The checkers in [`checks`] only read
-//! what the shell reports.
+//! the phases, alarms and their wake entries in [`alarms`], the fleet
+//! durability tier in [`node_log`], graceful shutdowns and balancing in
+//! [`lifecycle`], and the handoff of released cells in [`handoff`]. The
+//! checkers in [`checks`] only read what the shell reports.
 
 mod alarms;
 mod checks;
 mod clients;
 mod faults;
+mod handoff;
+mod lifecycle;
 mod node_log;
 mod process;
 mod replica;
@@ -35,8 +38,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use celld_logic::{
     format::BUCKET_FORMAT, on_event, pressure, CapacityPeer, CasGuard, CasOutcome, Channel, Config,
     Effect, Epoch, Event, Failure, LeaseCasOutcome, LocalCell, NodeLeaseRecord, NodeLeaseSpec,
-    OpId, OwnerRecord, OwnershipOnEvict, ProofSource, RequestId, RestoreOutcome, RestoreSpec,
-    Route, State, StopCause, Timer,
+    OpId, OwnerRecord, OwnershipOnEvict, Phase, ProofSource, RequestId, RestoreOutcome,
+    RestoreSpec, Route, State, StopCause, Timer,
 };
 
 use crate::store::{Session, Store};
@@ -44,6 +47,8 @@ use crate::{Coverage, Mutation, Outcome, ProcId, Rng, SimConfig, Stats, Violatio
 use alarms::{AlarmLedger, AlarmOp, ArmGate, ArmWaiter, ScanKind, WakeShell};
 use checks::{Checker, View};
 use faults::FaultKind;
+use handoff::{Accept, Handoff};
+use lifecycle::{LifeTask, Shutdown};
 use node_log::{Fragment, LogShell, LogWork, RecoverMode};
 use replica::{Proof, Waiter};
 use store_rpc::{Call, Reply, StoreReq, StoreRes};
@@ -163,6 +168,32 @@ enum Work {
         cleanup: bool,
     },
     Log(LogWork),
+    ShutdownTick,
+    TokenRetry,
+    RebalanceTick,
+    HandoffRetry {
+        op: OpId,
+    },
+    HandoffDeadline {
+        op: OpId,
+    },
+    HandoffTimeout {
+        op: OpId,
+        attempt: u64,
+    },
+    /// A donor's handoff request reaches this process.
+    HandoffArrive {
+        donor: ProcId,
+        op: OpId,
+        attempt: u64,
+        cell: String,
+        released_epoch: Epoch,
+    },
+    HandoffAnswer {
+        op: OpId,
+        attempt: u64,
+        answer: Option<handoff::Answer>,
+    },
 }
 
 #[derive(Debug)]
@@ -176,6 +207,7 @@ enum What {
     Resume { proc: ProcId },
     Heal { node: usize, partition: u64 },
     Fault(FaultKind),
+    Shutdown,
     EvictTick,
     ChaosEnd,
     Probe,
@@ -194,6 +226,8 @@ struct Disk {
     evicted: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// The node-log fragments this node holds as a follower, by session.
     peerlog: BTreeMap<Session, Fragment>,
+    /// `.clean-reload.json`: the generation a clean shutdown certified.
+    clean_reload: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,6 +288,9 @@ struct ReqCtx {
     answer: Answer,
     aborted: bool,
     activity: Activity,
+    /// The client has its answer: the core released the reply, or the
+    /// request failed. The context outlives it for late events.
+    replied: bool,
 }
 
 /// How far a request's reply has got.
@@ -313,6 +350,21 @@ struct Proc {
     requests: BTreeMap<RequestId, ReqCtx>,
     wake: WakeShell,
     log: LogShell,
+    shutdown: Option<Shutdown>,
+    /// The generation a clean-reload certificate named at startup.
+    resume_generation: Option<String>,
+    life_tasks: BTreeMap<u64, LifeTask>,
+    /// The first readiness gate opened (`fleet_ready`).
+    fleet_ready: bool,
+    /// The wall instant the last balancing batch could have reached every
+    /// lease.
+    rebalance_settled_ms: u64,
+    /// `AdoptReleased` tasks in flight, by operation.
+    handoffs: BTreeMap<OpId, Handoff>,
+    /// The handoff directory: when the peers were read, and what they were.
+    directory: Option<(Time, Vec<CapacityPeer>)>,
+    /// Handoff requests from donors, by core request.
+    accepts: BTreeMap<RequestId, Accept>,
     halting: bool,
 }
 
@@ -527,6 +579,10 @@ impl World {
         if self.config.evict_gap_ms.is_some() {
             self.at(100, What::EvictTick);
         }
+        if self.config.lifecycle.shutdowns > 0.0 {
+            let gap = self.fault_gap(self.config.lifecycle.shutdowns);
+            self.at(gap, What::Shutdown);
+        }
         let faults = self.config.faults.clone();
         for (kind, rate) in [
             (FaultKind::Crash, faults.crashes),
@@ -617,6 +673,7 @@ impl World {
                 }
             }
             What::Fault(kind) => self.fault(kind),
+            What::Shutdown => self.shutdown_fault(),
             What::EvictTick => self.evict_tick(),
             What::ChaosEnd => self.chaos_end(),
             What::Probe => self.probe(),
@@ -678,6 +735,13 @@ impl World {
                     return;
                 }
             }
+        }
+        if self
+            .procs
+            .get(&id)
+            .is_some_and(|proc| !proc.accepts.is_empty())
+        {
+            self.settle_accepts(id);
         }
         if self.procs.get(&id).is_some_and(|proc| proc.halting) {
             self.stats.halts += 1;
@@ -757,6 +821,14 @@ fn stamp(event: &mut Event, wall: u64, mono: u64) {
             *now_mono_ms = mono;
         }
         Event::WakeHintAt { now_mono_ms, .. } => *now_mono_ms = mono,
+        Event::HandoffRequestAt {
+            now_ms,
+            now_mono_ms,
+            ..
+        } => {
+            *now_ms = wall;
+            *now_mono_ms = mono;
+        }
         Event::NudgeNodeLease {
             now_ms,
             now_mono_ms,

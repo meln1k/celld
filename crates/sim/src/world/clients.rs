@@ -124,6 +124,10 @@ impl World {
         if entry.done || entry.attempt != attempt {
             return;
         }
+        if self.refuses(id, via.is_some()) {
+            // The listener closed with the shutdown: nothing ran here.
+            return self.attempt_failed(op, attempt);
+        }
         let (cell, write, alarm) = (entry.cell.clone(), entry.write, entry.alarm);
         self.procs.get_mut(&id).unwrap().requests.insert(
             request,
@@ -140,6 +144,7 @@ impl World {
                 answer: Answer::Pending,
                 aborted: false,
                 activity: Activity::Running,
+                replied: false,
             },
         );
         let event = if via == Some(0) {

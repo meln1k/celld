@@ -91,6 +91,8 @@ pub(super) struct LogShell {
     /// the process serves seals but neither appends nor its own lease.
     booting: bool,
     closing: bool,
+    /// The graceful close is over: the record sealed, or it was left open.
+    closed: bool,
     maintaining: bool,
 }
 
@@ -342,7 +344,7 @@ impl World {
                 self.maintain_done(id, delay);
             }
             Then::Activate { epoch } => self.activated(id, epoch, ok),
-            Then::Seal => {}
+            Then::Seal => self.log(id).closed = true,
         }
     }
 
@@ -517,20 +519,34 @@ impl World {
         self.work(id, 100, Work::Log(LogWork::CloseCheck { deadline }));
     }
 
+    /// Whether a graceful close has finished.
+    pub(super) fn log_closed(&self, id: ProcId) -> bool {
+        self.procs[&id].log.closed
+    }
+
     fn close_check(&mut self, id: ProcId, deadline: Time) {
         let proc = &self.procs[&id];
         let (Some(shipper), Some(own)) = (&proc.log.shipper, &proc.log.own) else {
+            // No record to seal.
+            self.log(id).closed = true;
             return;
         };
         // Only the per-cell layout counts: a sealed record tells every
-        // future recovery there is nothing to gather.
+        // future recovery there is nothing to gather. The retained bundle
+        // scan covers the cells this process no longer holds a replica of.
         let in_prefix = |row: &Row| self.store.prefix_holds(row);
         let per_cell_complete = proc
             .replicas
             .values()
             .all(|replica| replica.uploaded >= replica.content.len())
             && shipper.rows().all(in_prefix)
-            && proc.log.unbundled.iter().all(in_prefix);
+            && proc.log.unbundled.iter().all(in_prefix)
+            && (self.config.mutation == Mutation::SealOverBundles
+                || self
+                    .store
+                    .bundle_rows(&self.session_of(id))
+                    .iter()
+                    .all(in_prefix));
         if log_tier::graceful_seal_allowed(
             &own.record,
             shipper.epoch(),
@@ -547,6 +563,8 @@ impl World {
             self.publish_own(id, wire, Then::Seal);
         } else if self.t < deadline {
             self.work(id, 100, Work::Log(LogWork::CloseCheck { deadline }));
+        } else {
+            self.log(id).closed = true;
         }
     }
 }

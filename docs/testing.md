@@ -127,8 +127,29 @@ of the published record. A loss that recovery declares counts against the
 run unless no disk or object still holds the write. `ack-one-follower`,
 `skip-log-recovery`, and `append-after-seal` cover this path.
 
-It does not yet model WebSockets, drains and adoption, generation swaps, or
-memory pressure.
+Half the swarm also stops nodes on purpose and balances the rest. A drain
+claims the fleet drain token, waits for the requests clients sent before the
+listener closed, and hands every cell to a peer. The peer claims the cell
+before it answers, and the donor follows redirects to the current owner. A
+preserve keeps the owner records, prunes the live databases it no longer
+holds, seals its log once the per-cell layout covers every retained bundle,
+and leaves a clean-reload certificate that the next process resumes from.
+Nodes also give idle cells to peers below their share. The checks are:
+
+- **unclaimed-handoff**: a successor accepts a cell only at an epoch that a
+  claim installed for its node.
+- **drain-left-owner**: a node that finished its drain holds no owner record
+  that its core still holds the cell at.
+- A clean reload continues its predecessor's writer, so one-writer and the
+  claim check follow the reload, and a resumed epoch holds every write
+  acknowledged at it.
+
+`seal-over-bundles`, `resume-stale-live`, `accept-unclaimed`, and
+`drain-early` cover this path. `--coverage` lists how often a sweep reached
+each core event and effect, and the ones it never reached.
+
+It does not yet model WebSockets, explicit and failed evictions, generation
+swaps, deletion, or memory pressure.
 
 ### The shell on a simulated runtime
 
@@ -295,7 +316,7 @@ setting where shown.
   acknowledge writes into the superseded epoch. A bucket proof would fail
   its ownership read; a fleet proof makes none.
 - **Recovery declares a loss that a surviving disk could still repair**
-  (`--fleet on`: 981, 1456, 1626, 2438, 2750). A follower that is
+  (`--fleet on`: 1298, 1456, 1564, 1626, 2750). A follower that is
   unreachable and whose lease has been dead for 3×TTL counts as
   conclusively gone. When every member counts as gone, recovery records a
   loss and seals the log, although the follower's disk, and often the old
@@ -308,6 +329,24 @@ setting where shown.
 - **A full fleet forgets a refused capacity handoff** (`--fleet off`:
   8120): the next load report clears the refusal, and the cell never
   settles.
+- **A release can orphan an unfolded tail** (259, 357, 556). An epoch that
+  ends without its final upload, such as a reset after an ownership read
+  fails, leaves its acknowledged tail in the node's own bundles and
+  followers. The node's next restore of the cell folds that tail first, and
+  fails the activation if the fold fails. The cell is then `Dormant`, and a
+  rebalance or a drain releases it. The adopter restores from the per-cell
+  prefixes and loses the acknowledged rows.
+- **An eviction during a drain overruns the release ceiling** (25, 45, 80).
+  A policy eviction, or one the capacity pump starts, takes an eviction
+  permit without counting the drain's releases, and `State::validate`
+  reports more handoffs than `CELLD_RELEASES`.
+- **A cell marked for handoff can leave the handoff pipeline** (108, 300,
+  359). A wake hint, the capacity pump or a fence moves it to
+  `WaitingActivation`, `ReadingOwner` or `Fenced` with the mark still set,
+  and `State::validate` fails.
+- **A preserve during the startup inventory strands a confirming cell**
+  (155, 494, 564). `BeginPreserve` cancels the queued owner read but leaves
+  the cell in the confirmation set, and `State::validate` fails.
 
 Report a schedule that breaks a guarantee, an untested fault, or a measurement
 that you cannot reproduce in the

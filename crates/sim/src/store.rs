@@ -6,6 +6,7 @@
 //! and wake entries. Every operation is applied atomically at one simulated
 //! instant; the latency and loss around that instant belong to the world.
 
+use celld_logic::drain::DrainToken;
 use celld_logic::log_tier::LogRecord;
 use celld_logic::wake::{parse_entry_key, Retirement};
 use celld_logic::{CasGuard, CasOutcome, Epoch, LeaseCasOutcome, NodeLeaseRecord, OwnerRecord};
@@ -125,10 +126,22 @@ pub struct LeaseEntry {
     pub record: NodeLeaseRecord,
     pub log: Option<LogWire>,
     pub etag: u64,
-    /// Load the writing process reported with this record.
+    pub load: LeaseLoad,
+    pub sampled_ms: u64,
+}
+
+/// The advisory load a process writes into its node lease, as its peers
+/// read it to choose where cells go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LeaseLoad {
     pub resident: usize,
     pub owned: usize,
-    pub sampled_ms: u64,
+    /// Cold routes that have not finished.
+    pub restoring: u64,
+    /// The process accepts a signed handoff.
+    pub paced_handoff: bool,
+    /// The process is handing its cells away.
+    pub draining: bool,
 }
 
 /// One applied ownership install, in store order.
@@ -136,6 +149,7 @@ pub struct LeaseEntry {
 pub struct Claim {
     pub cell: String,
     pub epoch: Epoch,
+    pub node: String,
     pub proc: ProcId,
 }
 
@@ -151,6 +165,8 @@ pub struct Store {
     bundles: BTreeMap<Session, Vec<Row>>,
     /// Every row any bundle carries.
     bundled: BTreeSet<Row>,
+    /// `fleet/drain-token.json`, and its ETag.
+    drain_token: Option<(DrainToken, u64)>,
     /// `wake/entries/<minute>/<cell>/<identity>`, by full key.
     wake_entries: BTreeSet<String>,
     /// `wake/retired/<cell>.json`: the retirement frontier and its ETag.
@@ -170,6 +186,7 @@ impl Store {
             claims: Vec::new(),
             bundles: BTreeMap::new(),
             bundled: BTreeSet::new(),
+            drain_token: None,
             wake_entries: BTreeSet::new(),
             retirements: BTreeMap::new(),
             waker: None,
@@ -229,6 +246,7 @@ impl Store {
         self.claims.push(Claim {
             cell: cell.to_string(),
             epoch,
+            node: node.to_string(),
             proc,
         });
         CasOutcome::Applied
@@ -268,8 +286,7 @@ impl Store {
         guard: &CasGuard,
         record: &NodeLeaseRecord,
         log: Option<&LogWire>,
-        resident: usize,
-        owned: usize,
+        load: LeaseLoad,
         sampled_ms: u64,
     ) -> LeaseCasOutcome {
         let current = self.leases.get(&record.node).map(|entry| entry.etag);
@@ -286,14 +303,31 @@ impl Store {
                 record: stored,
                 log: log.cloned(),
                 etag,
-                resident,
-                owned,
+                load,
                 sampled_ms,
             },
         );
         LeaseCasOutcome::Applied {
             etag: etag.to_string(),
         }
+    }
+
+    pub fn read_drain_token(&self) -> Option<(DrainToken, String)> {
+        self.drain_token
+            .as_ref()
+            .map(|(token, etag)| (token.clone(), etag.to_string()))
+    }
+
+    /// Write the drain token under `guard`. Returns the new ETag, or `None`
+    /// when the guard missed.
+    pub fn cas_drain_token(&mut self, guard: &CasGuard, token: DrainToken) -> Option<String> {
+        let current = self.drain_token.as_ref().map(|(_, etag)| *etag);
+        if !self.guard_matches(guard, current) {
+            return None;
+        }
+        let etag = self.etag();
+        self.drain_token = Some((token, etag));
+        Some(etag.to_string())
     }
 
     pub fn leases(&self) -> impl Iterator<Item = &LeaseEntry> {
@@ -337,14 +371,14 @@ impl Store {
     /// Recovery's merged L0 for one cell epoch: the gathered rows on top of
     /// what the prefix, or failing that the chain below it, already holds.
     /// `writer` is the dead session's process, whose epoch this still is.
-    /// Returns how many distinct processes have now written the prefix.
+    /// Returns every process that has now written the prefix.
     pub fn put_recovered(
         &mut self,
         cell: &str,
         epoch: Epoch,
         rows: &BTreeMap<u64, WriteId>,
         writer: ProcId,
-    ) -> usize {
+    ) -> Vec<ProcId> {
         let base = match self.prefix(cell, epoch).map(Prefix::content) {
             Some(content) if !content.is_empty() => content,
             _ => self.read_chain(cell, epoch).unwrap_or_default(),
@@ -360,7 +394,7 @@ impl Store {
         if !prefix.writers.contains(&writer) {
             prefix.writers.push(writer);
         }
-        prefix.writers.len()
+        prefix.writers.clone()
     }
 
     /// Every row any bundle carries for `cell`, in epoch and position order.
@@ -410,7 +444,7 @@ impl Store {
         epoch: Epoch,
         content: &[WriteId],
         proc: ProcId,
-    ) -> usize {
+    ) -> Vec<ProcId> {
         let key = self.prefix_key(cell, epoch);
         let prefix = self.prefixes.entry(key).or_default();
         for (index, write) in content.iter().enumerate() {
@@ -419,7 +453,16 @@ impl Store {
         if !prefix.writers.contains(&proc) {
             prefix.writers.push(proc);
         }
-        prefix.writers.len()
+        prefix.writers.clone()
+    }
+
+    /// Every cell whose owner record names `node`.
+    pub fn owned_by(&self, node: &str) -> Vec<String> {
+        self.owners
+            .iter()
+            .filter(|(_, entry)| entry.node.as_deref() == Some(node))
+            .map(|(cell, _)| cell.clone())
+            .collect()
     }
 
     /// The content a restore at `epoch` reads: the newest prefix below it

@@ -16,6 +16,15 @@ impl World {
         let name = self.nodes[node].name.clone();
         let config = self.core_config();
         let mono_base = self.net_rng.range(1_000, 1_000_000);
+        // `take_clean_reload_generation`: the certificate is read once.
+        let resume_generation = self.nodes[node].disk.clean_reload.take();
+        if let Some(generation) = &resume_generation {
+            let predecessor = generation[1..]
+                .parse()
+                .expect("generations name their process");
+            self.stats.clean_reloads += 1;
+            self.checker.on_clean_reload(predecessor, id);
+        }
         self.procs.insert(
             id,
             Proc {
@@ -34,6 +43,14 @@ impl World {
                 requests: BTreeMap::new(),
                 wake: WakeShell::default(),
                 log: LogShell::default(),
+                shutdown: None,
+                resume_generation,
+                life_tasks: BTreeMap::new(),
+                fleet_ready: false,
+                rebalance_settled_ms: 0,
+                handoffs: BTreeMap::new(),
+                directory: None,
+                accepts: BTreeMap::new(),
                 halting: false,
             },
         );
@@ -53,7 +70,7 @@ impl World {
             addr: name,
             peer_protocol: PEER_PROTOCOL,
             generation: self.session_of(id).generation(),
-            resume_generation: None,
+            resume_generation: self.procs[&id].resume_generation.clone(),
             ttl_ms: self.config.ttl_ms,
         };
         self.drive(
@@ -67,6 +84,10 @@ impl World {
         let tick = self.net_rng.range(1, LOAD_SAMPLE_MS);
         self.work(id, tick, Work::LoadTick);
         self.work(id, 10, Work::BootScan { waited_ms: 0 });
+        if self.config.lifecycle.rebalance {
+            let tick = self.net_rng.range(1, LOAD_SAMPLE_MS);
+            self.work(id, tick, Work::RebalanceTick);
+        }
     }
 
     fn core_config(&self) -> Config {
@@ -93,6 +114,12 @@ impl World {
     }
 
     pub(super) fn crash(&mut self, id: ProcId, wipe: bool) {
+        self.stop_process(id, wipe, None);
+    }
+
+    /// The process ends. A crash restarts after the supervisor's wait; a
+    /// clean exit names its own.
+    pub(super) fn stop_process(&mut self, id: ProcId, wipe: bool, restart_ms: Option<u64>) {
         let Some(proc) = self.procs.remove(&id) else {
             return;
         };
@@ -109,11 +136,16 @@ impl World {
         if wipe {
             self.nodes[node].disk = Disk::default();
         }
-        self.note(|| format!("crash p{id}{}", if wipe { " (disk wiped)" } else { "" }));
+        if restart_ms.is_none() {
+            self.note(|| format!("crash p{id}{}", if wipe { " (disk wiped)" } else { "" }));
+        }
         if !self.audit && !self.nodes[node].restart_pending {
             // The supervisor waits at least one lease lifetime.
             let ttl = self.config.ttl_ms;
-            let delay = self.fault_rng.range(ttl, 3 * ttl);
+            let delay = match restart_ms {
+                Some(delay) => delay,
+                None => self.fault_rng.range(ttl, 3 * ttl),
+            };
             self.nodes[node].restart_pending = true;
             self.after(delay, What::Restart { node });
         }
@@ -215,6 +247,24 @@ impl World {
             Work::TaskDeadline { task } => self.task_deadline(id, task),
             Work::BootScan { waited_ms } => self.boot_scan(id, waited_ms),
             Work::Log(work) => self.log_work(id, work),
+            Work::ShutdownTick => self.shutdown_tick(id),
+            Work::TokenRetry => self.token_retry_due(id),
+            Work::RebalanceTick => self.rebalance_tick(id),
+            Work::HandoffRetry { op } => self.handoff_scan(id, op),
+            Work::HandoffDeadline { op } => self.handoff_deadline(id, op),
+            Work::HandoffTimeout { op, attempt } => self.handoff_answered(id, op, attempt, None),
+            Work::HandoffArrive {
+                donor,
+                op,
+                attempt,
+                cell,
+                released_epoch,
+            } => self.handoff_arrived(id, donor, op, attempt, cell, released_epoch),
+            Work::HandoffAnswer {
+                op,
+                attempt,
+                answer,
+            } => self.handoff_answered(id, op, attempt, answer),
             Work::WakeTick { cleanup } => self.start_scan(
                 id,
                 if cleanup {

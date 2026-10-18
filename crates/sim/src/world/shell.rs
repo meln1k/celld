@@ -29,8 +29,7 @@ impl World {
             Effect::CasNodeLease {
                 op, guard, record, ..
             } => {
-                let state = &self.procs[&id].state;
-                let (resident, owned) = (state.residents().len(), state.owned_cells());
+                let load = self.lease_load(id);
                 // The lease fold: the body carries the session's log as it
                 // stands now, whatever the core believed it was.
                 let (log, seq) = self.stamp_log(id);
@@ -41,8 +40,7 @@ impl World {
                         guard,
                         record,
                         log,
-                        resident,
-                        owned,
+                        load,
                     },
                     Reply::LeaseCas { op, stamped, seq },
                 );
@@ -113,14 +111,12 @@ impl World {
                 StoreReq::ReleaseOwner { cell, epoch },
                 Reply::OwnerReleased(op),
             ),
-            Effect::AdoptReleased { op, .. } => {
-                // As the in-memory adapter does: no successor acknowledges a
-                // handoff, so released cells wait for their next request.
-                immediate.push_back(Event::SuccessorAdopted {
-                    op,
-                    result: Err(Failure::Definite),
-                });
-            }
+            Effect::AdoptReleased {
+                op,
+                cell,
+                released_epoch,
+                rebalance,
+            } => self.adopt_released(id, op, cell, released_epoch, rebalance, immediate),
             Effect::CancelCellActivity {
                 requests, alarm, ..
             } => {

@@ -2,7 +2,8 @@
 //! the way there and back, and what each answer becomes in the caller.
 
 use super::*;
-use crate::store::{LogWire, Row, Session};
+use crate::store::{LeaseLoad, LogWire, Row, Session};
+use celld_logic::drain::DrainToken;
 use celld_logic::log_tier::LogState;
 use celld_logic::wake::Retirement;
 
@@ -29,8 +30,7 @@ pub(super) enum StoreReq {
         record: NodeLeaseRecord,
         /// The folded log the shell stamped into the body.
         log: Option<LogWire>,
-        resident: usize,
-        owned: usize,
+        load: LeaseLoad,
     },
     ReadPeers,
     Put {
@@ -101,6 +101,11 @@ pub(super) enum StoreReq {
     PutObject {
         key: String,
     },
+    ReadDrainToken,
+    CasDrainToken {
+        guard: CasGuard,
+        token: DrainToken,
+    },
 }
 
 #[derive(Debug)]
@@ -128,6 +133,9 @@ pub(super) enum StoreRes {
     LogPeers(Vec<NodeLeaseRecord>),
     Leases(Vec<NodeLeaseRecord>),
     Rows(Vec<Row>),
+    DrainToken(Option<(DrainToken, String)>),
+    /// The new ETag, or `None` when the guard missed.
+    DrainTokenCas(Option<String>),
 }
 
 impl StoreRes {
@@ -202,6 +210,14 @@ pub(super) enum Reply {
     /// A step of a node-log task.
     Log {
         task: u64,
+    },
+    /// A step of a shutdown, the readiness gate, or balancing.
+    Life {
+        task: u64,
+    },
+    /// The peer directory an `AdoptReleased` ranks.
+    Handoff {
+        op: OpId,
     },
     /// Nobody waits for the answer.
     Ignore,
@@ -321,23 +337,16 @@ impl World {
                 guard,
                 record,
                 log,
-                resident,
-                owned,
+                load,
             } => {
                 let sampled_ms = record.expires_ms.saturating_sub(self.config.ttl_ms);
-                let (guard, record, log, resident, owned) = (
-                    guard.clone(),
-                    record.clone(),
-                    log.clone(),
-                    *resident,
-                    *owned,
-                );
+                let (guard, record, log, load) =
+                    (guard.clone(), record.clone(), log.clone(), *load);
                 StoreRes::LeaseCas(self.store.cas_lease(
                     &guard,
                     &record,
                     log.as_ref(),
-                    resident,
-                    owned,
+                    load,
                     sampled_ms,
                 ))
             }
@@ -352,19 +361,19 @@ impl World {
                         expires_ms: lease.record.expires_ms,
                         peer_protocol: lease.record.peer_protocol,
                         sampled_ms: lease.sampled_ms,
-                        owned_cells: Some(lease.owned),
+                        owned_cells: Some(lease.load.owned),
                         placement_weight: Some(1),
                         bucket_format: Some(BUCKET_FORMAT),
-                        resident_cells: lease.resident,
+                        resident_cells: lease.load.resident,
                         host_websockets: 0,
                         rss_bytes: 0,
                         in_use_bytes: Some(0),
                         pressured: false,
                         memory_headroom: Some(true),
-                        restoring: 0,
-                        paced_handoff: false,
+                        restoring: lease.load.restoring,
+                        paced_handoff: lease.load.paced_handoff,
                         rebalance_paused: false,
-                        draining: false,
+                        draining: lease.load.draining,
                     })
                     .collect();
                 StoreRes::Peers { view_ms, peers }
@@ -384,7 +393,7 @@ impl World {
                 }
                 let writers = self.store.put_ltx(&cell, epoch, &content, proc);
                 let (checker, view) = self.checks();
-                checker.on_upload(view, &cell, epoch, writers);
+                checker.on_upload(view, &cell, epoch, &writers);
                 StoreRes::Put
             }
             StoreReq::ReadChain { cell, epoch } => {
@@ -480,9 +489,14 @@ impl World {
                 for ((cell, epoch), rows) in groups {
                     let writers = self.store.put_recovered(&cell, epoch, &rows, writer);
                     let (checker, view) = self.checks();
-                    checker.on_upload(view, &cell, epoch, writers);
+                    checker.on_upload(view, &cell, epoch, &writers);
                 }
                 StoreRes::Done
+            }
+            StoreReq::ReadDrainToken => StoreRes::DrainToken(self.store.read_drain_token()),
+            StoreReq::CasDrainToken { guard, token } => {
+                let (guard, token) = (guard.clone(), token.clone());
+                StoreRes::DrainTokenCas(self.store.cas_drain_token(&guard, token))
             }
             StoreReq::PutObject { key } => {
                 let key = key.clone();
@@ -523,6 +537,14 @@ impl World {
             }
             Reply::Log { task } => {
                 self.log_reply(id, task, result);
+                return;
+            }
+            Reply::Life { task } => {
+                self.life_reply(id, task, result);
+                return;
+            }
+            Reply::Handoff { op } => {
+                self.handoff_peers(id, op, result);
                 return;
             }
             Reply::Ignore => return,

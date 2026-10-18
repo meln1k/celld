@@ -5,7 +5,7 @@
 //! `--mutation NAME` for a mutation run. `CELLD_SIM_SEEDS` widens the swarm
 //! sweep here; the CLI runs any range (`--seeds 0..10000`).
 
-use celld_sim::{run, Mutation, Outcome, SimConfig};
+use celld_sim::{run, Lifecycle, Mutation, Outcome, SimConfig};
 
 fn report(outcome: &Outcome) -> String {
     let mut lines = vec![format!("seed {}", outcome.seed)];
@@ -93,21 +93,25 @@ fn swarm_seeds_pass() {
     assert!(totals.fleet_acks > 0, "{totals:?}");
     assert!(totals.log_degrades > 0, "{totals:?}");
     assert!(totals.log_recoveries > 0, "{totals:?}");
+    assert!(totals.drains > 0, "{totals:?}");
+    assert!(totals.clean_reloads > 0, "{totals:?}");
+    assert!(totals.rebalances > 0, "{totals:?}");
+    assert!(totals.handoffs_accepted > 0, "{totals:?}");
 }
 
 /// Whether some swarm seed below `limit` fails the planted bug on the check
 /// that exists for it.
 fn caught(mutation: Mutation, limit: u64, kinds: &[&str]) -> bool {
-    caught_in(SimConfig::swarm, mutation, limit, kinds)
+    caught_in(SimConfig::swarm, mutation, 0..limit, kinds)
 }
 
 fn caught_in(
     configure: impl Fn(u64) -> SimConfig,
     mutation: Mutation,
-    limit: u64,
+    seeds: std::ops::Range<u64>,
     kinds: &[&str],
 ) -> bool {
-    (0..limit).any(|seed| {
+    seeds.into_iter().any(|seed| {
         let mut config = configure(seed);
         config.mutation = mutation;
         let outcome = run(seed, &config);
@@ -178,7 +182,7 @@ fn a_fleet_proof_from_one_follower_is_caught_at_the_ack() {
     assert!(caught_in(
         fleet,
         Mutation::AckOneFollower,
-        10,
+        0..10,
         &["ack-before-durable"]
     ));
 }
@@ -188,7 +192,7 @@ fn a_takeover_that_skips_log_recovery_loses_a_write() {
     assert!(caught_in(
         fleet,
         Mutation::SkipLogRecovery,
-        10,
+        0..10,
         &["lost-write"]
     ));
 }
@@ -198,8 +202,78 @@ fn a_follower_that_appends_after_its_seal_loses_a_write() {
     assert!(caught_in(
         fleet,
         Mutation::AppendAfterSeal,
-        20,
+        0..20,
         &["lost-write"]
+    ));
+}
+
+/// Nodes leave on purpose, half of them for a same-node reload. No policy
+/// evictions and no balancing: those reach open core findings
+/// (docs/testing.md) that would fail a seed before its plant is reached.
+fn shutdowns(seed: u64) -> SimConfig {
+    SimConfig {
+        lifecycle: Lifecycle {
+            shutdowns: 3.0,
+            preserve_probability: 0.5,
+            rebalance: false,
+        },
+        evict_gap_ms: None,
+        ..SimConfig::swarm(seed)
+    }
+}
+
+/// Every shutdown hands its cells to a peer.
+fn drains(seed: u64) -> SimConfig {
+    let mut config = shutdowns(seed);
+    config.lifecycle.preserve_probability = 0.0;
+    config
+}
+
+fn drains_on_the_fleet(seed: u64) -> SimConfig {
+    SimConfig {
+        fleet: true,
+        ..drains(seed)
+    }
+}
+
+#[test]
+fn a_seal_over_retained_bundles_loses_a_write() {
+    // The first schedule that leaves a bundle-only tail behind a seal.
+    assert!(caught_in(
+        drains_on_the_fleet,
+        Mutation::SealOverBundles,
+        60..80,
+        &["lost-write"]
+    ));
+}
+
+#[test]
+fn a_reload_that_keeps_stale_epochs_runs_one_epoch_twice() {
+    assert!(caught_in(
+        shutdowns,
+        Mutation::ResumeStaleLive,
+        0..30,
+        &["two-writers"]
+    ));
+}
+
+#[test]
+fn a_successor_that_accepts_before_claiming_is_caught() {
+    assert!(caught_in(
+        drains,
+        Mutation::AcceptUnclaimed,
+        0..10,
+        &["unclaimed-handoff"]
+    ));
+}
+
+#[test]
+fn a_drain_that_ends_before_its_releases_is_caught() {
+    assert!(caught_in(
+        drains,
+        Mutation::DrainEarly,
+        0..10,
+        &["drain-left-owner"]
     ));
 }
 
@@ -218,6 +292,9 @@ fn crowded(seed: u64) -> SimConfig {
     config.alarm_probability = 0.6;
     config.alarm_resident_ms = 3_600_000;
     config.faults.crashes = config.faults.crashes.max(3.0);
+    // Cells move only by eviction, crash and takeover, so a pinned slot
+    // stays pinned.
+    config.lifecycle = Lifecycle::off();
     config
 }
 
@@ -234,7 +311,7 @@ fn unreported_wake_coverage_pins_a_cell() {
     assert!(caught_in(
         crowded,
         Mutation::SilentWakeCoverage,
-        10,
+        0..10,
         &["liveness"]
     ));
 }

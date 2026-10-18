@@ -12,6 +12,9 @@ impl World {
         request: RequestId,
         result: Result<Route, celld_logic::RequestError>,
     ) {
+        if self.handoff_routed(id, request, &result) {
+            return;
+        }
         let proc = self.procs.get_mut(&id).unwrap();
         let Some(ctx) = proc.requests.get_mut(&request) else {
             return;
@@ -267,6 +270,7 @@ impl World {
         ctx.answer = Answer::Sent;
         if ctx.aborted || ctx.epoch.is_none() {
             ctx.activity = Activity::Finished;
+            ctx.replied = true;
             let (op, attempt, cell) = (ctx.op, ctx.attempt, ctx.cell.clone());
             self.finish_activity(id, request, &cell);
             self.attempt_failed(op, attempt);
@@ -314,6 +318,7 @@ impl World {
         let Some(ctx) = proc.requests.get_mut(&request) else {
             return;
         };
+        ctx.replied = true;
         let (op, attempt, cell, epoch, committed) = (
             ctx.op,
             ctx.attempt,
