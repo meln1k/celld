@@ -6,12 +6,13 @@
 //! celld-sim --seeds 0..200 --mutation shared-prefix
 //! celld-sim --seeds 0..100000 --jobs 16 # one worker per core by default
 //! celld-sim --seeds 0..500 --fleet on   # every seed in the fleet posture
+//! celld-sim --seeds 0..500 --coverage   # which core events and effects ran
 //! ```
 
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
 
-use celld_sim::{run, Mutation, Outcome, SimConfig};
+use celld_sim::{run, Coverage, Mutation, Outcome, SimConfig};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -23,6 +24,7 @@ fn main() {
     let mut calm = false;
     let mut mutation = Mutation::None;
     let mut fleet = None;
+    let mut coverage = false;
     let mut jobs = std::thread::available_parallelism().map_or(1, usize::from);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -36,6 +38,7 @@ fn main() {
                 seeds = a.parse().expect("seed")..b.parse().expect("seed");
             }
             "--trace" => trace = true,
+            "--coverage" => coverage = true,
             "--calm" => calm = true,
             "--mutation" => {
                 let name = args.next().expect("--mutation NAME");
@@ -71,6 +74,7 @@ fn main() {
         count,
         trace,
         totals: celld_sim::Stats::default(),
+        coverage: Coverage::default(),
         failed: 0,
     };
     // Each seed is independent, so workers take the next one as they free
@@ -106,6 +110,17 @@ fn main() {
     if count > 1 {
         println!("totals {:?}", report.totals);
     }
+    if coverage {
+        for (kind, counts) in [
+            ("event", &report.coverage.events),
+            ("effect", &report.coverage.effects),
+        ] {
+            for (name, count) in counts {
+                println!("{kind} {name} {count}");
+            }
+        }
+        println!("never reached: {:?}", report.coverage.missing());
+    }
     println!("{} of {count} seeds failed", report.failed);
     if report.failed > 0 {
         std::process::exit(1);
@@ -117,12 +132,14 @@ struct Report {
     count: u64,
     trace: bool,
     totals: celld_sim::Stats,
+    coverage: Coverage,
     failed: u64,
 }
 
 impl Report {
     fn seed(&mut self, seed: u64, config: &SimConfig, outcome: &Outcome) {
         self.totals.absorb(&outcome.stats);
+        self.coverage.absorb(&outcome.coverage);
         if self.trace {
             for line in &outcome.trace {
                 println!("{line}");

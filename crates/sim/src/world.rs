@@ -40,7 +40,7 @@ use celld_logic::{
 };
 
 use crate::store::{Session, Store};
-use crate::{Mutation, Outcome, ProcId, Rng, SimConfig, Stats, Violation, WriteId};
+use crate::{Coverage, Mutation, Outcome, ProcId, Rng, SimConfig, Stats, Violation, WriteId};
 use alarms::{AlarmLedger, AlarmOp, ArmGate, ArmWaiter, ScanKind, WakeShell};
 use checks::{Checker, View};
 use faults::FaultKind;
@@ -402,6 +402,7 @@ struct World {
     /// Violations already written to the trace.
     noted: usize,
     stats: Stats,
+    coverage: Coverage,
     hash: Fnv,
     trace: Vec<String>,
     panic: Option<String>,
@@ -461,6 +462,7 @@ impl World {
             checker: Checker::default(),
             noted: 0,
             stats: Stats::default(),
+            coverage: Coverage::default(),
             hash: Fnv(0xcbf2_9ce4_8422_2325),
             trace: Vec::new(),
             panic: None,
@@ -650,6 +652,7 @@ impl World {
                 self.trace.push(format!("{:>7} p{id} <- {event:?}", self.t));
             }
             self.stats.events += 1;
+            self.coverage.event(&event);
             let state = &mut self.procs.get_mut(&id).unwrap().state;
             let effects = match catch_unwind(AssertUnwindSafe(|| on_event(state, event))) {
                 Ok(effects) => effects,
@@ -665,6 +668,7 @@ impl World {
             };
             for effect in effects {
                 let _ = write!(self.hash, "{effect:?}");
+                self.coverage.effect(&effect);
                 if self.config.trace {
                     self.trace
                         .push(format!("{:>7} p{id} -> {effect:?}", self.t));
@@ -702,6 +706,7 @@ impl World {
             seed: self.seed,
             violations,
             stats: self.stats,
+            coverage: self.coverage,
             trace_hash: self.hash.0,
             trace: self.trace,
             panic: self.panic,

@@ -56,10 +56,12 @@
 //! through the output gate; its alarm handler consumes the alarm, re-arms
 //! it, or fails into the retry backoff.
 
+mod coverage;
 mod rng;
 mod store;
 mod world;
 
+pub use coverage::Coverage;
 pub use rng::Rng;
 
 pub type ProcId = u64;
@@ -486,6 +488,8 @@ pub struct Outcome {
     pub seed: u64,
     pub violations: Vec<Violation>,
     pub stats: Stats,
+    /// How often each core input and output occurred.
+    pub coverage: Coverage,
     /// A digest of every event and effect in order. Equal seeds and
     /// configurations must produce equal digests.
     pub trace_hash: u64,
