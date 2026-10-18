@@ -280,6 +280,35 @@ A fleet at its resident limit has no space for a lost node's cells, so losing
 multiple nodes degrades service. We test recovery with and without reserve
 capacity to measure this limit.
 
+### Open simulation findings
+
+These seeds fail against the current code, so a sweep that reaches them
+fails. Replay each with `celld-sim --seed N --trace`, adding the `--fleet`
+setting where shown.
+
+- **A takeover does not fence a session that has no log record yet**
+  (`--fleet on`: 863, 1079, 2023, 2726). A peer reads a node lease as
+  expired, from clock skew or a renewal that lands late. The lease carries
+  no log state, so the takeover claims the cell without fencing anything.
+  The old owner still holds its lease by its own clock, so it opens its
+  log through a lease write that still matches, and its fleet proofs
+  acknowledge writes into the superseded epoch. A bucket proof would fail
+  its ownership read; a fleet proof makes none.
+- **Recovery declares a loss that a surviving disk could still repair**
+  (`--fleet on`: 981, 1456, 1626, 2438, 2750). A follower that is
+  unreachable and whose lease has been dead for 3×TTL counts as
+  conclusively gone. When every member counts as gone, recovery records a
+  loss and seals the log, although the follower's disk, and often the old
+  owner's own disk, still holds the acknowledged rows.
+  [The guarantees](guarantees.md#the-takeover-recovery-gate) say the
+  activation fails instead.
+- **A failed wake-entry write for a re-arm reads as success** (2157):
+  `fire_alarm` folds it into the handler's success, so the alarm can become
+  undiscoverable.
+- **A full fleet forgets a refused capacity handoff** (`--fleet off`:
+  8120): the next load report clears the refusal, and the cell never
+  settles.
+
 Report a schedule that breaks a guarantee, an untested fault, or a measurement
 that you cannot reproduce in the
 [issue tracker](https://github.com/denoland/celld/issues).
