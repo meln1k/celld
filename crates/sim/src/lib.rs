@@ -8,6 +8,11 @@
 //! schedule: store latency and loss, crashes, pauses, partitions, clock
 //! steps and the client workload. A failing seed replays exactly.
 //!
+//! Half the swarm runs in the fleet posture (`CELLD_DURABILITY=fleet`):
+//! each process ships its writes to up to two followers, acknowledges on
+//! their fsyncs, bundles the same rows to the bucket, and a takeover of a
+//! dead session's cells recovers its log first.
+//!
 //! What it checks:
 //!
 //! - **One writer per epoch.** No two processes run a runtime for, or
@@ -17,7 +22,9 @@
 //! - **No lost acknowledged write.** Every restore at epoch `E` contains every
 //!   write acknowledged at an epoch below `E`.
 //! - **No acknowledgement before durability.** An acknowledged write is in
-//!   its epoch's bucket prefix at the instant it is acknowledged.
+//!   its epoch's bucket prefix at the instant it is acknowledged, or in a
+//!   bundle its session's recovery will read, or fsynced by every follower
+//!   of its session's published log record.
 //! - **No local route without a runtime.** A request routed locally finds a
 //!   published runtime.
 //! - **Core invariants.** `State::validate` after every event.
@@ -35,6 +42,11 @@
 //!   fresh node that restores every cell from the bucket alone fires every
 //!   overdue alarm the bucket can find, with no request to wake its cell,
 //!   and then serves every cell.
+//!
+//! Recovery may declare a loss when every follower of a log epoch is
+//! conclusively gone. A fleet-acknowledged write that no disk or bucket
+//! object holds any more is beyond any protocol and is counted as
+//! `fleet_losses_excused`; one a surviving disk still holds is a lost write.
 //!
 //! [`Mutation`] plants a known bug in the simulated shell or bucket, so the
 //! tests can show each checker catches the failure it exists for.
@@ -83,10 +95,19 @@ pub enum Mutation {
     /// Wake maintenance never tells the core it published an entry, so a
     /// restored alarm pins its cell until some request finishes.
     SilentWakeCoverage,
+    /// A fleet proof needs one follower's confirmation instead of every
+    /// member's.
+    AckOneFollower,
+    /// `RecoverNodeLog` answers success without recovering, so a takeover
+    /// restores from the per-cell prefixes alone.
+    SkipLogRecovery,
+    /// A follower accepts appends at or below its seal mark, so a fenced
+    /// leader keeps completing fleet proofs after recovery cut its log.
+    AppendAfterSeal,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 9] = [
+    pub const ALL: [Mutation; 12] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
@@ -96,6 +117,9 @@ impl Mutation {
         Mutation::RetireUnproven,
         Mutation::NoOrphanWake,
         Mutation::SilentWakeCoverage,
+        Mutation::AckOneFollower,
+        Mutation::SkipLogRecovery,
+        Mutation::AppendAfterSeal,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -116,6 +140,9 @@ impl Mutation {
             Mutation::RetireUnproven => "retire-unproven",
             Mutation::NoOrphanWake => "no-orphan-wake",
             Mutation::SilentWakeCoverage => "silent-wake-coverage",
+            Mutation::AckOneFollower => "ack-one-follower",
+            Mutation::SkipLogRecovery => "skip-log-recovery",
+            Mutation::AppendAfterSeal => "append-after-seal",
         }
     }
 }
@@ -143,6 +170,10 @@ pub struct SimConfig {
     pub sticky_eviction: bool,
     pub idle_evict_ms: Option<u64>,
     pub evict_gap_ms: Option<(u64, u64)>,
+    /// `CELLD_DURABILITY=fleet`: each node ships its writes to up to two
+    /// followers and flushes them to the bucket in bundles. Off, every proof
+    /// is a per-cell upload.
+    pub fleet: bool,
     pub faults: Faults,
     pub mutation: Mutation,
     /// Keep a human-readable trace of every event and effect.
@@ -218,6 +249,7 @@ impl SimConfig {
             sticky_eviction: true,
             idle_evict_ms: None,
             evict_gap_ms: Some((200, 2_000)),
+            fleet: false,
             faults: Faults::none(),
             mutation: Mutation::None,
             trace: false,
@@ -281,6 +313,7 @@ impl SimConfig {
             } else {
                 None
             },
+            fleet: false,
             faults,
             mutation: Mutation::None,
             trace: false,
@@ -289,6 +322,7 @@ impl SimConfig {
         config.alarm_probability = *rng.pick(&[0.1, 0.3, 0.6]).unwrap();
         config.alarm_resident_ms = *rng.pick(&[0, 2_000, 3_600_000]).unwrap();
         config.wake_tick_ms = *rng.pick(&[500, 1_000, 3_000]).unwrap();
+        config.fleet = rng.chance(0.5);
         config
     }
 }
@@ -348,6 +382,21 @@ pub struct Stats {
     pub wake_hints: u64,
     /// Alarms the audit node fired from the bucket alone, with no request.
     pub audit_alarm_runs: u64,
+    /// Writes acknowledged on a fleet proof.
+    pub fleet_acks: u64,
+    /// Node-log ensembles installed.
+    pub log_ensembles: u64,
+    /// Shippers that degraded to bucket proofs.
+    pub log_degrades: u64,
+    /// Bundle flushes credited.
+    pub bundle_credits: u64,
+    /// Dead node-log sessions recovery sealed.
+    pub log_recoveries: u64,
+    /// Recoveries that found no witness and recorded a loss.
+    pub log_loss_records: u64,
+    /// Acknowledged writes lost because every disk that held them was
+    /// wiped, which no protocol can recover.
+    pub fleet_losses_excused: u64,
 }
 
 impl Stats {
@@ -384,6 +433,13 @@ impl Stats {
             wake_retirements,
             wake_hints,
             audit_alarm_runs,
+            fleet_acks,
+            log_ensembles,
+            log_degrades,
+            bundle_credits,
+            log_recoveries,
+            log_loss_records,
+            fleet_losses_excused,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -415,6 +471,13 @@ impl Stats {
         self.wake_retirements += wake_retirements;
         self.wake_hints += wake_hints;
         self.audit_alarm_runs += audit_alarm_runs;
+        self.fleet_acks += fleet_acks;
+        self.log_ensembles += log_ensembles;
+        self.log_degrades += log_degrades;
+        self.bundle_credits += bundle_credits;
+        self.log_recoveries += log_recoveries;
+        self.log_loss_records += log_loss_records;
+        self.fleet_losses_excused += fleet_losses_excused;
     }
 }
 

@@ -33,11 +33,22 @@ impl World {
                 published: BTreeMap::new(),
                 requests: BTreeMap::new(),
                 wake: WakeShell::default(),
+                log: LogShell::default(),
                 halting: false,
             },
         );
         self.nodes[node].proc = Some(id);
         self.note(|| format!("start p{id} on {name}"));
+        if self.config.fleet {
+            self.boot(id);
+        } else {
+            self.start_session(id);
+        }
+    }
+
+    /// Install the process's lease and start its loops.
+    pub(super) fn start_session(&mut self, id: ProcId) {
+        let name = self.node_name(id);
         let spec = NodeLeaseSpec {
             addr: name,
             peer_protocol: PEER_PROTOCOL,
@@ -203,6 +214,7 @@ impl World {
             Work::TaskProven { task, ok } => self.task_proven(id, task, ok),
             Work::TaskDeadline { task } => self.task_deadline(id, task),
             Work::BootScan { waited_ms } => self.boot_scan(id, waited_ms),
+            Work::Log(work) => self.log_work(id, work),
             Work::WakeTick { cleanup } => self.start_scan(
                 id,
                 if cleanup {

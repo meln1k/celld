@@ -31,15 +31,20 @@ impl World {
             } => {
                 let state = &self.procs[&id].state;
                 let (resident, owned) = (state.residents().len(), state.owned_cells());
+                // The lease fold: the body carries the session's log as it
+                // stands now, whatever the core believed it was.
+                let (log, seq) = self.stamp_log(id);
+                let stamped = log.as_ref().map(|log| log.record.state);
                 self.store_call(
                     id,
                     StoreReq::CasLease {
                         guard,
                         record,
+                        log,
                         resident,
                         owned,
                     },
-                    Reply::LeaseCas(op),
+                    Reply::LeaseCas { op, stamped, seq },
                 );
             }
             Effect::ReadLocalCells => {
@@ -75,10 +80,13 @@ impl World {
                 StoreReq::ReadLease { node: owner },
                 Reply::NodeLease(op),
             ),
-            Effect::RecoverNodeLog { op, .. } => {
-                // No fleet log in this model: every lease carries no log
-                // state, so nothing is ever left to recover.
-                immediate.push_back(Event::NodeLogRecovered { op, result: Ok(()) });
+            Effect::RecoverNodeLog { op, owner, .. } => {
+                if self.config.fleet {
+                    self.recover(id, owner, RecoverMode::Takeover(op));
+                } else {
+                    // Without the fleet posture no lease carries a log.
+                    immediate.push_back(Event::NodeLogRecovered { op, result: Ok(()) });
+                }
             }
             Effect::ReadCapacityPeers { op, .. } => {
                 self.store_call(id, StoreReq::ReadPeers, Reply::Peers(op))

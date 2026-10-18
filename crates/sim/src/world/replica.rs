@@ -4,15 +4,16 @@
 
 use super::*;
 
-/// A durability proof someone waits on: the replica's uploads must reach
-/// `position` in the bucket.
+/// A durability proof someone waits on: the replica must be durable
+/// through `position`.
 #[derive(Debug)]
 pub(super) enum Waiter {
-    /// `AwaitDurable`, an output gate.
+    /// `AwaitDurable`, an output gate: a fleet proof, or a bucket proof from
+    /// an upload or a credited bundle.
     Await { op: OpId, position: u64 },
-    /// `EnsureDurable`, before an eviction.
+    /// `EnsureDurable`, before an eviction: the cell's own prefix only.
     Ensure { op: OpId, position: u64 },
-    /// Wake maintenance proving an alarm source durable.
+    /// Wake maintenance proving an alarm source durable, by any proof.
     Task { task: u64, position: u64 },
 }
 
@@ -48,21 +49,39 @@ impl Waiter {
         }
     }
 
-    /// The answer, given what the bucket now holds or why it never will.
-    fn resolve(self, uploaded: Result<u64, Failure>) -> Resolution {
+    /// The proof the replica gives this waiter now, if any.
+    fn proof(&self, replica: &Replica) -> Option<(u64, ProofSource)> {
+        let position = self.position() as usize;
+        let bucket = replica.uploaded.max(replica.bundled);
+        let proven = match self {
+            // The ticket race prefers the fleet.
+            Waiter::Await { .. } if replica.fleet >= position => {
+                (replica.fleet, ProofSource::Fleet)
+            }
+            Waiter::Await { .. } => (bucket, ProofSource::Bucket),
+            Waiter::Ensure { .. } => (replica.uploaded, ProofSource::Bucket),
+            Waiter::Task { .. } => (bucket.max(replica.fleet), ProofSource::Bucket),
+        };
+        (proven.0 >= position).then_some((proven.0 as u64, proven.1))
+    }
+
+    /// The answer, given the proof or why there never will be one.
+    fn resolve(self, proof: Result<(u64, ProofSource), Failure>) -> Resolution {
         match self {
-            Waiter::Await { op, .. } => Resolution::Event(Event::DurableReached {
-                op,
-                result: uploaded,
-                source: ProofSource::Bucket,
-            }),
+            Waiter::Await { op, .. } => {
+                let (result, source) = match proof {
+                    Ok((position, source)) => (Ok(position), source),
+                    Err(failure) => (Err(failure), ProofSource::Bucket),
+                };
+                Resolution::Event(Event::DurableReached { op, result, source })
+            }
             Waiter::Ensure { op, .. } => Resolution::Event(Event::DurabilityChecked {
                 op,
-                result: uploaded.map(|_| ()),
+                result: proof.map(|_| ()),
             }),
             Waiter::Task { task, .. } => Resolution::Task {
                 task,
-                ok: uploaded.is_ok(),
+                ok: proof.is_ok(),
             },
         }
     }
@@ -105,6 +124,8 @@ impl World {
             let alarm = self.restored_alarm(&content);
             self.open_replica(id, &cell, epoch, content, "snapshot");
             self.restore_done(id, op, delay, true, alarm);
+        } else if !spec.fresh && self.undrained(id, &cell) {
+            self.fold(id, op, cell, spec);
         } else if !spec.fresh {
             self.store_call(
                 id,
@@ -163,6 +184,9 @@ impl World {
                 // The opening content is the chain this epoch was restored
                 // from, already in the bucket below this epoch.
                 uploaded: len,
+                bundled: len,
+                fleet: len,
+                queued: len,
                 uploading: false,
                 running: false,
                 waiters: Vec::new(),
@@ -226,12 +250,14 @@ impl World {
             StopCause::Fence => {
                 // Close in place: no durability pass, the file stays live.
                 let replica = proc.replicas.remove(&key).unwrap();
+                self.note_undrained_tail(id, &cell, &replica);
                 self.nodes[node].disk.live.insert(key, replica.content);
                 let delay = self.net_rng.range(1, 5);
                 self.work(id, delay, Work::Deliver(Event::RuntimeStopped { op }));
             }
             StopCause::Reset => {
-                proc.replicas.remove(&key);
+                let replica = proc.replicas.remove(&key).unwrap();
+                self.note_undrained_tail(id, &cell, &replica);
                 let delay = self.net_rng.range(1, 5);
                 self.work(id, delay, Work::Deliver(Event::RuntimeStopped { op }));
             }
@@ -256,15 +282,23 @@ impl World {
     }
 
     pub(super) fn kick_upload(&mut self, id: ProcId, cell: &str, epoch: Epoch) {
-        let Some(proc) = self.procs.get_mut(&id) else {
+        let key = (cell.to_string(), epoch);
+        let Some(replica) = self.procs.get(&id).and_then(|proc| proc.replicas.get(&key)) else {
             return;
         };
-        let Some(replica) = proc.replicas.get_mut(&(cell.to_string(), epoch)) else {
-            return;
-        };
-        if replica.uploading || replica.content.len() <= replica.uploaded {
+        if replica.uploading
+            || replica.content.len() <= replica.uploaded
+            || !self.per_cell_sync(id, replica)
+        {
             return;
         }
+        let replica = self
+            .procs
+            .get_mut(&id)
+            .unwrap()
+            .replicas
+            .get_mut(&key)
+            .unwrap();
         replica.uploading = true;
         let content = replica.content.clone();
         let len = content.len();
@@ -332,16 +366,21 @@ impl World {
         let Some(replica) = proc.replicas.get_mut(&key) else {
             return;
         };
-        let uploaded = replica.uploaded as u64;
-        let (ready, waiting): (Vec<Waiter>, Vec<Waiter>) = std::mem::take(&mut replica.waiters)
-            .into_iter()
-            .partition(|waiter| uploaded >= waiter.position());
-        replica.waiters = waiting;
-        let mut resolved: Vec<Resolution> = ready
-            .into_iter()
-            .map(|waiter| waiter.resolve(Ok(uploaded)))
-            .collect();
-        let stopped = replica.stop.is_some() && uploaded >= replica.content.len() as u64;
+        let mut resolved = Vec::new();
+        let mut fleet_gates = Vec::new();
+        for waiter in std::mem::take(&mut replica.waiters) {
+            match waiter.proof(replica) {
+                Some(proof) => {
+                    if let (Waiter::Await { op, .. }, ProofSource::Fleet) = (&waiter, proof.1) {
+                        self.stats.fleet_acks += 1;
+                        fleet_gates.push(*op);
+                    }
+                    resolved.push(waiter.resolve(Ok(proof)));
+                }
+                None => replica.waiters.push(waiter),
+            }
+        }
+        let stopped = replica.stop.is_some() && replica.uploaded >= replica.content.len();
         if stopped {
             let replica = proc.replicas.remove(&key).unwrap();
             let stop = replica.stop.unwrap();
@@ -358,6 +397,11 @@ impl World {
                     .into_iter()
                     .map(|waiter| waiter.resolve(Err(Failure::Ambiguous))),
             );
+        }
+        // A fleet proof settles its gate with no ownership read, so the
+        // commit it proves settles here.
+        for op in fleet_gates {
+            self.alarm_gate_verified(id, op, true);
         }
         let (events, tasks): (Vec<_>, Vec<_>) = resolved
             .into_iter()

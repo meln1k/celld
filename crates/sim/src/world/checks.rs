@@ -3,6 +3,7 @@
 //! ledger and keeps its own records.
 
 use super::*;
+use crate::store::Row;
 use alarms::AlarmLedger;
 
 /// What a checker may read when a fact arrives.
@@ -58,6 +59,17 @@ pub(super) struct Checker {
     fires: Vec<Fire>,
     /// The first proven run of each alarm installation, by its arming write.
     alarms_settled: BTreeMap<WriteId, FireId>,
+    /// Rows fleet credit covered while every member's disk held them, by
+    /// node-log session and log epoch.
+    fleet_proven: BTreeMap<(String, Epoch), Vec<Row>>,
+    fleet_rows: BTreeSet<Row>,
+    fleet_writes: BTreeSet<WriteId>,
+    /// Acknowledged writes no surviving disk or object holds, and their
+    /// cells, whose alarms may then be anything the lost writes replaced.
+    excused: BTreeSet<WriteId>,
+    excused_cells: BTreeSet<String>,
+    /// Every frame a follower fsynced: member, session, log epoch, row.
+    fsynced: BTreeSet<(String, String, Epoch, Row)>,
 }
 
 impl Checker {
@@ -166,8 +178,54 @@ impl Checker {
         });
     }
 
+    /// Follower `member` fsynced `row` into its fragment of `session`'s log
+    /// epoch `epoch`.
+    pub(super) fn on_fsync(&mut self, member: &str, session: &str, epoch: Epoch, row: &Row) {
+        self.fsynced
+            .insert((member.to_string(), session.to_string(), epoch, row.clone()));
+    }
+
+    pub(super) fn fsynced(&self, member: &str, session: &str, epoch: Epoch, row: &Row) -> bool {
+        self.fsynced
+            .contains(&(member.to_string(), session.to_string(), epoch, row.clone()))
+    }
+
+    /// A session's fleet credit covered `row`. `held` is whether every
+    /// member of its published record fsynced it; a credit that is not
+    /// proves nothing.
+    pub(super) fn on_fleet_credit(&mut self, session: &str, epoch: Epoch, row: &Row, held: bool) {
+        if held {
+            self.fleet_writes.insert(row.write);
+            self.fleet_rows.insert(row.clone());
+            self.fleet_proven
+                .entry((session.to_string(), epoch))
+                .or_default()
+                .push(row.clone());
+        }
+    }
+
+    /// The rows fleet credit truly proved in one log epoch of a session.
+    pub(super) fn fleet_proven(&self, session: &str, epoch: Epoch) -> Vec<Row> {
+        self.fleet_proven
+            .get(&(session.to_string(), epoch))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Writes recovery recorded as lost because every disk that held them
+    /// is gone: no protocol can restore them.
+    pub(super) fn excuse(&mut self, rows: Vec<Row>) {
+        // What a restore can load no longer includes them.
+        self.fleet_rows.retain(|row| !rows.contains(row));
+        for row in rows {
+            self.excused.insert(row.write);
+            self.excused_cells.insert(row.cell);
+        }
+    }
+
     /// A client is about to see `write` acknowledged: it must already be at
-    /// `position` in its epoch's prefix.
+    /// `position` in its epoch's prefix, in a bundle its session's recovery
+    /// will read, or on every follower.
     pub(super) fn on_reply_acked(
         &mut self,
         view: View,
@@ -182,7 +240,13 @@ impl Checker {
             .prefix(cell, epoch)
             .and_then(|prefix| prefix.entries.get(&position))
             == Some(&write);
-        if !in_prefix {
+        let row = Row {
+            cell: cell.to_string(),
+            epoch,
+            position,
+            write,
+        };
+        if !in_prefix && !view.store.gatherable(&row) && !self.fleet_writes.contains(&write) {
             self.flag(
                 view.t,
                 "ack-before-durable",
@@ -235,7 +299,11 @@ impl Checker {
             };
             let missing: Vec<&&Ack> = cell_acks
                 .iter()
-                .filter(|ack| ack.epoch < restore.epoch && !restore.content.contains(&ack.write))
+                .filter(|ack| {
+                    ack.epoch < restore.epoch
+                        && !restore.content.contains(&ack.write)
+                        && !self.excused.contains(&ack.write)
+                })
                 .collect();
             if let Some(first) = missing.first() {
                 found.push((
@@ -284,7 +352,8 @@ impl Checker {
             // proven.
             stats.alarm_reruns += 1;
         }
-        if let Some(settled) = self.alarms_settled.get(&armed_by) {
+        let excused = self.excused_cells.contains(cell);
+        if let Some(settled) = self.alarms_settled.get(&armed_by).filter(|_| !excused) {
             let current = view
                 .store
                 .read_owner(cell)
@@ -342,7 +411,10 @@ impl Checker {
     /// retirement record. Without one, an evicted or orphaned cell waits for
     /// a request that may never come.
     pub(super) fn check_discoverable(&mut self, view: View, cell: &str) {
-        let Some(content) = view.store.read_chain(cell, Epoch::MAX) else {
+        if self.excused_cells.contains(cell) {
+            return;
+        }
+        let Some(content) = self.durable_content(view, cell) else {
             return;
         };
         let row = view.ledger.row(&content);
@@ -364,6 +436,42 @@ impl Checker {
         );
     }
 
+    /// What a restore of `cell` loads once recovery or a fold gathered every
+    /// tail: the newest per-cell content, extended by the rows bundles and
+    /// fleet proofs hold for that epoch, or a newer one they alone hold.
+    fn durable_content(&self, view: View, cell: &str) -> Option<Vec<WriteId>> {
+        let tails = || {
+            view.store.bundled_rows(cell).chain(
+                self.fleet_rows
+                    .range(Row::first(cell)..)
+                    .take_while(|row| row.cell == cell),
+            )
+        };
+        let newest = view.store.newest_prefix(cell);
+        let tail = tails().map(|row| row.epoch).max();
+        let (epoch, base) = match (newest, tail) {
+            (Some((epoch, content)), Some(tail)) if tail == epoch => (epoch, content),
+            (newest, Some(tail)) if newest.as_ref().is_none_or(|(epoch, _)| tail > *epoch) => {
+                (tail, newest.map(|(_, content)| content).unwrap_or_default())
+            }
+            (newest, _) => return newest.map(|(_, content)| content),
+        };
+        let mut entries: BTreeMap<u64, WriteId> = (1..).zip(base).collect();
+        for row in tails() {
+            if row.epoch == epoch {
+                entries.insert(row.position, row.write);
+            }
+        }
+        Some(
+            entries
+                .into_iter()
+                .zip(1..)
+                .take_while(|((position, _), expected)| position == expected)
+                .map(|((_, write), _)| write)
+                .collect(),
+        )
+    }
+
     /// Every alarm the bucket still holds and can find must fire with no
     /// request to wake its cell. `contents` is what the audit node, which
     /// restored the fleet from the bucket alone, holds for each cell, and
@@ -379,6 +487,9 @@ impl Checker {
     ) {
         let mut lost = Vec::new();
         for (cell, content) in contents {
+            if self.excused_cells.contains(&cell) {
+                continue;
+            }
             let row = view.ledger.row(&content);
             let (Some(at_ms), Some(armed_by)) = (row.at_ms, row.armed_by) else {
                 continue;

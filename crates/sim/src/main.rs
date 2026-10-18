@@ -5,6 +5,7 @@
 //! celld-sim --seed 17 --trace          # replay one seed with its full trace
 //! celld-sim --seeds 0..200 --mutation shared-prefix
 //! celld-sim --seeds 0..100000 --jobs 16 # one worker per core by default
+//! celld-sim --seeds 0..500 --fleet on   # every seed in the fleet posture
 //! ```
 
 // A developer tool's report, not celld's stdout contract.
@@ -21,6 +22,7 @@ fn main() {
     let mut trace = false;
     let mut calm = false;
     let mut mutation = Mutation::None;
+    let mut fleet = None;
     let mut jobs = std::thread::available_parallelism().map_or(1, usize::from);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -40,6 +42,13 @@ fn main() {
                 mutation =
                     Mutation::parse(&name).unwrap_or_else(|| panic!("unknown mutation {name}"));
             }
+            "--fleet" => {
+                fleet = match args.next().as_deref() {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    _ => panic!("--fleet on|off"),
+                };
+            }
             "--jobs" => {
                 jobs = args.next().and_then(|n| n.parse().ok()).expect("--jobs N");
             }
@@ -53,6 +62,7 @@ fn main() {
             SimConfig::swarm(seed)
         };
         config.mutation = mutation;
+        config.fleet = fleet.unwrap_or(config.fleet);
         config.trace = trace;
         config
     };
@@ -142,7 +152,7 @@ impl Report {
 fn config_summary(config: &SimConfig) -> String {
     format!(
         "nodes={} cells={} ttl={} max_resident={} sticky={} alarms={} alarm_resident_ms={} \
-         wake_tick_ms={} faults={:?}",
+         wake_tick_ms={} fleet={} faults={:?}",
         config.nodes,
         config.cells,
         config.ttl_ms,
@@ -151,6 +161,7 @@ fn config_summary(config: &SimConfig) -> String {
         config.alarm_probability,
         config.alarm_resident_ms,
         config.wake_tick_ms,
+        config.fleet,
         config.faults
     )
 }

@@ -116,8 +116,19 @@ Each mutation plants a protocol bug and must fail its check: `ack-before-wake-en
 `retire-unproven`, `no-orphan-wake`, and `silent-wake-coverage` cover the
 alarm path.
 
-It does not yet model WebSockets, fleet durability (the node log and its
-followers), drains and adoption, or generation swaps.
+Half the swarm runs in the fleet posture (`--fleet on` forces it). Each
+process ships its commits to up to two followers and acknowledges once every
+follower has fsynced them. It folds its log record into its node lease and
+flushes bundles. A takeover recovers the dead session's log before it
+restores: it fences the record, seals the followers, gathers their fragments
+and the bundles, and seals the record. An acknowledgement must then be in
+the prefix, in a bundle that recovery will read, or fsynced by every follower
+of the published record. A loss that recovery declares counts against the
+run unless no disk or object still holds the write. `ack-one-follower`,
+`skip-log-recovery`, and `append-after-seal` cover this path.
+
+It does not yet model WebSockets, drains and adoption, generation swaps, or
+memory pressure.
 
 ### The shell on a simulated runtime
 

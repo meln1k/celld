@@ -2,6 +2,8 @@
 //! the way there and back, and what each answer becomes in the caller.
 
 use super::*;
+use crate::store::{LogWire, Row};
+use celld_logic::log_tier::LogState;
 use celld_logic::wake::Retirement;
 
 #[derive(Debug)]
@@ -25,6 +27,8 @@ pub(super) enum StoreReq {
     CasLease {
         guard: CasGuard,
         record: NodeLeaseRecord,
+        /// The folded log the shell stamped into the body.
+        log: Option<LogWire>,
         resident: usize,
         owned: usize,
     },
@@ -66,6 +70,37 @@ pub(super) enum StoreReq {
     ReadOwners {
         cells: Vec<String>,
     },
+    /// A node's lease with its folded log.
+    ReadLeaseLog {
+        node: String,
+    },
+    /// Replace a dead session's folded log under the lease's ETag.
+    CasLeaseLog {
+        node: String,
+        etag: String,
+        log: LogWire,
+    },
+    /// Every node lease, for the ensemble and the eager sweep.
+    LogPeers,
+    ReadLeases {
+        nodes: Vec<String>,
+    },
+    PutBundle {
+        session: String,
+        rows: Vec<Row>,
+    },
+    ReadBundles {
+        session: String,
+    },
+    /// Recovery's merged uploads, one per cell epoch.
+    PutRecovered {
+        groups: BTreeMap<(String, Epoch), BTreeMap<u64, WriteId>>,
+        writer: ProcId,
+    },
+    /// An object nothing reads back, such as a loss record.
+    PutObject {
+        key: String,
+    },
 }
 
 #[derive(Debug)]
@@ -87,6 +122,12 @@ pub(super) enum StoreRes {
     Bool(bool),
     Live(BTreeSet<String>),
     Owners(Vec<Option<OwnerRecord>>),
+    LeaseLog(Option<(NodeLeaseRecord, Option<LogWire>)>),
+    /// The new ETag, or `None` when the guard missed.
+    LeaseLogCas(Option<String>),
+    LogPeers(Vec<NodeLeaseRecord>),
+    Leases(Vec<NodeLeaseRecord>),
+    Rows(Vec<Row>),
 }
 
 impl StoreRes {
@@ -132,7 +173,13 @@ pub(super) enum Reply {
     OwnerReleased(OpId),
     SelfLease(OpId),
     NodeLease(OpId),
-    LeaseCas(OpId),
+    LeaseCas {
+        op: OpId,
+        /// The folded log state the body carried, and the own-log sequence
+        /// an applied write publishes.
+        stamped: Option<LogState>,
+        seq: u64,
+    },
     Peers(OpId),
     Verify {
         op: OpId,
@@ -150,6 +197,10 @@ pub(super) enum Reply {
     },
     /// A step of a shell task (`alarms::Task`).
     Task {
+        task: u64,
+    },
+    /// A step of a node-log task.
+    Log {
         task: u64,
     },
     /// Nobody waits for the answer.
@@ -269,16 +320,26 @@ impl World {
             StoreReq::CasLease {
                 guard,
                 record,
+                log,
                 resident,
                 owned,
             } => {
                 let sampled_ms = record.expires_ms.saturating_sub(self.config.ttl_ms);
-                let (guard, record, resident, owned) =
-                    (guard.clone(), record.clone(), *resident, *owned);
-                StoreRes::LeaseCas(
-                    self.store
-                        .cas_lease(&guard, &record, resident, owned, sampled_ms),
-                )
+                let (guard, record, log, resident, owned) = (
+                    guard.clone(),
+                    record.clone(),
+                    log.clone(),
+                    *resident,
+                    *owned,
+                );
+                StoreRes::LeaseCas(self.store.cas_lease(
+                    &guard,
+                    &record,
+                    log.as_ref(),
+                    resident,
+                    owned,
+                    sampled_ms,
+                ))
             }
             StoreReq::ReadPeers => {
                 let view_ms = self.call_wall(proc, sender);
@@ -389,6 +450,43 @@ impl World {
                     .map(|cell| self.store.read_owner(cell))
                     .collect(),
             ),
+            StoreReq::ReadLeaseLog { node } => StoreRes::LeaseLog(self.store.read_lease_log(node)),
+            StoreReq::CasLeaseLog { node, etag, log } => {
+                let (node, etag, log) = (node.clone(), etag.clone(), log.clone());
+                StoreRes::LeaseLogCas(self.store.cas_lease_log(&node, &etag, log))
+            }
+            StoreReq::LogPeers => StoreRes::LogPeers(
+                self.store
+                    .leases()
+                    .map(|lease| lease.record.clone())
+                    .collect(),
+            ),
+            StoreReq::ReadLeases { nodes } => StoreRes::Leases(
+                nodes
+                    .iter()
+                    .filter_map(|node| self.store.read_lease(node))
+                    .collect(),
+            ),
+            StoreReq::PutBundle { session, rows } => {
+                let (session, rows) = (session.clone(), rows.clone());
+                self.store.put_bundle(&session, &rows);
+                StoreRes::Done
+            }
+            StoreReq::ReadBundles { session } => StoreRes::Rows(self.store.bundle_rows(session)),
+            StoreReq::PutRecovered { groups, writer } => {
+                let (groups, writer) = (groups.clone(), *writer);
+                for ((cell, epoch), rows) in groups {
+                    let writers = self.store.put_recovered(&cell, epoch, &rows, writer);
+                    let (checker, view) = self.checks();
+                    checker.on_upload(view, &cell, epoch, writers);
+                }
+                StoreRes::Done
+            }
+            StoreReq::PutObject { key } => {
+                let key = key.clone();
+                self.note(|| format!("put {key}"));
+                StoreRes::Done
+            }
         };
         self.calls.get_mut(&call).unwrap().result = Some(result);
     }
@@ -421,6 +519,10 @@ impl World {
                 self.task_reply(id, task, result);
                 return;
             }
+            Reply::Log { task } => {
+                self.log_reply(id, task, result);
+                return;
+            }
             Reply::Ignore => return,
             Reply::OwnerRead(op) => Event::OwnerRead {
                 op,
@@ -446,12 +548,23 @@ impl World {
                 now_ms: 0,
                 result: result.map(StoreRes::lease),
             },
-            Reply::LeaseCas(op) => Event::NodeLeaseCasCompleted {
-                op,
-                now_mono_ms: 0,
-                result: result.map(StoreRes::lease_cas),
-                stamped_log_state: None,
-            },
+            Reply::LeaseCas { op, stamped, seq } => {
+                let result = result.map(StoreRes::lease_cas);
+                let applied = matches!(result, Ok(LeaseCasOutcome::Applied { .. }));
+                self.drive(
+                    id,
+                    Event::NodeLeaseCasCompleted {
+                        op,
+                        now_mono_ms: 0,
+                        result,
+                        stamped_log_state: stamped,
+                    },
+                );
+                if applied && self.procs.contains_key(&id) {
+                    self.lease_applied(id, seq);
+                }
+                return;
+            }
             Reply::Peers(op) => {
                 let wall = self.wall(id);
                 match result {

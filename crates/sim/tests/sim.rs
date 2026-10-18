@@ -45,6 +45,25 @@ fn a_calm_fleet_passes_and_exercises_every_path() {
 }
 
 #[test]
+fn a_calm_fleet_acknowledges_on_its_followers() {
+    for seed in 0..4 {
+        let config = SimConfig {
+            fleet: true,
+            ..SimConfig::calm()
+        };
+        let outcome = run(seed, &config);
+        assert!(!outcome.failed(), "{}", report(&outcome));
+        let stats = &outcome.stats;
+        assert!(stats.fleet_acks > 100, "{stats:?}");
+        assert!(stats.bundle_credits > 0, "{stats:?}");
+        // The audit node took every cell over from sessions that sealed
+        // their logs on the way down, so no takeover waited for recovery.
+        assert!(stats.takeovers > 0, "{stats:?}");
+        assert_eq!(stats.log_recoveries, 0, "{stats:?}");
+    }
+}
+
+#[test]
 fn swarm_seeds_pass() {
     let seeds: u64 = std::env::var("CELLD_SIM_SEEDS")
         .ok()
@@ -71,6 +90,9 @@ fn swarm_seeds_pass() {
     assert!(totals.alarm_reruns > 0, "{totals:?}");
     assert!(totals.wake_hints > 0, "{totals:?}");
     assert!(totals.audit_alarm_runs > 0, "{totals:?}");
+    assert!(totals.fleet_acks > 0, "{totals:?}");
+    assert!(totals.log_degrades > 0, "{totals:?}");
+    assert!(totals.log_recoveries > 0, "{totals:?}");
 }
 
 /// Whether some swarm seed below `limit` fails the planted bug on the check
@@ -141,6 +163,43 @@ fn retiring_a_wake_entry_without_proof_strands_an_alarm() {
         Mutation::RetireUnproven,
         10,
         &["alarm-undiscoverable"]
+    ));
+}
+
+fn fleet(seed: u64) -> SimConfig {
+    SimConfig {
+        fleet: true,
+        ..SimConfig::swarm(seed)
+    }
+}
+
+#[test]
+fn a_fleet_proof_from_one_follower_is_caught_at_the_ack() {
+    assert!(caught_in(
+        fleet,
+        Mutation::AckOneFollower,
+        10,
+        &["ack-before-durable"]
+    ));
+}
+
+#[test]
+fn a_takeover_that_skips_log_recovery_loses_a_write() {
+    assert!(caught_in(
+        fleet,
+        Mutation::SkipLogRecovery,
+        10,
+        &["lost-write"]
+    ));
+}
+
+#[test]
+fn a_follower_that_appends_after_its_seal_loses_a_write() {
+    assert!(caught_in(
+        fleet,
+        Mutation::AppendAfterSeal,
+        20,
+        &["lost-write"]
     ));
 }
 

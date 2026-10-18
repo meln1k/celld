@@ -221,6 +221,7 @@ impl World {
                 }),
             );
         }
+        self.log_commit(id, cell, epoch);
         self.kick_upload(id, cell, epoch);
         Some((write, position, alarm))
     }

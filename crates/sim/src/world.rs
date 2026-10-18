@@ -13,13 +13,15 @@
 //! too. Each part of the shell has its module: [`process`], the effects in
 //! [`shell`], the bucket calls in [`store_rpc`], databases and their
 //! replication in [`replica`], [`requests`], [`clients`], [`faults`] and
-//! the phases, and alarms and their wake entries in [`alarms`]. The
-//! checkers in [`checks`] only read what the shell reports.
+//! the phases, alarms and their wake entries in [`alarms`], and the fleet
+//! durability tier in [`node_log`]. The checkers in [`checks`] only read
+//! what the shell reports.
 
 mod alarms;
 mod checks;
 mod clients;
 mod faults;
+mod node_log;
 mod process;
 mod replica;
 mod requests;
@@ -42,6 +44,7 @@ use crate::{Mutation, Outcome, ProcId, Rng, SimConfig, Stats, Violation, WriteId
 use alarms::{AlarmLedger, AlarmOp, ArmGate, ArmWaiter, ScanKind, WakeShell};
 use checks::{Checker, View};
 use faults::FaultKind;
+use node_log::{Fragment, LogShell, LogWork, RecoverMode};
 use replica::{Proof, Waiter};
 use store_rpc::{Call, Reply, StoreReq, StoreRes};
 
@@ -159,6 +162,7 @@ enum Work {
     WakeTick {
         cleanup: bool,
     },
+    Log(LogWork),
 }
 
 #[derive(Debug)]
@@ -175,6 +179,7 @@ enum What {
     EvictTick,
     ChaosEnd,
     Probe,
+    CloseLogs,
     Audit,
     AlarmCheck,
     End,
@@ -187,6 +192,8 @@ enum What {
 struct Disk {
     live: BTreeMap<(String, Epoch), Vec<WriteId>>,
     evicted: BTreeMap<(String, Epoch), Vec<WriteId>>,
+    /// The node-log fragments this node holds as a follower, by session.
+    peerlog: BTreeMap<String, Fragment>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +226,12 @@ struct Replica {
     start_len: usize,
     /// Position the bucket holds for this epoch's lineage.
     uploaded: usize,
+    /// Position a credited bundle covers, and the position every member of
+    /// the ensemble confirmed: the bucket and fleet proofs of the node log.
+    bundled: usize,
+    fleet: usize,
+    /// Position the node log has taken from this replica.
+    queued: usize,
     uploading: bool,
     running: bool,
     waiters: Vec<Waiter>,
@@ -299,6 +312,7 @@ struct Proc {
     published: BTreeMap<String, Epoch>,
     requests: BTreeMap<RequestId, ReqCtx>,
     wake: WakeShell,
+    log: LogShell,
     halting: bool,
 }
 
@@ -527,6 +541,9 @@ impl World {
         self.at(chaos_end, What::ChaosEnd);
         self.at(probe, What::Probe);
         let audit = self.audit_start();
+        if self.config.fleet {
+            self.at(audit - node_log::CLOSE_LEAD_MS, What::CloseLogs);
+        }
         self.at(audit, What::Audit);
         self.at(audit + self.alarm_window(), What::AlarmCheck);
         let audit_end = audit + self.alarm_window() + 4 * self.config.ttl_ms + PROBE_WINDOW_MS;
@@ -553,13 +570,24 @@ impl World {
     /// can bring a cell back for its alarm: the dead fleet's leases expire,
     /// a due scan finds the entry, and the takeover restores the cell.
     fn alarm_window(&self) -> u64 {
-        2 * self.config.ttl_ms + 3 * self.config.wake_tick_ms + 10_000
+        2 * self.config.ttl_ms + 3 * self.config.wake_tick_ms + 10_000 + self.log_grace()
     }
 
     /// How overdue an alarm must be, at the end of that window, before its
     /// absence counts as lost.
     fn alarm_grace(&self) -> u64 {
-        self.config.ttl_ms + 2 * self.config.wake_tick_ms + 5_000
+        self.config.ttl_ms + 2 * self.config.wake_tick_ms + 5_000 + self.log_grace()
+    }
+
+    /// In the fleet posture a takeover may wait for node-log recovery,
+    /// which gives up on an unreachable follower only once its lease has
+    /// been dead this long.
+    fn log_grace(&self) -> u64 {
+        if self.config.fleet {
+            (3 * self.config.ttl_ms).max(20_000)
+        } else {
+            0
+        }
     }
 
     fn fault_gap(&mut self, per_minute: f64) -> u64 {
@@ -589,6 +617,8 @@ impl World {
             What::EvictTick => self.evict_tick(),
             What::ChaosEnd => self.chaos_end(),
             What::Probe => self.probe(),
+            // The fleet shuts down gracefully before the audit kills it.
+            What::CloseLogs => self.close_logs(),
             What::Audit => self.start_audit(),
             What::AlarmCheck => {
                 if let Some(audit) = self.audit_proc {
@@ -721,6 +751,13 @@ fn stamp(event: &mut Event, wall: u64, mono: u64) {
             *now_mono_ms = mono;
         }
         Event::WakeHintAt { now_mono_ms, .. } => *now_mono_ms = mono,
+        Event::NudgeNodeLease {
+            now_ms,
+            now_mono_ms,
+        } => {
+            *now_ms = wall;
+            *now_mono_ms = mono;
+        }
         _ => {}
     }
 }

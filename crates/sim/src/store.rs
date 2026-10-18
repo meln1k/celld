@@ -6,6 +6,7 @@
 //! and wake entries. Every operation is applied atomically at one simulated
 //! instant; the latency and loss around that instant belong to the world.
 
+use celld_logic::log_tier::{LogRecord, LogState};
 use celld_logic::wake::{parse_entry_key, Retirement};
 use celld_logic::{CasGuard, CasOutcome, Epoch, LeaseCasOutcome, NodeLeaseRecord, OwnerRecord};
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,9 +50,41 @@ struct OwnerEntry {
     etag: u64,
 }
 
+/// The `log` object folded into `nodes/<node>.json`
+/// (`ownership_store::NodeLogWire`): the session's node-log record, and
+/// whether the session may have acknowledged a write through its fleet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogWire {
+    pub record: LogRecord,
+    pub active: bool,
+}
+
+/// One write as the node log carries it: a cell's database content at one
+/// position of one epoch.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Row {
+    pub cell: String,
+    pub epoch: Epoch,
+    pub position: u64,
+    pub write: WriteId,
+}
+
+impl Row {
+    /// Sorts before every row of `cell`.
+    pub fn first(cell: &str) -> Self {
+        Row {
+            cell: cell.to_string(),
+            epoch: 0,
+            position: 0,
+            write: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LeaseEntry {
     pub record: NodeLeaseRecord,
+    pub log: Option<LogWire>,
     pub etag: u64,
     /// Load the writing process reported with this record.
     pub resident: usize,
@@ -74,6 +107,14 @@ pub struct Store {
     leases: BTreeMap<String, LeaseEntry>,
     prefixes: BTreeMap<(String, Epoch), Prefix>,
     pub claims: Vec<Claim>,
+    /// `log/<node>/<generation>/bundle/…`: every row each session's bundle
+    /// flushes carried, in flush order.
+    bundles: BTreeMap<String, Vec<Row>>,
+    /// Every row any bundle carries.
+    bundled: BTreeSet<Row>,
+    /// The rows of bundles that landed while their session's record was
+    /// open, so a recovery still gathers them.
+    gatherable: BTreeSet<Row>,
     /// `wake/entries/<minute>/<cell>/<identity>`, by full key.
     wake_entries: BTreeSet<String>,
     /// `wake/retired/<cell>.json`: the retirement frontier and its ETag.
@@ -91,6 +132,9 @@ impl Store {
             leases: BTreeMap::new(),
             prefixes: BTreeMap::new(),
             claims: Vec::new(),
+            bundles: BTreeMap::new(),
+            bundled: BTreeSet::new(),
+            gatherable: BTreeSet::new(),
             wake_entries: BTreeSet::new(),
             retirements: BTreeMap::new(),
             waker: None,
@@ -188,6 +232,7 @@ impl Store {
         &mut self,
         guard: &CasGuard,
         record: &NodeLeaseRecord,
+        log: Option<&LogWire>,
         resident: usize,
         owned: usize,
         sampled_ms: u64,
@@ -199,10 +244,12 @@ impl Store {
         let etag = self.etag();
         let mut stored = record.clone();
         stored.etag = String::new();
+        stored.log_state = log.map(|log| log.record.state);
         self.leases.insert(
             record.node.clone(),
             LeaseEntry {
                 record: stored,
+                log: log.cloned(),
                 etag,
                 resident,
                 owned,
@@ -216,6 +263,108 @@ impl Store {
 
     pub fn leases(&self) -> impl Iterator<Item = &LeaseEntry> {
         self.leases.values()
+    }
+
+    /// A node's lease with its folded log, as a recovery reads it.
+    pub fn read_lease_log(&self, node: &str) -> Option<(NodeLeaseRecord, Option<LogWire>)> {
+        let entry = self.leases.get(node)?;
+        Some((self.read_lease(node)?, entry.log.clone()))
+    }
+
+    /// `write_dead_record`: replace a dead session's folded log under the
+    /// lease's ETag, carrying every authority field through, expiry too.
+    /// Returns the new ETag, or `None` when the guard missed.
+    pub fn cas_lease_log(&mut self, node: &str, etag: &str, log: LogWire) -> Option<String> {
+        let current = self.leases.get(node).map(|entry| entry.etag);
+        if !self.guard_matches(&CasGuard::Match(etag.to_string()), current) {
+            return None;
+        }
+        let etag = self.etag();
+        let entry = self.leases.get_mut(node)?;
+        entry.record.log_state = Some(log.record.state);
+        entry.log = Some(log);
+        entry.etag = etag;
+        Some(etag.to_string())
+    }
+
+    pub fn put_bundle(&mut self, session: &str, rows: &[Row]) {
+        let (node, generation) = session.split_once('/').expect("a session names its node");
+        let open = self.leases.get(node).is_some_and(|entry| {
+            entry.record.generation == generation
+                && entry
+                    .log
+                    .as_ref()
+                    .is_some_and(|log| log.record.state == LogState::Open)
+        });
+        if open {
+            self.gatherable.extend(rows.iter().cloned());
+        }
+        self.bundled.extend(rows.iter().cloned());
+        self.bundles
+            .entry(session.to_string())
+            .or_default()
+            .extend_from_slice(rows);
+    }
+
+    pub fn bundle_rows(&self, session: &str) -> Vec<Row> {
+        self.bundles.get(session).cloned().unwrap_or_default()
+    }
+
+    /// Recovery's merged L0 for one cell epoch: the gathered rows on top of
+    /// what the prefix, or failing that the chain below it, already holds.
+    /// `writer` is the dead session's process, whose epoch this still is.
+    /// Returns how many distinct processes have now written the prefix.
+    pub fn put_recovered(
+        &mut self,
+        cell: &str,
+        epoch: Epoch,
+        rows: &BTreeMap<u64, WriteId>,
+        writer: ProcId,
+    ) -> usize {
+        let base = match self.prefix(cell, epoch).map(Prefix::content) {
+            Some(content) if !content.is_empty() => content,
+            _ => self.read_chain(cell, epoch).unwrap_or_default(),
+        };
+        let key = self.prefix_key(cell, epoch);
+        let prefix = self.prefixes.entry(key).or_default();
+        for (index, write) in base.iter().enumerate() {
+            prefix.entries.entry(index as u64 + 1).or_insert(*write);
+        }
+        for (position, write) in rows {
+            prefix.entries.insert(*position, *write);
+        }
+        if !prefix.writers.contains(&writer) {
+            prefix.writers.push(writer);
+        }
+        prefix.writers.len()
+    }
+
+    /// Every row any bundle carries for `cell`, in epoch and position order.
+    pub fn bundled_rows<'a>(&'a self, cell: &'a str) -> impl Iterator<Item = &'a Row> + 'a {
+        self.bundled
+            .range(Row::first(cell)..)
+            .take_while(move |row| row.cell == cell)
+    }
+
+    /// The newest prefix of `cell` that holds data: its epoch and the
+    /// content a restore of it produces.
+    pub fn newest_prefix(&self, cell: &str) -> Option<(Epoch, Vec<WriteId>)> {
+        self.prefixes
+            .range((cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX))
+            .rev()
+            .find(|(_, prefix)| !prefix.entries.is_empty())
+            .map(|((_, epoch), prefix)| (*epoch, prefix.content()))
+    }
+
+    /// Whether a bundle that a recovery of its session still reads carries
+    /// `row`.
+    pub fn gatherable(&self, row: &Row) -> bool {
+        self.gatherable.contains(row)
+    }
+
+    /// Whether some bundle of any session carries `row`.
+    pub fn bundled(&self, row: &Row) -> bool {
+        self.bundled.contains(row)
     }
 
     fn prefix_key(&self, cell: &str, epoch: Epoch) -> (String, Epoch) {
