@@ -310,6 +310,7 @@ impl World {
         let view = View {
             t: self.t,
             store: &self.store,
+            nodes: &self.nodes,
             ledger: &self.alarm_ops,
         };
         self.checker

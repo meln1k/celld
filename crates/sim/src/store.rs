@@ -6,7 +6,7 @@
 //! and wake entries. Every operation is applied atomically at one simulated
 //! instant; the latency and loss around that instant belong to the world.
 
-use celld_logic::log_tier::{LogRecord, LogState};
+use celld_logic::log_tier::LogRecord;
 use celld_logic::wake::{parse_entry_key, Retirement};
 use celld_logic::{CasGuard, CasOutcome, Epoch, LeaseCasOutcome, NodeLeaseRecord, OwnerRecord};
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,6 +59,45 @@ pub struct LogWire {
     pub active: bool,
 }
 
+/// A node-log session: one process's lease generation on its node, and
+/// the `log/<node>/<generation>/` objects that process writes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Session {
+    pub node: String,
+    pub proc: ProcId,
+}
+
+impl Session {
+    /// The session whose process holds `lease`.
+    pub fn of_lease(lease: &NodeLeaseRecord) -> Self {
+        let proc = lease
+            .generation
+            .strip_prefix('g')
+            .and_then(|proc| proc.parse().ok())
+            .expect("generations name their process");
+        Session {
+            node: lease.node.clone(),
+            proc,
+        }
+    }
+
+    /// The lease generation this session's process writes.
+    pub fn generation(&self) -> String {
+        format!("g{}", self.proc)
+    }
+
+    /// Whether `lease` is still this session's.
+    pub fn owns(&self, lease: &NodeLeaseRecord) -> bool {
+        lease.node == self.node && lease.generation == self.generation()
+    }
+}
+
+impl std::fmt::Display for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/g{}", self.node, self.proc)
+    }
+}
+
 /// One write as the node log carries it: a cell's database content at one
 /// position of one epoch.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -109,12 +148,9 @@ pub struct Store {
     pub claims: Vec<Claim>,
     /// `log/<node>/<generation>/bundle/…`: every row each session's bundle
     /// flushes carried, in flush order.
-    bundles: BTreeMap<String, Vec<Row>>,
+    bundles: BTreeMap<Session, Vec<Row>>,
     /// Every row any bundle carries.
     bundled: BTreeSet<Row>,
-    /// The rows of bundles that landed while their session's record was
-    /// open, so a recovery still gathers them.
-    gatherable: BTreeSet<Row>,
     /// `wake/entries/<minute>/<cell>/<identity>`, by full key.
     wake_entries: BTreeSet<String>,
     /// `wake/retired/<cell>.json`: the retirement frontier and its ETag.
@@ -134,7 +170,6 @@ impl Store {
             claims: Vec::new(),
             bundles: BTreeMap::new(),
             bundled: BTreeSet::new(),
-            gatherable: BTreeSet::new(),
             wake_entries: BTreeSet::new(),
             retirements: BTreeMap::new(),
             waker: None,
@@ -287,26 +322,15 @@ impl Store {
         Some(etag.to_string())
     }
 
-    pub fn put_bundle(&mut self, session: &str, rows: &[Row]) {
-        let (node, generation) = session.split_once('/').expect("a session names its node");
-        let open = self.leases.get(node).is_some_and(|entry| {
-            entry.record.generation == generation
-                && entry
-                    .log
-                    .as_ref()
-                    .is_some_and(|log| log.record.state == LogState::Open)
-        });
-        if open {
-            self.gatherable.extend(rows.iter().cloned());
-        }
+    pub fn put_bundle(&mut self, session: &Session, rows: &[Row]) {
         self.bundled.extend(rows.iter().cloned());
         self.bundles
-            .entry(session.to_string())
+            .entry(session.clone())
             .or_default()
             .extend_from_slice(rows);
     }
 
-    pub fn bundle_rows(&self, session: &str) -> Vec<Row> {
+    pub fn bundle_rows(&self, session: &Session) -> Vec<Row> {
         self.bundles.get(session).cloned().unwrap_or_default()
     }
 
@@ -356,15 +380,16 @@ impl Store {
             .map(|((_, epoch), prefix)| (*epoch, prefix.content()))
     }
 
-    /// Whether a bundle that a recovery of its session still reads carries
-    /// `row`.
-    pub fn gatherable(&self, row: &Row) -> bool {
-        self.gatherable.contains(row)
+    /// Whether `row` is at its position in its epoch's prefix.
+    pub fn prefix_holds(&self, row: &Row) -> bool {
+        self.prefix(&row.cell, row.epoch)
+            .is_some_and(|prefix| prefix.entries.get(&row.position) == Some(&row.write))
     }
 
-    /// Whether some bundle of any session carries `row`.
-    pub fn bundled(&self, row: &Row) -> bool {
-        self.bundled.contains(row)
+    /// Whether the bucket holds `row`: in its prefix, or in some session's
+    /// bundle.
+    pub fn holds(&self, row: &Row) -> bool {
+        self.prefix_holds(row) || self.bundled.contains(row)
     }
 
     fn prefix_key(&self, cell: &str, epoch: Epoch) -> (String, Epoch) {

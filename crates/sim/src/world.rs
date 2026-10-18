@@ -39,7 +39,7 @@ use celld_logic::{
     Route, State, StopCause, Timer,
 };
 
-use crate::store::Store;
+use crate::store::{Session, Store};
 use crate::{Mutation, Outcome, ProcId, Rng, SimConfig, Stats, Violation, WriteId};
 use alarms::{AlarmLedger, AlarmOp, ArmGate, ArmWaiter, ScanKind, WakeShell};
 use checks::{Checker, View};
@@ -193,7 +193,7 @@ struct Disk {
     live: BTreeMap<(String, Epoch), Vec<WriteId>>,
     evicted: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// The node-log fragments this node holds as a follower, by session.
-    peerlog: BTreeMap<String, Fragment>,
+    peerlog: BTreeMap<Session, Fragment>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -492,6 +492,7 @@ impl World {
         let view = View {
             t: self.t,
             store: &self.store,
+            nodes: &self.nodes,
             ledger: &self.alarm_ops,
         };
         (&mut self.checker, view)
@@ -584,7 +585,7 @@ impl World {
     /// been dead this long.
     fn log_grace(&self) -> u64 {
         if self.config.fleet {
-            (3 * self.config.ttl_ms).max(20_000)
+            self.dead_member_grace()
         } else {
             0
         }

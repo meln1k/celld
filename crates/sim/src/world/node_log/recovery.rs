@@ -15,8 +15,6 @@ const PEER_TIMEOUT_MS: u64 = 5_000;
 /// How long another node's recovery claim stays live without a heartbeat.
 const CLAIM_TTL_MS: u64 = 30_000;
 const RECOVERY_PASSES: u32 = 5;
-/// How often startup polls a recovery another node is running.
-const CLAIM_POLL_MS: u64 = 250;
 
 /// Who asked for a recovery, and so who hears how it ended.
 #[derive(Clone, Copy, Debug)]
@@ -30,7 +28,7 @@ pub(in crate::world) enum RecoverMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Ended {
+pub(super) enum Ended {
     /// The log needs nothing more: absent, sealed, or just recovered.
     Done,
     /// Another node's live claim is recovering it.
@@ -40,11 +38,8 @@ enum Ended {
 
 #[derive(Debug)]
 enum Job {
-    /// Recover a dead session of `node`, for everyone who asked.
-    Recover {
-        node: String,
-        modes: Vec<RecoverMode>,
-    },
+    /// Recover a dead session's log, for everyone who asked.
+    Recover { modes: Vec<RecoverMode> },
     /// Fold this session's tail of `cell` into its prefix, then restore.
     Fold {
         op: OpId,
@@ -53,45 +48,60 @@ enum Job {
     },
 }
 
+impl Job {
+    /// Whether the job fences the log: claims the record, seals the members
+    /// rather than reading their tails, records a loss, and seals the
+    /// record. A fold reads its own live log and fences nothing.
+    fn fences(&self) -> bool {
+        matches!(self, Job::Recover { .. })
+    }
+
+    /// The one cell the job uploads, if it is limited to one.
+    fn only_cell(&self) -> Option<&str> {
+        match self {
+            Job::Recover { .. } => None,
+            Job::Fold { cell, .. } => Some(cell),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(in crate::world) struct Recovery {
+    /// The node whose lease carries the log.
+    node: String,
     job: Job,
     passes: u32,
-    step: Step,
+    /// The members this pass asked, while they answer.
+    asking: Option<Asking>,
 }
 
 /// The log being gathered, as the record read found it.
 #[derive(Clone, Debug)]
-struct Found {
-    session: String,
-    /// The process that wrote the session's epochs.
-    writer: ProcId,
+pub(super) struct Found {
+    session: Session,
     lease: NodeLeaseRecord,
     wire: LogWire,
 }
 
 #[derive(Debug)]
-enum Step {
+struct Asking {
+    found: Found,
+    leases: BTreeMap<String, NodeLeaseRecord>,
+    pending: BTreeSet<String>,
+    witness: Option<TailAnswer>,
+    inconclusive: usize,
+}
+
+/// A recovery's store call in flight, and what its reply continues.
+#[derive(Debug)]
+pub(super) enum Step {
     Read,
     Claim(Found),
     Members(Found),
-    Peers {
-        found: Found,
-        leases: BTreeMap<String, NodeLeaseRecord>,
-        pending: BTreeSet<String>,
-        witness: Option<TailAnswer>,
-        inconclusive: usize,
-    },
     Loss(Found, Vec<Row>),
     Bundles(Found, Vec<Row>),
     Upload(Found, u64),
     Finish,
-}
-
-impl Recovery {
-    fn fold(&self) -> bool {
-        matches!(self.job, Job::Fold { .. })
-    }
 }
 
 impl World {
@@ -111,7 +121,7 @@ impl World {
         let log = self.log(id);
         if let Some(key) = log.recovering.get(&node) {
             if let Some(Recovery {
-                job: Job::Recover { modes, .. },
+                job: Job::Recover { modes },
                 ..
             }) = log.recoveries.get_mut(key)
             {
@@ -119,72 +129,77 @@ impl World {
             }
             return;
         }
-        let job = Job::Recover {
-            node: node.clone(),
-            modes: vec![mode],
-        };
-        let key = self.begin_recovery(id, job);
+        let job = Job::Recover { modes: vec![mode] };
+        let key = self.begin_recovery(id, node.clone(), job);
         self.log(id).recovering.insert(node, key);
     }
 
     /// `fold_cell`: gather the acknowledged tail this session left outside
     /// `cell`'s prefix when an epoch of it ended, then restore.
     pub(in crate::world) fn fold(&mut self, id: ProcId, op: OpId, cell: String, spec: RestoreSpec) {
-        self.begin_recovery(id, Job::Fold { op, cell, spec });
+        let node = self.node_name(id);
+        self.begin_recovery(id, node, Job::Fold { op, cell, spec });
     }
 
-    fn begin_recovery(&mut self, id: ProcId, job: Job) -> u64 {
+    /// How long a member's lease must have been dead before recovery takes
+    /// a connection error from it as proof its disk is gone.
+    pub(in crate::world) fn dead_member_grace(&self) -> u64 {
+        (3 * self.config.ttl_ms).max(20_000)
+    }
+
+    fn begin_recovery(&mut self, id: ProcId, node: String, job: Job) -> u64 {
         let key = self.next_task;
         self.next_task += 1;
         let recovery = Recovery {
+            node,
             job,
             passes: 0,
-            step: Step::Read,
+            asking: None,
         };
         self.log(id).recoveries.insert(key, recovery);
         self.recovery_pass(id, key);
         key
     }
 
+    fn job(&mut self, id: ProcId, key: u64) -> &Job {
+        &self.log(id).recoveries[&key].job
+    }
+
     /// Start over from the record read.
-    pub(super) fn recovery_pass(&mut self, id: ProcId, key: u64) {
+    fn recovery_pass(&mut self, id: ProcId, key: u64) {
         let Some(recovery) = self.log(id).recoveries.get_mut(&key) else {
             return;
         };
         recovery.passes += 1;
-        recovery.step = Step::Read;
+        recovery.asking = None;
         if recovery.passes > RECOVERY_PASSES {
             return self.recovery_ended(id, key, Ended::Failed);
         }
-        let node = match &recovery.job {
-            Job::Recover { node, .. } => node.clone(),
-            Job::Fold { .. } => self.node_name(id),
-        };
-        self.recovery_call(id, key, StoreReq::ReadLeaseLog { node });
+        let node = recovery.node.clone();
+        self.recovery_call(id, key, Step::Read, StoreReq::ReadLeaseLog { node });
     }
 
-    fn recovery_call(&mut self, id: ProcId, key: u64, req: StoreReq) {
-        let task = self.next_task;
-        self.next_task += 1;
-        self.log(id).tasks.insert(task, LogTask::Recover { key });
-        self.store_call(id, req, Reply::Log { task });
-    }
-
-    fn set_step(&mut self, id: ProcId, key: u64, step: Step) {
-        self.log(id).recoveries.get_mut(&key).unwrap().step = step;
+    fn recovery_call(&mut self, id: ProcId, key: u64, step: Step, req: StoreReq) {
+        self.log_store_call(
+            id,
+            req,
+            LogTask::Recover {
+                key,
+                step: Box::new(step),
+            },
+        );
     }
 
     pub(super) fn recovery_reply(
         &mut self,
         id: ProcId,
         key: u64,
+        step: Step,
         result: Result<StoreRes, Failure>,
     ) {
-        let Some(recovery) = self.log(id).recoveries.get_mut(&key) else {
+        if !self.log(id).recoveries.contains_key(&key) {
             return;
-        };
-        let fold = recovery.fold();
-        let step = std::mem::replace(&mut recovery.step, Step::Read);
+        }
         let Ok(result) = result else {
             // A claim or a seal whose answer was lost may still have landed:
             // the next pass reads what did.
@@ -194,7 +209,7 @@ impl World {
             };
         };
         match (step, result) {
-            (Step::Read, StoreRes::LeaseLog(found)) => self.record_read(id, key, fold, found),
+            (Step::Read, StoreRes::LeaseLog(found)) => self.record_read(id, key, found),
             (Step::Claim(mut found), StoreRes::LeaseLogCas(etag)) => match etag {
                 Some(etag) => {
                     found.lease.etag = etag;
@@ -229,25 +244,18 @@ impl World {
         &mut self,
         id: ProcId,
         key: u64,
-        fold: bool,
         read: Option<(NodeLeaseRecord, Option<LogWire>)>,
     ) {
         let Some((lease, Some(wire))) = read else {
             return self.recovery_ended(id, key, Ended::Done);
         };
-        let writer = lease
-            .generation
-            .strip_prefix('g')
-            .and_then(|id| id.parse().ok())
-            .expect("generations name their process");
         let found = Found {
-            session: format!("{}/{}", lease.node, lease.generation),
-            writer,
+            session: Session::of_lease(&lease),
             lease,
             wire,
         };
-        if fold {
-            if found.writer != id {
+        if !self.job(id, key).fences() {
+            if found.session.proc != id {
                 return self.recovery_ended(id, key, Ended::Failed);
             }
             return self.gather_members(id, key, found);
@@ -277,19 +285,22 @@ impl World {
             etag: found.lease.etag.clone(),
             log: found.wire.clone(),
         };
-        self.set_step(id, key, Step::Claim(found));
-        self.recovery_call(id, key, req);
+        self.recovery_call(id, key, Step::Claim(found), req);
     }
 
     fn gather_members(&mut self, id: ProcId, key: u64, found: Found) {
         let nodes = found.wire.record.ensemble.iter().cloned().collect();
-        self.set_step(id, key, Step::Members(found));
-        self.recovery_call(id, key, StoreReq::ReadLeases { nodes });
+        self.recovery_call(
+            id,
+            key,
+            Step::Members(found),
+            StoreReq::ReadLeases { nodes },
+        );
     }
 
     /// R3: seal every member (a fold reads their tails instead).
     fn ask_members(&mut self, id: ProcId, key: u64, found: Found, leases: Vec<NodeLeaseRecord>) {
-        let seal = !self.log(id).recoveries[&key].fold();
+        let seal = self.job(id, key).fences();
         let from = self.procs[&id].node;
         let epoch = found.wire.record.epoch;
         let mut inconclusive = 0;
@@ -308,17 +319,13 @@ impl World {
             .collect();
         let session = found.session.clone();
         let members: Vec<String> = pending.iter().cloned().collect();
-        self.set_step(
-            id,
-            key,
-            Step::Peers {
-                found,
-                leases,
-                pending,
-                witness: None,
-                inconclusive,
-            },
-        );
+        self.log(id).recoveries.get_mut(&key).unwrap().asking = Some(Asking {
+            found,
+            leases,
+            pending,
+            witness: None,
+            inconclusive,
+        });
         if members.is_empty() {
             return self.members_answered(id, key);
         }
@@ -327,12 +334,12 @@ impl World {
             let delay = self.net_rng.range(1, 5);
             let ask = LogWork::Gather {
                 recoverer: id,
-                task: key,
+                key,
                 session: session.clone(),
                 epoch,
                 seal,
             };
-            let failed = LogWork::GatherFailed { task: key, member };
+            let failed = LogWork::GatherFailed { key, member };
             match self.peer_send(from, to, delay, ask) {
                 Ok(()) | Err(Failure::Ambiguous) => {
                     self.work(id, PEER_TIMEOUT_MS, Work::Log(failed));
@@ -347,8 +354,8 @@ impl World {
         &mut self,
         id: ProcId,
         recoverer: ProcId,
-        task: u64,
-        session: &str,
+        key: u64,
+        session: &Session,
         epoch: Epoch,
         seal: bool,
     ) {
@@ -358,7 +365,7 @@ impl World {
             return;
         };
         let reply = LogWork::Gathered {
-            task,
+            key,
             member: self.node_name(id),
             answer,
         };
@@ -375,16 +382,16 @@ impl World {
         answer: Option<TailAnswer>,
     ) {
         let now = self.wall(id);
-        let grace = (3 * self.config.ttl_ms).max(20_000);
+        let grace = self.dead_member_grace();
         let Some(Recovery {
-            step:
-                Step::Peers {
+            asking:
+                Some(Asking {
                     found,
                     leases,
                     pending,
                     witness,
                     inconclusive,
-                },
+                }),
             ..
         }) = self.log(id).recoveries.get_mut(&key)
         else {
@@ -413,15 +420,15 @@ impl World {
     /// R4: a witness, a loss record, or a failure.
     fn members_answered(&mut self, id: ProcId, key: u64) {
         let recovery = self.log(id).recoveries.get_mut(&key).unwrap();
-        let fold = recovery.fold();
-        let Step::Peers {
+        let fences = recovery.job.fences();
+        let Some(Asking {
             found,
             witness,
             inconclusive,
             ..
-        } = std::mem::replace(&mut recovery.step, Step::Read)
+        }) = recovery.asking.take()
         else {
-            unreachable!("members answer while the peers are asked");
+            unreachable!("members answer while they are asked");
         };
         let unwitnessed =
             witness.is_none() && found.wire.active && !found.wire.record.ensemble.is_empty();
@@ -432,7 +439,7 @@ impl World {
         // Once the epoch is active, a fleet proof may exist only on the
         // followers: no witness is a failure unless every member is
         // conclusively gone, and then the loss is a record.
-        if fold || inconclusive > 0 {
+        if !fences || inconclusive > 0 {
             return self.recovery_ended(id, key, Ended::Failed);
         }
         self.excuse_losses(&found);
@@ -440,39 +447,34 @@ impl World {
             "log/{}.e{}.loss.json",
             found.session, found.wire.record.epoch
         );
-        self.set_step(id, key, Step::Loss(found, frames));
-        self.recovery_call(id, key, StoreReq::PutObject { key: loss });
+        let req = StoreReq::PutObject { key: loss };
+        self.recovery_call(id, key, Step::Loss(found, frames), req);
     }
 
     /// Fleet-proven writes the recovery cannot find because every disk that
     /// held them is gone are beyond what the protocol promises.
     fn excuse_losses(&mut self, found: &Found) {
         let epoch = found.wire.record.epoch;
-        let (on_disk, lost): (Vec<Row>, Vec<Row>) = self
-            .checker
-            .fleet_proven(&found.session, epoch)
-            .into_iter()
-            .filter(|row| !self.row_in_bucket(row))
-            .partition(|row| {
-                (0..self.nodes.len())
-                    .any(|index| self.disk_holds(index, &found.session, epoch, row))
-            });
+        let (checker, view) = self.checks();
+        let (lost, on_disk) = checker.fleet.on_loss_record(view, &found.session, epoch);
         self.note(|| {
             format!(
-                "loss record for {} epoch {epoch}: {} proven rows on no disk, {} still on one",
-                found.session,
-                lost.len(),
-                on_disk.len()
+                "loss record for {} epoch {epoch}: {lost} proven rows on no disk, {on_disk} \
+                 still on one",
+                found.session
             )
         });
-        self.stats.fleet_losses_excused += lost.len() as u64;
-        self.checker.excuse(lost);
+        self.stats.fleet_losses_excused += lost as u64;
     }
 
     fn read_bundles(&mut self, id: ProcId, key: u64, found: Found, frames: Vec<Row>) {
         let session = found.session.clone();
-        self.set_step(id, key, Step::Bundles(found, frames));
-        self.recovery_call(id, key, StoreReq::ReadBundles { session });
+        self.recovery_call(
+            id,
+            key,
+            Step::Bundles(found, frames),
+            StoreReq::ReadBundles { session },
+        );
     }
 
     /// R5: `upload_gathered`, one merged upload per cell epoch.
@@ -485,10 +487,7 @@ impl World {
         rows: Vec<Row>,
     ) {
         let end = frames.len() as u64;
-        let only = match &self.log(id).recoveries[&key].job {
-            Job::Fold { cell, .. } => Some(cell.clone()),
-            Job::Recover { .. } => None,
-        };
+        let only = self.job(id, key).only_cell().map(str::to_string);
         let mut groups: BTreeMap<(String, Epoch), BTreeMap<u64, WriteId>> = BTreeMap::new();
         for row in rows.into_iter().chain(frames) {
             if only.as_ref().is_none_or(|cell| *cell == row.cell) {
@@ -501,14 +500,14 @@ impl World {
         if groups.is_empty() {
             return self.gathered(id, key, found, end);
         }
-        let writer = found.writer;
-        self.set_step(id, key, Step::Upload(found, end));
-        self.recovery_call(id, key, StoreReq::PutRecovered { groups, writer });
+        let writer = found.session.proc;
+        let req = StoreReq::PutRecovered { groups, writer };
+        self.recovery_call(id, key, Step::Upload(found, end), req);
     }
 
     /// R6: the gathered tail is in the bucket, so the record seals.
     fn gathered(&mut self, id: ProcId, key: u64, found: Found, end: u64) {
-        if self.log(id).recoveries[&key].fold() {
+        if !self.job(id, key).fences() {
             return self.recovery_ended(id, key, Ended::Done);
         }
         let record = &found.wire.record;
@@ -524,27 +523,20 @@ impl World {
                 active: found.wire.active,
             },
         };
-        self.set_step(id, key, Step::Finish);
-        self.recovery_call(id, key, req);
+        self.recovery_call(id, key, Step::Finish, req);
     }
 
     fn recovery_ended(&mut self, id: ProcId, key: u64, ended: Ended) {
         let log = self.log(id);
         let recovery = log.recoveries.remove(&key).unwrap();
         match recovery.job {
-            Job::Recover { node, modes } => {
+            Job::Recover { modes } => {
+                let node = recovery.node;
                 log.recovering.remove(&node);
                 self.note(|| format!("p{id} recovery of {node}: {ended:?}"));
                 for mode in modes {
                     match mode {
-                        RecoverMode::Boot => self.boot_recovered(
-                            id,
-                            match ended {
-                                Ended::Done => None,
-                                Ended::Elsewhere => Some(CLAIM_POLL_MS),
-                                Ended::Failed => Some(MAINTAIN_REPAIR_MS),
-                            },
-                        ),
+                        RecoverMode::Boot => self.boot_recovered(id, ended),
                         RecoverMode::Takeover(op) => {
                             let result = match ended {
                                 Ended::Done => Ok(()),

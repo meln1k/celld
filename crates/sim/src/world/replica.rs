@@ -52,7 +52,7 @@ impl Waiter {
     /// The proof the replica gives this waiter now, if any.
     fn proof(&self, replica: &Replica) -> Option<(u64, ProofSource)> {
         let position = self.position() as usize;
-        let bucket = replica.uploaded.max(replica.bundled);
+        let bucket = replica.bucket();
         let proven = match self {
             // The ticket race prefers the fleet.
             Waiter::Await { .. } if replica.fleet >= position => {
@@ -84,6 +84,34 @@ impl Waiter {
                 ok: proof.is_ok(),
             },
         }
+    }
+}
+
+impl Replica {
+    /// Position the bucket proves: the cell's own uploads, or a credited
+    /// bundle.
+    pub(super) fn bucket(&self) -> usize {
+        self.uploaded.max(self.bundled)
+    }
+
+    /// A credited bundle carries `position`, which extends the bucket
+    /// proof if it continues the bucket's run. Returns whether it did.
+    pub(super) fn credit_bundle(&mut self, position: usize) -> bool {
+        let extends = position <= self.bucket() + 1;
+        if extends {
+            self.bundled = self.bundled.max(position);
+        }
+        extends
+    }
+
+    /// Every ensemble member confirmed `position`, which extends the fleet
+    /// proof if it continues a proven run. Returns whether it did.
+    pub(super) fn credit_fleet(&mut self, position: usize) -> bool {
+        let extends = position <= self.bucket().max(self.fleet) + 1;
+        if extends {
+            self.fleet = self.fleet.max(position);
+        }
+        extends
     }
 }
 

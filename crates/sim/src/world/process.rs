@@ -52,7 +52,7 @@ impl World {
         let spec = NodeLeaseSpec {
             addr: name,
             peer_protocol: PEER_PROTOCOL,
-            generation: format!("g{id}"),
+            generation: self.session_of(id).generation(),
             resume_generation: None,
             ttl_ms: self.config.ttl_ms,
         };

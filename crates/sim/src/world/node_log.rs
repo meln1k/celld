@@ -24,9 +24,10 @@ mod recovery;
 mod ship;
 
 use super::*;
-use crate::store::{LogWire, Row};
+use crate::store::{LogWire, Row, Session};
 use celld_logic::log_tier::{self, FollowerLog, LogRecord, LogState, MaintainStep};
 
+use recovery::{Ended, Step};
 pub(super) use recovery::{RecoverMode, Recovery};
 use ship::{Shipper, TailAnswer};
 
@@ -39,6 +40,8 @@ const PUBLISH_TIMEOUT_MS: u64 = 10_000;
 const FLUSH_MS: u64 = 2_000;
 const MAINTAIN_HEALTHY_MS: u64 = 30_000;
 const MAINTAIN_REPAIR_MS: u64 = 1_000;
+/// How often startup polls a recovery another node is running.
+const CLAIM_POLL_MS: u64 = 250;
 /// How long a graceful close waits for every shipped row to reach its
 /// cell's prefix before it leaves the record open.
 const CLOSE_MS: u64 = 10_000;
@@ -50,6 +53,16 @@ pub(super) const CLOSE_LEAD_MS: u64 = CLOSE_MS + 1_000;
 pub(super) struct Fragment {
     log: FollowerLog,
     frames: BTreeMap<u64, Row>,
+}
+
+impl Disk {
+    /// Whether this disk holds `row` in `session`'s fragment of `epoch`.
+    pub(super) fn holds(&self, session: &Session, epoch: Epoch, row: &Row) -> bool {
+        self.peerlog.get(session).is_some_and(|fragment| {
+            fragment.log.fragment_epoch == epoch
+                && fragment.frames.values().any(|frame| frame == row)
+        })
+    }
 }
 
 /// Per-process node-log state.
@@ -114,6 +127,7 @@ enum LogTask {
     /// A step of the recovery under `key`.
     Recover {
         key: u64,
+        step: Box<Step>,
     },
 }
 
@@ -122,7 +136,7 @@ enum LogTask {
 pub(in crate::world) enum LogWork {
     Append {
         leader: ProcId,
-        session: String,
+        session: Session,
         epoch: Epoch,
         frames: Vec<(u64, Row)>,
     },
@@ -139,19 +153,19 @@ pub(in crate::world) enum LogWork {
     /// A seal, or with `seal` false a tail read, of a session's fragment.
     Gather {
         recoverer: ProcId,
-        task: u64,
-        session: String,
+        key: u64,
+        session: Session,
         epoch: Epoch,
         seal: bool,
     },
     Gathered {
-        task: u64,
+        key: u64,
         member: String,
         answer: TailAnswer,
     },
     /// A gather request failed to connect, or its deadline passed.
     GatherFailed {
-        task: u64,
+        key: u64,
         member: String,
     },
     PublishDeadline {
@@ -168,9 +182,12 @@ pub(in crate::world) enum LogWork {
 }
 
 impl World {
-    /// The node-log session of a process: its node and lease generation.
-    pub(super) fn session_of(&self, id: ProcId) -> String {
-        format!("{}/g{id}", self.node_name(id))
+    /// The node-log session of a process.
+    pub(super) fn session_of(&self, id: ProcId) -> Session {
+        Session {
+            node: self.node_name(id),
+            proc: id,
+        }
     }
 
     fn node_index(&self, name: &str) -> Option<usize> {
@@ -206,17 +223,17 @@ impl World {
             LogWork::RoundDeadline { epoch, last } => self.round_deadline(id, epoch, last),
             LogWork::Gather {
                 recoverer,
-                task,
+                key,
                 session,
                 epoch,
                 seal,
-            } => self.gather_arrived(id, recoverer, task, &session, epoch, seal),
+            } => self.gather_arrived(id, recoverer, key, &session, epoch, seal),
             LogWork::Gathered {
-                task,
+                key,
                 member,
                 answer,
-            } => self.member_answered(id, task, &member, Some(answer)),
-            LogWork::GatherFailed { task, member } => self.member_answered(id, task, &member, None),
+            } => self.member_answered(id, key, &member, Some(answer)),
+            LogWork::GatherFailed { key, member } => self.member_answered(id, key, &member, None),
             LogWork::PublishDeadline { seq } => self.publish_deadline(id, seq),
             LogWork::FlushTick => self.flush_tick(id),
             LogWork::MaintainTick { tick } => self.maintain_tick(id, tick),
@@ -237,7 +254,7 @@ impl World {
                 let record = self.own_record(id, result);
                 self.flush_checked(id, record);
             }
-            LogTask::Recover { key } => self.recovery_reply(id, key, result),
+            LogTask::Recover { key, step } => self.recovery_reply(id, key, *step, result),
         }
     }
 
@@ -248,9 +265,9 @@ impl World {
         id: ProcId,
         result: Result<StoreRes, Failure>,
     ) -> Result<Option<LogRecord>, Failure> {
-        let generation = format!("g{id}");
+        let session = self.session_of(id);
         match result? {
-            StoreRes::LeaseLog(Some((lease, log))) if lease.generation == generation => {
+            StoreRes::LeaseLog(Some((lease, log))) if session.owns(&lease) => {
                 Ok(log.map(|log| log.record))
             }
             StoreRes::LeaseLog(_) => Err(Failure::Definite),
@@ -405,7 +422,7 @@ impl World {
         let covered = log
             .shipper
             .as_ref()
-            .is_none_or(|shipper| shipper.rows().all(|row| self.row_in_bucket(row)));
+            .is_none_or(|shipper| shipper.rows().all(|row| self.store.holds(row)));
         if !log_tier::may_reconfigure(log.flush.is_some(), covered) {
             return self.maintain_done(id, MAINTAIN_REPAIR_MS);
         }
@@ -414,13 +431,6 @@ impl World {
             StoreReq::ReadLeaseLog { node: own },
             LogTask::MaintainRecord { ensemble },
         );
-    }
-
-    fn row_in_bucket(&self, row: &Row) -> bool {
-        self.store
-            .prefix(&row.cell, row.epoch)
-            .is_some_and(|prefix| prefix.entries.get(&row.position) == Some(&row.write))
-            || self.store.bundled(row)
     }
 
     fn maintain_record(
@@ -470,10 +480,14 @@ impl World {
         self.recover(id, node, RecoverMode::Boot);
     }
 
-    fn boot_recovered(&mut self, id: ProcId, retry_ms: Option<u64>) {
+    fn boot_recovered(&mut self, id: ProcId, ended: Ended) {
+        let retry_ms = match ended {
+            Ended::Done => None,
+            Ended::Elsewhere => Some(CLAIM_POLL_MS),
+            Ended::Failed => Some(MAINTAIN_REPAIR_MS),
+        };
         if let Some(delay) = retry_ms {
-            self.work(id, delay, Work::Log(LogWork::BootRetry));
-            return;
+            return self.work(id, delay, Work::Log(LogWork::BootRetry));
         }
         self.log(id).booting = false;
         self.start_session(id);
@@ -510,11 +524,7 @@ impl World {
         };
         // Only the per-cell layout counts: a sealed record tells every
         // future recovery there is nothing to gather.
-        let in_prefix = |row: &Row| {
-            self.store
-                .prefix(&row.cell, row.epoch)
-                .is_some_and(|prefix| prefix.entries.get(&row.position) == Some(&row.write))
-        };
+        let in_prefix = |row: &Row| self.store.prefix_holds(row);
         let per_cell_complete = proc
             .replicas
             .values()

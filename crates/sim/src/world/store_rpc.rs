@@ -2,7 +2,7 @@
 //! the way there and back, and what each answer becomes in the caller.
 
 use super::*;
-use crate::store::{LogWire, Row};
+use crate::store::{LogWire, Row, Session};
 use celld_logic::log_tier::LogState;
 use celld_logic::wake::Retirement;
 
@@ -86,11 +86,11 @@ pub(super) enum StoreReq {
         nodes: Vec<String>,
     },
     PutBundle {
-        session: String,
+        session: Session,
         rows: Vec<Row>,
     },
     ReadBundles {
-        session: String,
+        session: Session,
     },
     /// Recovery's merged uploads, one per cell epoch.
     PutRecovered {
@@ -470,6 +470,8 @@ impl World {
             StoreReq::PutBundle { session, rows } => {
                 let (session, rows) = (session.clone(), rows.clone());
                 self.store.put_bundle(&session, &rows);
+                let (checker, view) = self.checks();
+                checker.fleet.on_bundle(view, &session, &rows);
                 StoreRes::Done
             }
             StoreReq::ReadBundles { session } => StoreRes::Rows(self.store.bundle_rows(session)),

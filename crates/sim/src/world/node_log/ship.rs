@@ -113,8 +113,7 @@ impl World {
         // so fleet credit always extends a contiguous run.
         let mut rows = Vec::new();
         for ((cell, cell_epoch), replica) in &mut proc.replicas {
-            let covered = replica.uploaded.max(replica.bundled);
-            for (index, write) in replica.content.iter().enumerate().skip(covered) {
+            for (index, write) in replica.content.iter().enumerate().skip(replica.bucket()) {
                 let row = Row {
                     cell: cell.clone(),
                     epoch: *cell_epoch,
@@ -135,9 +134,6 @@ impl World {
 
     /// A commit, as the ship loop picks it up.
     pub(in crate::world) fn log_commit(&mut self, id: ProcId, cell: &str, epoch: Epoch) {
-        if !self.config.fleet {
-            return;
-        }
         let proc = self.procs.get_mut(&id).unwrap();
         if proc.log.shipper.is_none() {
             return;
@@ -305,16 +301,12 @@ impl World {
         let session = self.session_of(id);
         let mut touched = BTreeSet::new();
         for row in &rows {
-            let held = self.fleet_holds(&session, row);
-            self.checker.on_fleet_credit(&session, epoch, row, held);
+            let (checker, view) = self.checks();
+            checker.fleet.on_credit(view, &session, epoch, row);
             let key = (row.cell.clone(), row.epoch);
             let replica = self.procs.get_mut(&id).unwrap().replicas.get_mut(&key);
-            if let Some(replica) = replica {
-                let covered = replica.uploaded.max(replica.bundled).max(replica.fleet);
-                if row.position as usize <= covered + 1 {
-                    replica.fleet = replica.fleet.max(row.position as usize);
-                    touched.insert(key);
-                }
+            if replica.is_some_and(|replica| replica.credit_fleet(row.position as usize)) {
+                touched.insert(key);
             }
         }
         for (cell, cell_epoch) in touched {
@@ -337,35 +329,6 @@ impl World {
         }
     }
 
-    /// Ground truth for a fleet proof: every member of the session's
-    /// published record fsynced `row` in a fragment of the record's epoch.
-    fn fleet_holds(&self, session: &str, row: &Row) -> bool {
-        let (node, generation) = session.split_once('/').unwrap();
-        let Some((lease, Some(log))) = self.store.read_lease_log(node) else {
-            return false;
-        };
-        lease.generation == generation
-            && !log.record.ensemble.is_empty()
-            && log
-                .record
-                .ensemble
-                .iter()
-                .all(|member| self.checker.fsynced(member, session, log.record.epoch, row))
-    }
-
-    /// Whether node `index`'s disk holds `row` in `session`'s fragment of
-    /// `epoch`.
-    pub(super) fn disk_holds(&self, index: usize, session: &str, epoch: Epoch, row: &Row) -> bool {
-        self.nodes[index]
-            .disk
-            .peerlog
-            .get(session)
-            .is_some_and(|fragment| {
-                fragment.log.fragment_epoch == epoch
-                    && fragment.frames.values().any(|frame| frame == row)
-            })
-    }
-
     // -----------------------------------------------------------------------
     // Followers
 
@@ -374,7 +337,7 @@ impl World {
         &mut self,
         id: ProcId,
         leader: ProcId,
-        session: &str,
+        session: &Session,
         epoch: Epoch,
         frames: Vec<(u64, Row)>,
     ) {
@@ -385,10 +348,9 @@ impl World {
         } else {
             self.follower_accept(node, session, epoch, &frames)
         };
-        let leader_node = self.node_index(session.split('/').next().unwrap()).unwrap();
-        if self.nodes[leader_node].proc != Some(leader) {
+        let Some(leader_node) = self.procs.get(&leader).map(|proc| proc.node) else {
             return;
-        }
+        };
         let reply = LogWork::Appended {
             epoch,
             last: frames.last().map_or(0, |(seq, _)| *seq),
@@ -404,7 +366,7 @@ impl World {
     fn follower_accept(
         &mut self,
         node: usize,
-        session: &str,
+        session: &Session,
         epoch: Epoch,
         frames: &[(u64, Row)],
     ) -> Option<(Epoch, u64)> {
@@ -417,12 +379,11 @@ impl World {
         if held.as_ref().map(|log| log.fragment_epoch) != Some(epoch) {
             // `adopt`: a new fragment epoch only from its first frame, above
             // the seal mark, against the leader's record open at that epoch.
-            let (leader, generation) = session.split_once('/')?;
             let open = self
                 .store
-                .read_lease_log(leader)
+                .read_lease_log(&session.node)
                 .is_some_and(|(lease, log)| {
-                    lease.generation == generation
+                    session.owns(&lease)
                         && log.is_some_and(|log| {
                             log.record.epoch == epoch && log.record.state == LogState::Open
                         })
@@ -442,7 +403,7 @@ impl World {
             self.nodes[node]
                 .disk
                 .peerlog
-                .insert(session.to_string(), fragment);
+                .insert(session.clone(), fragment);
         }
         let member = self.nodes[node].name.clone();
         let fragment = self.nodes[node].disk.peerlog.get_mut(session).unwrap();
@@ -460,7 +421,7 @@ impl World {
             }
             fragment.log.end = *seq;
             fragment.frames.insert(*seq, row.clone());
-            self.checker.on_fsync(&member, session, epoch, row);
+            self.checker.fleet.on_fsync(&member, session, epoch, row);
         }
         Some((fragment.log.fragment_epoch, fragment.log.end))
     }
@@ -471,26 +432,30 @@ impl World {
     pub(super) fn follower_answer(
         &mut self,
         node: usize,
-        session: &str,
+        session: &Session,
         epoch: Epoch,
         seal: bool,
     ) -> TailAnswer {
-        let fragment = self.nodes[node]
-            .disk
-            .peerlog
-            .entry(session.to_string())
-            .or_insert_with(|| Fragment {
+        let peerlog = &mut self.nodes[node].disk.peerlog;
+        if seal {
+            let fragment = peerlog.entry(session.clone()).or_insert_with(|| Fragment {
                 log: FollowerLog::join(0, 0),
                 frames: BTreeMap::new(),
             });
-        if seal {
             fragment.log.seal(epoch);
         }
-        TailAnswer {
-            held: fragment.log.fragment_epoch,
-            end: fragment.log.end,
-            frames: fragment.frames.values().cloned().collect(),
-        }
+        peerlog.get(session).map_or(
+            TailAnswer {
+                held: 0,
+                end: 0,
+                frames: Vec::new(),
+            },
+            |fragment| TailAnswer {
+                held: fragment.log.fragment_epoch,
+                end: fragment.log.end,
+                frames: fragment.frames.values().cloned().collect(),
+            },
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -501,8 +466,7 @@ impl World {
     /// point asks for the cell's own prefix.
     pub(in crate::world) fn per_cell_sync(&self, id: ProcId, replica: &Replica) -> bool {
         let log = &self.procs[&id].log;
-        !self.config.fleet
-            || log.closing
+        log.closing
             || log.shipper.as_ref().is_none_or(|shipper| shipper.degraded)
             || replica.stop.is_some()
             || replica
@@ -520,7 +484,7 @@ impl World {
         replica: &Replica,
     ) {
         let taken = replica.queued.max(replica.bundled).max(replica.fleet);
-        if self.config.fleet && taken > replica.uploaded {
+        if taken > replica.uploaded {
             self.log(id).dirty.insert(cell.to_string());
         }
     }
@@ -579,11 +543,9 @@ impl World {
         let mut touched = BTreeSet::new();
         for row in rows {
             let key = (row.cell.clone(), row.epoch);
-            if let Some(replica) = proc.replicas.get_mut(&key) {
-                if row.position as usize <= replica.uploaded.max(replica.bundled) + 1 {
-                    replica.bundled = replica.bundled.max(row.position as usize);
-                    touched.insert(key);
-                }
+            let replica = proc.replicas.get_mut(&key);
+            if replica.is_some_and(|replica| replica.credit_bundle(row.position as usize)) {
+                touched.insert(key);
             }
         }
         for (cell, epoch) in touched {
