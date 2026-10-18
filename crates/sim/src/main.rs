@@ -4,12 +4,16 @@
 //! celld-sim --seeds 0..1000            # swarm configurations, report failures
 //! celld-sim --seed 17 --trace          # replay one seed with its full trace
 //! celld-sim --seeds 0..200 --mutation shared-prefix
+//! celld-sim --seeds 0..100000 --jobs 16 # one worker per core by default
 //! ```
 
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
 
-use celld_sim::{run, Mutation, SimConfig};
+use celld_sim::{run, Mutation, Outcome, SimConfig};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -17,6 +21,7 @@ fn main() {
     let mut trace = false;
     let mut calm = false;
     let mut mutation = Mutation::None;
+    let mut jobs = std::thread::available_parallelism().map_or(1, usize::from);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--seed" => {
@@ -35,13 +40,13 @@ fn main() {
                 mutation =
                     Mutation::parse(&name).unwrap_or_else(|| panic!("unknown mutation {name}"));
             }
+            "--jobs" => {
+                jobs = args.next().and_then(|n| n.parse().ok()).expect("--jobs N");
+            }
             other => panic!("unknown argument {other}"),
         }
     }
-    let mut failed = 0;
-    let mut totals = celld_sim::Stats::default();
-    let count = seeds.end - seeds.start;
-    for seed in seeds {
+    let config_for = |seed| {
         let mut config = if calm {
             SimConfig::calm()
         } else {
@@ -49,16 +54,73 @@ fn main() {
         };
         config.mutation = mutation;
         config.trace = trace;
-        let outcome = run(seed, &config);
-        totals.absorb(&outcome.stats);
-        if trace {
+        config
+    };
+    let count = seeds.end - seeds.start;
+    let mut report = Report {
+        count,
+        trace,
+        totals: celld_sim::Stats::default(),
+        failed: 0,
+    };
+    // Each seed is independent, so workers take the next one as they free
+    // up, and the report follows seed order whatever order they finish in.
+    let next = AtomicU64::new(seeds.start);
+    let (done, outcomes) = mpsc::channel::<(u64, SimConfig, Outcome)>();
+    std::thread::scope(|scope| {
+        for _ in 0..jobs.clamp(1, count.max(1) as usize) {
+            let (next, done, end, config_for) = (&next, done.clone(), seeds.end, &config_for);
+            scope.spawn(move || loop {
+                let seed = next.fetch_add(1, Ordering::Relaxed);
+                if seed >= end {
+                    return;
+                }
+                let config = config_for(seed);
+                let outcome = run(seed, &config);
+                if done.send((seed, config, outcome)).is_err() {
+                    return;
+                }
+            });
+        }
+        drop(done);
+        let mut pending = BTreeMap::new();
+        let mut expected = seeds.start;
+        for (seed, config, outcome) in outcomes {
+            pending.insert(seed, (config, outcome));
+            while let Some((config, outcome)) = pending.remove(&expected) {
+                report.seed(expected, &config, &outcome);
+                expected += 1;
+            }
+        }
+    });
+    if count > 1 {
+        println!("totals {:?}", report.totals);
+    }
+    println!("{} of {count} seeds failed", report.failed);
+    if report.failed > 0 {
+        std::process::exit(1);
+    }
+}
+
+/// What a sweep has reported so far.
+struct Report {
+    count: u64,
+    trace: bool,
+    totals: celld_sim::Stats,
+    failed: u64,
+}
+
+impl Report {
+    fn seed(&mut self, seed: u64, config: &SimConfig, outcome: &Outcome) {
+        self.totals.absorb(&outcome.stats);
+        if self.trace {
             for line in &outcome.trace {
                 println!("{line}");
             }
         }
         if outcome.failed() {
-            failed += 1;
-            println!("seed {seed}: FAILED {:?}", config_summary(&config));
+            self.failed += 1;
+            println!("seed {seed}: FAILED {:?}", config_summary(config));
             if let Some(panic) = &outcome.panic {
                 println!("  panic: {panic}");
             }
@@ -68,19 +130,12 @@ fn main() {
                     violation.at_ms, violation.kind, violation.detail
                 );
             }
-        } else if count == 1 || trace {
+        } else if self.count == 1 || self.trace {
             println!(
                 "seed {seed}: ok hash={:016x} {:?}",
                 outcome.trace_hash, outcome.stats
             );
         }
-    }
-    if count > 1 {
-        println!("totals {totals:?}");
-    }
-    println!("{failed} of {count} seeds failed");
-    if failed > 0 {
-        std::process::exit(1);
     }
 }
 

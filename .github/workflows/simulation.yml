@@ -1,0 +1,88 @@
+name: Simulation
+
+# Two layers of deterministic simulation (docs/testing.md).
+#
+# The core layer, celld-sim, drives the coordination core against a model
+# of the shell. It is cheap per seed, so it sweeps wide: thousands of seeds
+# on every change and tens of thousands nightly.
+#
+# The shell layer compiles celld with `--cfg celld_internal_tests` and runs
+# the real shell on a simulated runtime, bucket and disk. It costs seconds
+# per seed, so it sweeps fewer and deeper seeds.
+#
+# A failing seed replays exactly: `celld-sim --seed N --trace`, or
+# `CELLD_SIM_SEEDS=N..N+1 CELLD_SIM_TRACE=1` for the shell layer.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      core_seeds:
+        description: celld-sim seed range
+        default: "0..20000"
+      shell_seeds:
+        description: shell fleet seed range
+        default: "0..100"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: simulation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: 1.98.1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: Core layer (celld-sim)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      SEEDS: ${{ inputs.core_seeds || (github.event_name == 'schedule' && '0..50000') || '0..2000' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Suite
+        run: cargo test --locked -p celld-logic -p celld-sim
+
+      - name: Sweep
+        run: |
+          cargo build --locked -p celld-sim --profile sim
+          target/sim/celld-sim --seeds "$SEEDS"
+
+  shell:
+    name: Shell layer (celld on the simulated runtime)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: --cfg celld_internal_tests
+      CARGO_TARGET_DIR: target/internal
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CELLD_SIM_SEEDS: ${{ inputs.shell_seeds || (github.event_name == 'schedule' && '0..300') || '0..20' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Suite
+        run: cargo test --locked -p celld --lib
+
+      - name: Fleet sweep
+        run: >-
+          cargo test --locked -p celld --lib composed_simulation::fleet::fleet_sweep
+          -- --ignored --nocapture

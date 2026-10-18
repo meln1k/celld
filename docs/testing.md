@@ -109,6 +109,9 @@ cargo run -p celld-sim -- --seed 17 --trace               # replay one seed
 cargo run -p celld-sim -- --seeds 0..100 --mutation shared-prefix
 ```
 
+A sweep runs one seed per core at a time and reports in seed order, so its
+output does not depend on `--jobs N`.
+
 Each mutation plants a protocol bug and must fail its check: `ack-before-wake-entry`,
 `retire-unproven`, `no-orphan-wake`, and `silent-wake-coverage` cover the
 alarm path.
@@ -185,6 +188,23 @@ CELLD_SIM_SEEDS=0..200 RUSTFLAGS="--cfg celld_internal_tests" \
 
 A separate target directory keeps the flagged build from evicting the normal
 one, and dropping debug info keeps the link of the V8-sized test binary short.
+
+### Two layers
+
+The two simulators split the work. `celld-sim` models the shell, so it can
+be fast: a seed takes a fraction of a second, and a sweep covers tens of
+thousands of seeds. It also covers what the shell simulation does not yet
+run: alarms and their discovery, and bugs planted inside the protocol, such
+as a skipped ownership check or a reused snapshot. Because its shell is
+written by hand after `actor.rs`, it can drift from the shell it models.
+The shell simulation cannot drift, because it runs the shell itself, but a
+seed takes seconds, so it sweeps fewer and deeper seeds. A `celld-sim`
+finding that depends on shell code belongs in the shell simulation as soon
+as it runs that code.
+
+[`simulation.yml`](../.github/workflows/simulation.yml) runs both on every
+change: the core suite and 2,000 `celld-sim` seeds, and the flagged suite
+and 20 fleet seeds. Nightly it runs 50,000 and 300.
 
 ## Live fleets: what simulation cannot see
 
