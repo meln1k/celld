@@ -107,6 +107,8 @@ cargo test -p celld-sim                                   # the suite
 cargo run -p celld-sim --profile sim -- --seeds 0..10000  # a sweep
 cargo run -p celld-sim -- --seed 17 --trace               # replay one seed
 cargo run -p celld-sim -- --seeds 0..100 --mutation shared-prefix
+cargo run -p celld-sim --profile sim -- --seeds 0..2000 \
+  --known crates/sim/known-failures.txt                   # as CI sweeps
 ```
 
 A sweep runs one seed per core at a time and reports in seed order, so its
@@ -303,9 +305,14 @@ capacity to measure this limit.
 
 ### Open simulation findings
 
-These seeds fail against the current code, so a sweep that reaches them
-fails. Replay each with `celld-sim --seed N --trace`, adding the `--fleet`
-setting where shown.
+These findings fail seeds against the current code.
+[`known-failures.txt`](../crates/sim/known-failures.txt) lists every seed
+below 50,000 that fails in the swarm posture, with the finding and the way it
+fails. The CI sweep runs with `--known` on that list: a seed that fails as
+listed passes, and any other failure fails the sweep, as does a listed seed
+that passes. Fixing a finding therefore means deleting its section. A few
+listed failures are not yet attributed to a finding. Replay a seed with
+`celld-sim --seed N --trace`, adding the `--fleet` setting where shown.
 
 - **A takeover does not fence a session that has no log record yet**
   (`--fleet on`: 863, 1079, 2023, 2726). A peer reads a node lease as

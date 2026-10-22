@@ -70,11 +70,13 @@
 //! it, or fails into the retry backoff.
 
 mod coverage;
+mod known;
 mod rng;
 mod store;
 mod world;
 
 pub use coverage::Coverage;
+pub use known::{KnownFailures, Posture, Verdict};
 pub use rng::Rng;
 
 pub type ProcId = u64;

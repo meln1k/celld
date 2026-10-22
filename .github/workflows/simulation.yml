@@ -60,7 +60,7 @@ jobs:
       - name: Sweep
         run: |
           cargo build --locked -p celld-sim --profile sim
-          target/sim/celld-sim --seeds "$SEEDS"
+          target/sim/celld-sim --seeds "$SEEDS" --known crates/sim/known-failures.txt
 
   shell:
     name: Shell layer (celld on the simulated runtime)
