@@ -15,7 +15,8 @@
 //! replication in [`replica`], [`requests`], [`clients`], [`faults`] and
 //! the phases, alarms and their wake entries in [`alarms`], the fleet
 //! durability tier in [`node_log`], graceful shutdowns and balancing in
-//! [`lifecycle`], and the handoff of released cells in [`handoff`]. The
+//! [`lifecycle`], the handoff of released cells in [`handoff`], and
+//! eviction stops and the operator's evictions in [`stops`]. The
 //! checkers in [`checks`] only read what the shell reports.
 
 mod alarms;
@@ -29,6 +30,7 @@ mod process;
 mod replica;
 mod requests;
 mod shell;
+mod stops;
 mod store_rpc;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -51,6 +53,7 @@ use handoff::{Accept, Handoff};
 use lifecycle::{LifeTask, Shutdown};
 use node_log::{Fragment, LogShell, LogWork, RecoverMode};
 use replica::{Proof, Waiter};
+use stops::{Asked, Stop};
 use store_rpc::{Call, Reply, StoreReq, StoreRes};
 
 type Time = u64;
@@ -124,6 +127,12 @@ enum Work {
         epoch: Epoch,
     },
     WaiterDeadline {
+        cell: String,
+        epoch: Epoch,
+        op: OpId,
+    },
+    /// An eviction's capture ended, or a failed stop's retry pause did.
+    StopStep {
         cell: String,
         epoch: Epoch,
         op: OpId,
@@ -248,12 +257,6 @@ struct Node {
 }
 
 #[derive(Debug)]
-struct Stop {
-    op: OpId,
-    preserve: bool,
-}
-
-#[derive(Debug)]
 struct Replica {
     content: Vec<WriteId>,
     /// Content present when the epoch opened.
@@ -365,6 +368,10 @@ struct Proc {
     directory: Option<(Time, Vec<CapacityPeer>)>,
     /// Handoff requests from donors, by core request.
     accepts: BTreeMap<RequestId, Accept>,
+    /// Operators' evictions waiting for their answers.
+    evictions: BTreeMap<RequestId, Asked>,
+    /// The host refuses to release any cell before this instant.
+    wedged_until: Time,
     halting: bool,
 }
 
@@ -589,6 +596,7 @@ impl World {
             (FaultKind::Pause, faults.pauses),
             (FaultKind::Partition, faults.partitions),
             (FaultKind::ClockStep, faults.clock_steps),
+            (FaultKind::Wedge, self.config.stops.wedges),
         ] {
             if rate > 0.0 {
                 let gap = self.fault_gap(rate);

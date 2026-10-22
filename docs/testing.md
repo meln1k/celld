@@ -147,11 +147,29 @@ Nodes also give idle cells to peers below their share. The checks are:
   acknowledged at it.
 
 `seal-over-bundles`, `resume-stale-live`, `accept-unclaimed`, and
-`drain-early` cover this path. `--coverage` lists how often a sweep reached
-each core event and effect, and the ones it never reached.
+`drain-early` cover this path.
 
-It does not yet model WebSockets, explicit and failed evictions, generation
-swaps, deletion, or memory pressure.
+Half the swarm also stops cells the way production does. An eviction gives
+its isolate turn back and captures its handoff snapshot before the final
+upload. A request that arrives during the capture abandons it, and the cell
+starts again at its own epoch. Hosts wedge during the chaos window and refuse
+every release. A stop retries until the host recovers, and a bounded
+eviction that is still failing at its deadline restarts the cell in place.
+While the faults last, the workload leaves every other cell alone, so a
+quiet cell's stop meets no request that could abandon it. Evict ticks ask
+the way an operator does (`EvictRequested`), and the checks are:
+
+- **eviction-misreported**: an eviction answered `Evicted` or
+  `AlreadyAbsent` while the process still runs the cell.
+- **eviction-unanswered**: an eviction asked before the faults healed is
+  still waiting at the audit.
+
+`answer-on-admission` and `silent-abandon` cover this path. `--coverage`
+lists how often a sweep reached each core event and effect, and the ones it
+never reached.
+
+It does not yet model WebSockets, generation swaps, deletion, or memory
+pressure.
 
 ### The shell on a simulated runtime
 
@@ -315,7 +333,7 @@ listed failures are not yet attributed to a finding. Replay a seed with
 `celld-sim --seed N --trace`, adding the `--fleet` setting where shown.
 
 - **A takeover does not fence a session that has no log record yet**
-  (`--fleet on`: 863, 1079, 2023, 2726). A peer reads a node lease as
+  (863, 9258, 15037). A peer reads a node lease as
   expired, from clock skew or a renewal that lands late. The lease carries
   no log state, so the takeover claims the cell without fencing anything.
   The old owner still holds its lease by its own clock, so it opens its
@@ -323,36 +341,37 @@ listed failures are not yet attributed to a finding. Replay a seed with
   acknowledge writes into the superseded epoch. A bucket proof would fail
   its ownership read; a fleet proof makes none.
 - **Recovery declares a loss that a surviving disk could still repair**
-  (`--fleet on`: 1298, 1456, 1564, 1626, 2750). A follower that is
+  (812, 1626, 2750). A follower that is
   unreachable and whose lease has been dead for 3×TTL counts as
   conclusively gone. When every member counts as gone, recovery records a
   loss and seals the log, although the follower's disk, and often the old
   owner's own disk, still holds the acknowledged rows.
   [The guarantees](guarantees.md#the-takeover-recovery-gate) say the
   activation fails instead.
-- **A failed wake-entry write for a re-arm reads as success** (2157):
-  `fire_alarm` folds it into the handler's success, so the alarm can become
-  undiscoverable.
+- **A failed wake-entry write for a re-arm reads as success**: `fire_alarm`
+  folds it into the handler's success, so the alarm can become
+  undiscoverable. Seed 2157 found it; since the swarm drew slow stops, no
+  seed below 50,000 reaches it.
 - **A full fleet forgets a refused capacity handoff** (`--fleet off`:
   8120): the next load report clears the refusal, and the cell never
   settles.
-- **A release can orphan an unfolded tail** (259, 357, 556). An epoch that
+- **A release can orphan an unfolded tail** (357, 421, 1150). An epoch that
   ends without its final upload, such as a reset after an ownership read
   fails, leaves its acknowledged tail in the node's own bundles and
   followers. The node's next restore of the cell folds that tail first, and
   fails the activation if the fold fails. The cell is then `Dormant`, and a
   rebalance or a drain releases it. The adopter restores from the per-cell
   prefixes and loses the acknowledged rows.
-- **An eviction during a drain overruns the release ceiling** (25, 45, 80).
+- **An eviction during a drain overruns the release ceiling** (25, 120, 122).
   A policy eviction, or one the capacity pump starts, takes an eviction
   permit without counting the drain's releases, and `State::validate`
   reports more handoffs than `CELLD_RELEASES`.
-- **A cell marked for handoff can leave the handoff pipeline** (108, 300,
-  359). A wake hint, the capacity pump or a fence moves it to
+- **A cell marked for handoff can leave the handoff pipeline** (108, 135,
+  300). A wake hint, the capacity pump or a fence moves it to
   `WaitingActivation`, `ReadingOwner` or `Fenced` with the mark still set,
   and `State::validate` fails.
 - **A preserve during the startup inventory strands a confirming cell**
-  (155, 494, 564). `BeginPreserve` cancels the queued owner read but leaves
+  (45, 494, 564). `BeginPreserve` cancels the queued owner read but leaves
   the cell in the confirmation set, and `State::validate` fails.
 
 Report a schedule that breaks a guarantee, an untested fault, or a measurement

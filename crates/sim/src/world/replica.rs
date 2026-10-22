@@ -290,21 +290,7 @@ impl World {
                 self.work(id, delay, Work::Deliver(Event::RuntimeStopped { op }));
             }
             StopCause::Cleanup | StopCause::Evict { .. } => {
-                let preserve = !matches!(cause, StopCause::Evict { rebalance: true });
-                replica.stop = Some(Stop { op, preserve });
-                if bounded {
-                    self.work(
-                        id,
-                        OPERATION_DEADLINE_MS,
-                        Work::WaiterDeadline {
-                            cell: cell.clone(),
-                            epoch,
-                            op,
-                        },
-                    );
-                }
-                self.settle_waiters(id, &cell, epoch);
-                self.kick_upload(id, &cell, epoch);
+                self.begin_stop(id, op, &cell, epoch, cause, bounded);
             }
         }
     }
@@ -408,7 +394,8 @@ impl World {
                 None => replica.waiters.push(waiter),
             }
         }
-        let stopped = replica.stop.is_some() && replica.uploaded >= replica.content.len();
+        let stopped = replica.stop.as_ref().is_some_and(Stop::publishing)
+            && replica.uploaded >= replica.content.len();
         if stopped {
             let replica = proc.replicas.remove(&key).unwrap();
             let stop = replica.stop.unwrap();
@@ -449,29 +436,20 @@ impl World {
         let Some(replica) = proc.replicas.get_mut(&(cell.to_string(), epoch)) else {
             return;
         };
-        let event = if replica.stop.as_ref().is_some_and(|stop| stop.op == op) {
-            // The final sync ran out of time: the runtime is gone, the
-            // database stays open, and the core restarts it in place.
-            replica.stop = None;
-            Some(Event::RuntimeStopFailed { op })
-        } else if let Some(index) = replica
+        let Some(index) = replica
             .waiters
             .iter()
             .position(|waiter| waiter.op() == Some(op))
-        {
-            match replica
-                .waiters
-                .remove(index)
-                .resolve(Err(Failure::Ambiguous))
-            {
-                Resolution::Event(event) => Some(event),
-                Resolution::Task { .. } => unreachable!("a task has no core op"),
-            }
-        } else {
-            None
+        else {
+            return;
         };
-        if let Some(event) = event {
-            self.drive(id, event);
-        }
+        let resolution = replica
+            .waiters
+            .remove(index)
+            .resolve(Err(Failure::Ambiguous));
+        let Resolution::Event(event) = resolution else {
+            unreachable!("a task has no core op")
+        };
+        self.drive(id, event);
     }
 }

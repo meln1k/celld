@@ -10,7 +10,15 @@ impl World {
         if !self.workload {
             return;
         }
-        let cell = self.cells[self.work_rng.below(self.cells.len() as u64) as usize].clone();
+        let cell = match self.quiet_parity() {
+            // Every other cell, those of the other parity.
+            Some(quiet) => {
+                let busy = (self.cells.len() + quiet) / 2;
+                let index = 2 * self.work_rng.below(busy as u64) as usize + 1 - quiet;
+                self.cells[index].clone()
+            }
+            None => self.cells[self.work_rng.below(self.cells.len() as u64) as usize].clone(),
+        };
         let write = self.work_rng.chance(self.config.write_probability);
         let alarm = (write && self.work_rng.chance(self.config.alarm_probability)).then(|| {
             if self.work_rng.chance(0.2) {
@@ -26,6 +34,14 @@ impl World {
         let (lo, hi) = self.config.request_gap_ms;
         let gap = self.work_rng.range(lo, hi);
         self.after(gap, What::ClientNew);
+    }
+
+    /// The parity of the cells the workload leaves alone now
+    /// (`Stops::quiet`). It alternates each window until the faults heal.
+    fn quiet_parity(&self) -> Option<usize> {
+        const WINDOW_MS: u64 = 20_000;
+        (self.config.stops.quiet && self.chaos && self.cells.len() > 1)
+            .then_some((self.t / WINDOW_MS % 2) as usize)
     }
 
     pub(super) fn new_op(

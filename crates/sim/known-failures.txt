@@ -6,286 +6,237 @@
 # deleting its section.
 #
 # Seeds were attributed by their traces: a release of a cell with an
-# unfolded tail, a loss record while a disk still held the rows, or the
-# invariant a panic names.
+# unfolded tail, a loss record while a disk still held the rows, a
+# takeover of a node lease that carried no log state, or the invariant a
+# panic names.
 
-# A release can orphan an unfolded tail (64 seeds)
-259 swarm lost-write
+
+# A release can orphan an unfolded tail (59 seeds)
 357 swarm lost-write
-556 swarm lost-write
+421 swarm lost-write
+1150 swarm lost-write
 1471 swarm alarm-refired
 1471 swarm lost-write
 2220 swarm lost-write
-3460 swarm lost-write
 3601 swarm lost-write
-4364 swarm lost-write
+4410 swarm lost-write
+4789 swarm lost-write
 5391 swarm lost-write
+5802 swarm lost-write
 6069 swarm lost-write
-6236 swarm lost-write
-6617 swarm lost-write
-6894 swarm lost-write
-6923 swarm lost-write
-7630 swarm alarm-undiscoverable
-7630 swarm lost-write
-7821 swarm lost-write
-8224 swarm lost-write
-8432 swarm lost-write
-8664 swarm lost-write
 9163 swarm alarm-refired
 9163 swarm lost-write
-9377 swarm lost-write
 9695 swarm lost-write
-9918 swarm lost-write
 10425 swarm lost-write
 11173 swarm lost-write
-11363 swarm lost-write
 11661 swarm lost-write
 12661 swarm lost-write
-13454 swarm lost-write
-13916 swarm lost-write
-14840 swarm lost-write
-17009 swarm lost-write
-17307 swarm alarm-refired
-17307 swarm lost-write
+12909 swarm lost-write
+13164 swarm lost-write
+16349 swarm lost-write
 17952 swarm lost-write
 19354 swarm alarm-undiscoverable
 19354 swarm lost-write
 20679 swarm lost-write
+20987 swarm lost-write
+21341 swarm lost-write
+21345 swarm lost-write
 21665 swarm alarm-refired
 21665 swarm lost-write
+23665 swarm alarm-undiscoverable
+23665 swarm lost-write
 24018 swarm alarm-undiscoverable
 24018 swarm lost-write
 24790 swarm lost-write
-24993 swarm lost-write
-28059 swarm lost-write
-28782 swarm lost-write
+24974 swarm lost-write
+28370 swarm lost-write
 28889 swarm lost-write
+30749 swarm lost-write
 31037 swarm lost-write
-32509 swarm alarm-refired
-32509 swarm lost-write
+32624 swarm lost-write
+33434 swarm alarm-refired
+33434 swarm lost-write
 33529 swarm lost-write
-33600 swarm lost-write
 34067 swarm lost-write
+34532 swarm lost-write
+35079 swarm lost-write
 35495 swarm lost-write
 36308 swarm lost-write
-36589 swarm alarm-refired
-36589 swarm lost-write
-38589 swarm lost-write
+37048 swarm lost-write
+39224 swarm lost-write
 39445 swarm lost-write
 40338 swarm lost-write
 40539 swarm lost-write
 41335 swarm lost-write
 41726 swarm lost-write
-43217 swarm alarm-undiscoverable
-43217 swarm lost-write
+45037 swarm lost-write
 45276 swarm lost-write
-47505 swarm lost-write
+45811 swarm lost-write
+46515 swarm lost-write
+47309 swarm lost-write
+47445 swarm lost-write
 48681 swarm lost-write
 48713 swarm lost-write
-49061 swarm lost-write
 49422 swarm lost-write
 
-# Recovery declares a loss that a surviving disk could still repair (45 seeds)
-812 swarm alarm-refired
+# Recovery declares a loss that a surviving disk could still repair (42 seeds)
 812 swarm lost-write
-1298 swarm lost-write
 1626 swarm lost-write
-2555 swarm lost-write
+2133 swarm lost-write
 2750 swarm lost-write
-3188 swarm alarm-refired
-3188 swarm lost-write
+3976 swarm alarm-undiscoverable
+3976 swarm lost-write
+4388 swarm lost-write
+4846 swarm lost-write
 5129 swarm lost-write
-6988 swarm lost-write
-7432 swarm lost-write
+8791 swarm lost-write
 9773 swarm lost-write
+10756 swarm lost-write
 10891 swarm alarm-refired
 10891 swarm lost-write
+11962 swarm lost-write
 11967 swarm lost-write
 12416 swarm lost-write
 13528 swarm alarm-undiscoverable
 13528 swarm lost-write
 14569 swarm lost-write
 15023 swarm lost-write
-15210 swarm lost-write
-17301 swarm lost-write
 20915 swarm alarm-undiscoverable
 20915 swarm lost-write
-22665 swarm lost-write
-24512 swarm alarm-undiscoverable
-24512 swarm lost-write
-24699 swarm lost-write
-25540 swarm lost-write
-25981 swarm lost-write
-26375 swarm lost-write
-26798 swarm lost-write
-27209 swarm lost-write
+21647 swarm lost-write
+23547 swarm lost-write
+25780 swarm lost-write
+26341 swarm lost-write
+27242 swarm lost-write
 29286 swarm lost-write
+30191 swarm lost-write
 31952 swarm lost-write
 32025 swarm lost-write
-33349 swarm lost-write
-33361 swarm alarm-undiscoverable
-33361 swarm lost-write
 34288 swarm lost-write
+37038 swarm lost-write
+37699 swarm lost-write
 37804 swarm lost-write
-41843 swarm alarm-refired
-41843 swarm lost-write
 43133 swarm lost-write
 43449 swarm lost-write
-43762 swarm lost-write
-43905 swarm lost-write
 44460 swarm lost-write
+44819 swarm lost-write
 46403 swarm lost-write
 47234 swarm lost-write
-47470 swarm lost-write
+48174 swarm lost-write
+48479 swarm lost-write
 49688 swarm lost-write
 49708 swarm lost-write
 
-# An eviction during a drain overruns the release ceiling (986 seeds)
+# An eviction during a drain overruns the release ceiling (762 seeds)
 25 swarm panic: exceeds release ceiling
-45 swarm panic: exceeds release ceiling
-80 swarm panic: exceeds release ceiling
-97 swarm panic: exceeds release ceiling
 120 swarm panic: exceeds release ceiling
 122 swarm panic: exceeds release ceiling
 183 swarm panic: exceeds release ceiling
 185 swarm panic: exceeds release ceiling
 209 swarm panic: exceeds release ceiling
-239 swarm panic: exceeds release ceiling
-313 swarm panic: exceeds release ceiling
 351 swarm panic: exceeds release ceiling
 401 swarm panic: exceeds release ceiling
 531 swarm panic: exceeds release ceiling
+546 swarm panic: exceeds release ceiling
 594 swarm panic: exceeds release ceiling
 669 swarm panic: exceeds release ceiling
 680 swarm panic: exceeds release ceiling
-688 swarm panic: exceeds release ceiling
+720 swarm panic: exceeds release ceiling
 734 swarm panic: exceeds release ceiling
 750 swarm panic: exceeds release ceiling
 758 swarm panic: exceeds release ceiling
 784 swarm panic: exceeds release ceiling
-815 swarm panic: exceeds release ceiling
 841 swarm panic: exceeds release ceiling
-938 swarm panic: exceeds release ceiling
 954 swarm panic: exceeds release ceiling
+960 swarm panic: exceeds release ceiling
 1066 swarm panic: exceeds release ceiling
+1110 swarm panic: exceeds release ceiling
 1147 swarm panic: exceeds release ceiling
-1181 swarm panic: exceeds release ceiling
-1185 swarm panic: exceeds release ceiling
+1196 swarm panic: exceeds release ceiling
 1201 swarm panic: exceeds release ceiling
 1231 swarm panic: exceeds release ceiling
 1374 swarm panic: exceeds release ceiling
-1499 swarm panic: exceeds release ceiling
 1525 swarm panic: exceeds release ceiling
 1537 swarm panic: exceeds release ceiling
-1553 swarm panic: exceeds release ceiling
 1566 swarm panic: exceeds release ceiling
-1671 swarm panic: exceeds release ceiling
-1794 swarm panic: exceeds release ceiling
-1806 swarm panic: exceeds release ceiling
-1809 swarm panic: exceeds release ceiling
-1883 swarm panic: exceeds release ceiling
+1893 swarm panic: exceeds release ceiling
 1919 swarm panic: exceeds release ceiling
 2010 swarm panic: exceeds release ceiling
 2074 swarm panic: exceeds release ceiling
-2105 swarm panic: exceeds release ceiling
 2156 swarm panic: exceeds release ceiling
-2179 swarm panic: exceeds release ceiling
-2186 swarm panic: exceeds release ceiling
+2171 swarm panic: exceeds release ceiling
 2198 swarm panic: exceeds release ceiling
 2209 swarm panic: exceeds release ceiling
-2226 swarm panic: exceeds release ceiling
 2235 swarm panic: exceeds release ceiling
-2237 swarm panic: exceeds release ceiling
 2266 swarm panic: exceeds release ceiling
+2340 swarm panic: exceeds release ceiling
 2417 swarm panic: exceeds release ceiling
-2461 swarm panic: exceeds release ceiling
 2466 swarm panic: exceeds release ceiling
-2567 swarm panic: exceeds release ceiling
 2600 swarm panic: exceeds release ceiling
 2624 swarm panic: exceeds release ceiling
 2688 swarm panic: exceeds release ceiling
-2767 swarm panic: exceeds release ceiling
+2740 swarm panic: exceeds release ceiling
 2769 swarm panic: exceeds release ceiling
 2788 swarm panic: exceeds release ceiling
 2817 swarm panic: exceeds release ceiling
 2850 swarm panic: exceeds release ceiling
 2920 swarm panic: exceeds release ceiling
-3096 swarm panic: exceeds release ceiling
-3128 swarm panic: exceeds release ceiling
-3167 swarm panic: exceeds release ceiling
-3284 swarm panic: exceeds release ceiling
+3258 swarm panic: exceeds release ceiling
 3301 swarm panic: exceeds release ceiling
-3422 swarm panic: exceeds release ceiling
-3464 swarm panic: exceeds release ceiling
+3414 swarm panic: exceeds release ceiling
 3484 swarm panic: exceeds release ceiling
 3535 swarm panic: exceeds release ceiling
-3622 swarm panic: exceeds release ceiling
-3678 swarm panic: exceeds release ceiling
 3741 swarm panic: exceeds release ceiling
 3795 swarm panic: exceeds release ceiling
 3820 swarm panic: exceeds release ceiling
 3857 swarm panic: exceeds release ceiling
 3858 swarm panic: exceeds release ceiling
+3930 swarm panic: exceeds release ceiling
 3974 swarm panic: exceeds release ceiling
 4017 swarm panic: exceeds release ceiling
+4048 swarm panic: exceeds release ceiling
 4050 swarm panic: exceeds release ceiling
-4051 swarm panic: exceeds release ceiling
-4064 swarm panic: exceeds release ceiling
 4098 swarm panic: exceeds release ceiling
-4108 swarm panic: exceeds release ceiling
 4118 swarm panic: exceeds release ceiling
 4213 swarm panic: exceeds release ceiling
-4255 swarm panic: exceeds release ceiling
 4276 swarm panic: exceeds release ceiling
-4290 swarm panic: exceeds release ceiling
-4305 swarm panic: exceeds release ceiling
 4315 swarm panic: exceeds release ceiling
 4337 swarm panic: exceeds release ceiling
 4369 swarm panic: exceeds release ceiling
 4402 swarm panic: exceeds release ceiling
-4446 swarm panic: exceeds release ceiling
-4452 swarm panic: exceeds release ceiling
+4411 swarm panic: exceeds release ceiling
 4484 swarm panic: exceeds release ceiling
-4603 swarm panic: exceeds release ceiling
 4645 swarm panic: exceeds release ceiling
 4657 swarm panic: exceeds release ceiling
 4701 swarm panic: exceeds release ceiling
-4830 swarm panic: exceeds release ceiling
+4730 swarm panic: exceeds release ceiling
+4815 swarm panic: exceeds release ceiling
+4854 swarm panic: exceeds release ceiling
 4897 swarm panic: exceeds release ceiling
 4996 swarm panic: exceeds release ceiling
+5155 swarm panic: exceeds release ceiling
 5202 swarm panic: exceeds release ceiling
-5263 swarm panic: exceeds release ceiling
 5297 swarm panic: exceeds release ceiling
 5361 swarm panic: exceeds release ceiling
-5431 swarm panic: exceeds release ceiling
-5488 swarm panic: exceeds release ceiling
-5587 swarm panic: exceeds release ceiling
-5666 swarm panic: exceeds release ceiling
+5519 swarm panic: exceeds release ceiling
+5675 swarm panic: exceeds release ceiling
 5813 swarm panic: exceeds release ceiling
+5885 swarm panic: exceeds release ceiling
 5896 swarm panic: exceeds release ceiling
 5981 swarm panic: exceeds release ceiling
 5993 swarm panic: exceeds release ceiling
+5995 swarm panic: exceeds release ceiling
 6029 swarm panic: exceeds release ceiling
 6037 swarm panic: exceeds release ceiling
-6075 swarm panic: exceeds release ceiling
 6116 swarm panic: exceeds release ceiling
 6157 swarm panic: exceeds release ceiling
-6164 swarm panic: exceeds release ceiling
 6206 swarm panic: exceeds release ceiling
+6263 swarm panic: exceeds release ceiling
 6285 swarm panic: exceeds release ceiling
-6339 swarm panic: exceeds release ceiling
-6367 swarm panic: exceeds release ceiling
-6420 swarm panic: exceeds release ceiling
+6340 swarm panic: exceeds release ceiling
 6524 swarm panic: exceeds release ceiling
-6575 swarm panic: exceeds release ceiling
 6580 swarm panic: exceeds release ceiling
 6633 swarm panic: exceeds release ceiling
-6657 swarm panic: exceeds release ceiling
-6668 swarm panic: exceeds release ceiling
-6806 swarm panic: exceeds release ceiling
-6850 swarm panic: exceeds release ceiling
-6982 swarm panic: exceeds release ceiling
-7029 swarm panic: exceeds release ceiling
 7030 swarm panic: exceeds release ceiling
 7108 swarm panic: exceeds release ceiling
 7128 swarm panic: exceeds release ceiling
@@ -293,53 +244,32 @@
 7154 swarm panic: exceeds release ceiling
 7191 swarm panic: exceeds release ceiling
 7207 swarm panic: exceeds release ceiling
-7222 swarm panic: exceeds release ceiling
-7226 swarm panic: exceeds release ceiling
-7237 swarm panic: exceeds release ceiling
+7229 swarm panic: exceeds release ceiling
 7252 swarm panic: exceeds release ceiling
-7265 swarm panic: exceeds release ceiling
 7280 swarm panic: exceeds release ceiling
-7446 swarm panic: exceeds release ceiling
+7340 swarm panic: exceeds release ceiling
 7487 swarm panic: exceeds release ceiling
-7518 swarm panic: exceeds release ceiling
 7528 swarm panic: exceeds release ceiling
+7603 swarm panic: exceeds release ceiling
 7656 swarm panic: exceeds release ceiling
-7678 swarm panic: exceeds release ceiling
 7706 swarm panic: exceeds release ceiling
 7796 swarm panic: exceeds release ceiling
-7900 swarm panic: exceeds release ceiling
-8010 swarm panic: exceeds release ceiling
 8035 swarm panic: exceeds release ceiling
-8038 swarm panic: exceeds release ceiling
 8044 swarm panic: exceeds release ceiling
-8075 swarm panic: exceeds release ceiling
+8112 swarm panic: exceeds release ceiling
 8144 swarm panic: exceeds release ceiling
 8153 swarm panic: exceeds release ceiling
 8160 swarm panic: exceeds release ceiling
-8197 swarm panic: exceeds release ceiling
-8219 swarm panic: exceeds release ceiling
 8227 swarm panic: exceeds release ceiling
-8267 swarm panic: exceeds release ceiling
 8372 swarm panic: exceeds release ceiling
 8373 swarm panic: exceeds release ceiling
-8435 swarm panic: exceeds release ceiling
 8482 swarm panic: exceeds release ceiling
 8487 swarm panic: exceeds release ceiling
-8537 swarm panic: exceeds release ceiling
-8546 swarm panic: exceeds release ceiling
-8597 swarm panic: exceeds release ceiling
-8616 swarm panic: exceeds release ceiling
 8674 swarm panic: exceeds release ceiling
-8686 swarm panic: exceeds release ceiling
-8740 swarm panic: exceeds release ceiling
 8821 swarm panic: exceeds release ceiling
-8894 swarm panic: exceeds release ceiling
 9011 swarm panic: exceeds release ceiling
-9059 swarm panic: exceeds release ceiling
 9060 swarm panic: exceeds release ceiling
-9193 swarm panic: exceeds release ceiling
 9405 swarm panic: exceeds release ceiling
-9455 swarm panic: exceeds release ceiling
 9502 swarm panic: exceeds release ceiling
 9610 swarm panic: exceeds release ceiling
 9646 swarm panic: exceeds release ceiling
@@ -348,278 +278,212 @@
 9789 swarm panic: exceeds release ceiling
 9812 swarm panic: exceeds release ceiling
 9833 swarm panic: exceeds release ceiling
-9916 swarm panic: exceeds release ceiling
-10022 swarm panic: exceeds release ceiling
+9939 swarm panic: exceeds release ceiling
+10014 swarm panic: exceeds release ceiling
 10047 swarm panic: exceeds release ceiling
-10079 swarm panic: exceeds release ceiling
+10085 swarm panic: exceeds release ceiling
+10190 swarm panic: exceeds release ceiling
 10193 swarm panic: exceeds release ceiling
-10229 swarm panic: exceeds release ceiling
 10236 swarm panic: exceeds release ceiling
 10249 swarm panic: exceeds release ceiling
-10304 swarm panic: exceeds release ceiling
 10392 swarm panic: exceeds release ceiling
 10414 swarm panic: exceeds release ceiling
 10435 swarm panic: exceeds release ceiling
 10441 swarm panic: exceeds release ceiling
-10626 swarm panic: exceeds release ceiling
-10743 swarm panic: exceeds release ceiling
 10801 swarm panic: exceeds release ceiling
-10853 swarm panic: exceeds release ceiling
 10855 swarm panic: exceeds release ceiling
-10861 swarm panic: exceeds release ceiling
-10863 swarm panic: exceeds release ceiling
-10882 swarm panic: exceeds release ceiling
-11076 swarm panic: exceeds release ceiling
+10871 swarm panic: exceeds release ceiling
+11147 swarm panic: exceeds release ceiling
+11160 swarm panic: exceeds release ceiling
 11168 swarm panic: exceeds release ceiling
 11207 swarm panic: exceeds release ceiling
 11243 swarm panic: exceeds release ceiling
 11246 swarm panic: exceeds release ceiling
 11308 swarm panic: exceeds release ceiling
 11396 swarm panic: exceeds release ceiling
-11400 swarm panic: exceeds release ceiling
 11433 swarm panic: exceeds release ceiling
 11445 swarm panic: exceeds release ceiling
 11593 swarm panic: exceeds release ceiling
-11612 swarm panic: exceeds release ceiling
 11635 swarm panic: exceeds release ceiling
 11704 swarm panic: exceeds release ceiling
 11725 swarm panic: exceeds release ceiling
 11747 swarm panic: exceeds release ceiling
-11752 swarm panic: exceeds release ceiling
 11764 swarm panic: exceeds release ceiling
 11785 swarm panic: exceeds release ceiling
 11812 swarm panic: exceeds release ceiling
-11900 swarm panic: exceeds release ceiling
 11984 swarm panic: exceeds release ceiling
-12007 swarm panic: exceeds release ceiling
-12077 swarm panic: exceeds release ceiling
-12094 swarm panic: exceeds release ceiling
+12160 swarm panic: exceeds release ceiling
+12168 swarm panic: exceeds release ceiling
 12177 swarm panic: exceeds release ceiling
-12196 swarm panic: exceeds release ceiling
 12202 swarm panic: exceeds release ceiling
 12271 swarm panic: exceeds release ceiling
 12400 swarm panic: exceeds release ceiling
 12456 swarm panic: exceeds release ceiling
-12463 swarm panic: exceeds release ceiling
 12501 swarm panic: exceeds release ceiling
-12602 swarm panic: exceeds release ceiling
 12616 swarm panic: exceeds release ceiling
-12640 swarm panic: exceeds release ceiling
-12674 swarm panic: exceeds release ceiling
-12732 swarm panic: exceeds release ceiling
 12835 swarm panic: exceeds release ceiling
 12879 swarm panic: exceeds release ceiling
-12887 swarm panic: exceeds release ceiling
-12964 swarm panic: exceeds release ceiling
 12989 swarm panic: exceeds release ceiling
 13063 swarm panic: exceeds release ceiling
 13159 swarm panic: exceeds release ceiling
 13247 swarm panic: exceeds release ceiling
+13285 swarm panic: exceeds release ceiling
 13341 swarm panic: exceeds release ceiling
 13345 swarm panic: exceeds release ceiling
+13374 swarm panic: exceeds release ceiling
 13380 swarm panic: exceeds release ceiling
-13420 swarm panic: exceeds release ceiling
 13432 swarm panic: exceeds release ceiling
 13445 swarm panic: exceeds release ceiling
 13531 swarm panic: exceeds release ceiling
 13568 swarm panic: exceeds release ceiling
 13583 swarm panic: exceeds release ceiling
-13626 swarm panic: exceeds release ceiling
 13674 swarm panic: exceeds release ceiling
-13696 swarm panic: exceeds release ceiling
-13771 swarm panic: exceeds release ceiling
-13871 swarm panic: exceeds release ceiling
 13900 swarm panic: exceeds release ceiling
 13901 swarm panic: exceeds release ceiling
-13917 swarm panic: exceeds release ceiling
-13973 swarm panic: exceeds release ceiling
+13958 swarm panic: exceeds release ceiling
 14021 swarm panic: exceeds release ceiling
 14090 swarm panic: exceeds release ceiling
-14101 swarm panic: exceeds release ceiling
-14109 swarm panic: exceeds release ceiling
-14458 swarm panic: exceeds release ceiling
+14444 swarm panic: exceeds release ceiling
 14547 swarm panic: exceeds release ceiling
 14567 swarm panic: exceeds release ceiling
-14573 swarm panic: exceeds release ceiling
 14658 swarm panic: exceeds release ceiling
-14673 swarm panic: exceeds release ceiling
-14681 swarm panic: exceeds release ceiling
-14713 swarm panic: exceeds release ceiling
 14723 swarm panic: exceeds release ceiling
 14773 swarm panic: exceeds release ceiling
-14880 swarm panic: exceeds release ceiling
-14990 swarm panic: exceeds release ceiling
-15061 swarm panic: exceeds release ceiling
-15184 swarm panic: exceeds release ceiling
+14924 swarm panic: exceeds release ceiling
+15148 swarm panic: exceeds release ceiling
 15295 swarm panic: exceeds release ceiling
 15298 swarm panic: exceeds release ceiling
-15314 swarm panic: exceeds release ceiling
 15412 swarm panic: exceeds release ceiling
+15423 swarm panic: exceeds release ceiling
 15479 swarm panic: exceeds release ceiling
 15501 swarm panic: exceeds release ceiling
 15502 swarm panic: exceeds release ceiling
-15576 swarm panic: exceeds release ceiling
 15631 swarm panic: exceeds release ceiling
-15644 swarm panic: exceeds release ceiling
 15668 swarm panic: exceeds release ceiling
 15692 swarm panic: exceeds release ceiling
-15697 swarm panic: exceeds release ceiling
+15722 swarm panic: exceeds release ceiling
+15737 swarm panic: exceeds release ceiling
 15751 swarm panic: exceeds release ceiling
-15760 swarm panic: exceeds release ceiling
-15823 swarm panic: exceeds release ceiling
-15937 swarm panic: exceeds release ceiling
 15951 swarm panic: exceeds release ceiling
-15956 swarm panic: exceeds release ceiling
 15957 swarm panic: exceeds release ceiling
 15996 swarm panic: exceeds release ceiling
-16015 swarm panic: exceeds release ceiling
 16128 swarm panic: exceeds release ceiling
 16164 swarm panic: exceeds release ceiling
+16170 swarm panic: exceeds release ceiling
 16193 swarm panic: exceeds release ceiling
 16214 swarm panic: exceeds release ceiling
-16286 swarm panic: exceeds release ceiling
+16310 swarm panic: exceeds release ceiling
 16353 swarm panic: exceeds release ceiling
 16399 swarm panic: exceeds release ceiling
 16406 swarm panic: exceeds release ceiling
-16458 swarm panic: exceeds release ceiling
 16478 swarm panic: exceeds release ceiling
 16520 swarm panic: exceeds release ceiling
 16538 swarm alarm-undiscoverable
 16538 swarm panic: exceeds release ceiling
-16584 swarm panic: exceeds release ceiling
-16608 swarm panic: exceeds release ceiling
 16639 swarm panic: exceeds release ceiling
-16708 swarm panic: exceeds release ceiling
+16798 swarm panic: exceeds release ceiling
+16802 swarm panic: exceeds release ceiling
 16815 swarm panic: exceeds release ceiling
-16835 swarm panic: exceeds release ceiling
-16905 swarm panic: exceeds release ceiling
 16945 swarm panic: exceeds release ceiling
 16953 swarm panic: exceeds release ceiling
-17136 swarm panic: exceeds release ceiling
 17160 swarm panic: exceeds release ceiling
-17197 swarm panic: exceeds release ceiling
 17342 swarm panic: exceeds release ceiling
+17344 swarm panic: exceeds release ceiling
 17403 swarm panic: exceeds release ceiling
+17558 swarm panic: exceeds release ceiling
 17575 swarm panic: exceeds release ceiling
+17606 swarm panic: exceeds release ceiling
 17790 swarm panic: exceeds release ceiling
 17800 swarm panic: exceeds release ceiling
-17801 swarm panic: exceeds release ceiling
 17820 swarm panic: exceeds release ceiling
 17940 swarm panic: exceeds release ceiling
 17947 swarm panic: exceeds release ceiling
 17962 swarm panic: exceeds release ceiling
-17989 swarm panic: exceeds release ceiling
 18027 swarm panic: exceeds release ceiling
-18047 swarm panic: exceeds release ceiling
-18158 swarm panic: exceeds release ceiling
-18175 swarm panic: exceeds release ceiling
-18288 swarm panic: exceeds release ceiling
-18409 swarm panic: exceeds release ceiling
-18424 swarm panic: exceeds release ceiling
+18373 swarm panic: exceeds release ceiling
 18441 swarm panic: exceeds release ceiling
-18451 swarm panic: exceeds release ceiling
-18464 swarm panic: exceeds release ceiling
-18528 swarm panic: exceeds release ceiling
-18555 swarm panic: exceeds release ceiling
 18590 swarm panic: exceeds release ceiling
 18615 swarm panic: exceeds release ceiling
-18682 swarm panic: exceeds release ceiling
-18746 swarm panic: exceeds release ceiling
+18716 swarm panic: exceeds release ceiling
+18749 swarm panic: exceeds release ceiling
 18783 swarm panic: exceeds release ceiling
-18870 swarm panic: exceeds release ceiling
+18886 swarm panic: exceeds release ceiling
 18897 swarm panic: exceeds release ceiling
-18935 swarm panic: exceeds release ceiling
+18922 swarm panic: exceeds release ceiling
+19020 swarm panic: exceeds release ceiling
 19030 swarm panic: exceeds release ceiling
-19068 swarm panic: exceeds release ceiling
 19073 swarm panic: exceeds release ceiling
 19109 swarm panic: exceeds release ceiling
 19120 swarm panic: exceeds release ceiling
 19144 swarm panic: exceeds release ceiling
-19267 swarm panic: exceeds release ceiling
+19187 swarm panic: exceeds release ceiling
+19233 swarm panic: exceeds release ceiling
 19351 swarm panic: exceeds release ceiling
 19388 swarm panic: exceeds release ceiling
 19390 swarm panic: exceeds release ceiling
 19583 swarm panic: exceeds release ceiling
-19594 swarm panic: exceeds release ceiling
-19620 swarm panic: exceeds release ceiling
-19680 swarm panic: exceeds release ceiling
+19674 swarm panic: exceeds release ceiling
 19692 swarm panic: exceeds release ceiling
 19892 swarm panic: exceeds release ceiling
 19931 swarm panic: exceeds release ceiling
-19944 swarm panic: exceeds release ceiling
 20038 swarm panic: exceeds release ceiling
 20053 swarm panic: exceeds release ceiling
-20079 swarm panic: exceeds release ceiling
 20140 swarm panic: exceeds release ceiling
-20209 swarm panic: exceeds release ceiling
-20215 swarm panic: exceeds release ceiling
+20211 swarm panic: exceeds release ceiling
 20225 swarm panic: exceeds release ceiling
+20265 swarm panic: exceeds release ceiling
 20290 swarm panic: exceeds release ceiling
 20306 swarm panic: exceeds release ceiling
 20331 swarm panic: exceeds release ceiling
 20335 swarm panic: exceeds release ceiling
 20350 swarm panic: exceeds release ceiling
+20364 swarm panic: exceeds release ceiling
 20527 swarm panic: exceeds release ceiling
 20637 swarm panic: exceeds release ceiling
-20642 swarm panic: exceeds release ceiling
 20695 swarm panic: exceeds release ceiling
-20697 swarm panic: exceeds release ceiling
+20777 swarm panic: exceeds release ceiling
 20802 swarm panic: exceeds release ceiling
-20867 swarm panic: exceeds release ceiling
+20921 swarm panic: exceeds release ceiling
 20947 swarm panic: exceeds release ceiling
-20959 swarm panic: exceeds release ceiling
-20982 swarm panic: exceeds release ceiling
-21002 swarm panic: exceeds release ceiling
+21076 swarm panic: exceeds release ceiling
 21084 swarm panic: exceeds release ceiling
 21098 swarm panic: exceeds release ceiling
 21116 swarm panic: exceeds release ceiling
 21117 swarm panic: exceeds release ceiling
-21236 swarm panic: exceeds release ceiling
 21278 swarm panic: exceeds release ceiling
-21341 swarm panic: exceeds release ceiling
-21345 swarm panic: exceeds release ceiling
-21398 swarm panic: exceeds release ceiling
 21423 swarm panic: exceeds release ceiling
 21449 swarm panic: exceeds release ceiling
 21463 swarm panic: exceeds release ceiling
 21493 swarm panic: exceeds release ceiling
 21567 swarm panic: exceeds release ceiling
-21604 swarm panic: exceeds release ceiling
-21621 swarm panic: exceeds release ceiling
 21732 swarm panic: exceeds release ceiling
 21785 swarm panic: exceeds release ceiling
-21967 swarm panic: exceeds release ceiling
-22030 swarm panic: exceeds release ceiling
-22083 swarm panic: exceeds release ceiling
 22153 swarm panic: exceeds release ceiling
 22181 swarm panic: exceeds release ceiling
-22243 swarm panic: exceeds release ceiling
+22238 swarm panic: exceeds release ceiling
 22293 swarm panic: exceeds release ceiling
 22351 swarm panic: exceeds release ceiling
-22478 swarm panic: exceeds release ceiling
-22479 swarm panic: exceeds release ceiling
 22492 swarm panic: exceeds release ceiling
 22621 swarm panic: exceeds release ceiling
+22637 swarm panic: exceeds release ceiling
+22665 swarm panic: exceeds release ceiling
 22681 swarm panic: exceeds release ceiling
-22688 swarm panic: exceeds release ceiling
-22746 swarm panic: exceeds release ceiling
 22749 swarm panic: exceeds release ceiling
-22925 swarm panic: exceeds release ceiling
+22777 swarm panic: exceeds release ceiling
 22935 swarm panic: exceeds release ceiling
+22974 swarm panic: exceeds release ceiling
 23007 swarm panic: exceeds release ceiling
 23014 swarm panic: exceeds release ceiling
 23034 swarm panic: exceeds release ceiling
 23144 swarm panic: exceeds release ceiling
 23236 swarm panic: exceeds release ceiling
 23276 swarm panic: exceeds release ceiling
-23324 swarm panic: exceeds release ceiling
-23361 swarm panic: exceeds release ceiling
-23422 swarm panic: exceeds release ceiling
+23313 swarm panic: exceeds release ceiling
+23416 swarm panic: exceeds release ceiling
 23461 swarm panic: exceeds release ceiling
 23499 swarm panic: exceeds release ceiling
 23544 swarm panic: exceeds release ceiling
 23611 swarm panic: exceeds release ceiling
-23629 swarm panic: exceeds release ceiling
 23635 swarm panic: exceeds release ceiling
 23690 swarm panic: exceeds release ceiling
 23734 swarm panic: exceeds release ceiling
@@ -627,250 +491,195 @@
 23845 swarm panic: exceeds release ceiling
 24053 swarm panic: exceeds release ceiling
 24075 swarm panic: exceeds release ceiling
+24114 swarm panic: exceeds release ceiling
+24136 swarm panic: exceeds release ceiling
 24146 swarm panic: exceeds release ceiling
 24167 swarm panic: exceeds release ceiling
 24182 swarm panic: exceeds release ceiling
 24203 swarm panic: exceeds release ceiling
-24217 swarm panic: exceeds release ceiling
 24249 swarm panic: exceeds release ceiling
 24282 swarm panic: exceeds release ceiling
 24298 swarm panic: exceeds release ceiling
 24325 swarm panic: exceeds release ceiling
-24438 swarm panic: exceeds release ceiling
-24444 swarm panic: exceeds release ceiling
+24471 swarm panic: exceeds release ceiling
+24500 swarm panic: exceeds release ceiling
 24537 swarm panic: exceeds release ceiling
 24557 swarm panic: exceeds release ceiling
 24599 swarm panic: exceeds release ceiling
 24603 swarm panic: exceeds release ceiling
-24704 swarm panic: exceeds release ceiling
-24801 swarm panic: exceeds release ceiling
 24830 swarm panic: exceeds release ceiling
-24850 swarm panic: exceeds release ceiling
 24890 swarm panic: exceeds release ceiling
 24914 swarm panic: exceeds release ceiling
 24949 swarm panic: exceeds release ceiling
-25011 swarm panic: exceeds release ceiling
-25095 swarm panic: exceeds release ceiling
+24981 swarm panic: exceeds release ceiling
 25172 swarm panic: exceeds release ceiling
-25201 swarm panic: exceeds release ceiling
 25247 swarm panic: exceeds release ceiling
-25377 swarm panic: exceeds release ceiling
-25464 swarm panic: exceeds release ceiling
-25488 swarm panic: exceeds release ceiling
-25495 swarm panic: exceeds release ceiling
+25271 swarm panic: exceeds release ceiling
 25507 swarm panic: exceeds release ceiling
 25508 swarm panic: exceeds release ceiling
 25523 swarm panic: exceeds release ceiling
 25543 swarm panic: exceeds release ceiling
 25549 swarm panic: exceeds release ceiling
 25629 swarm panic: exceeds release ceiling
-25675 swarm panic: exceeds release ceiling
 25688 swarm panic: exceeds release ceiling
+25690 swarm panic: exceeds release ceiling
 25702 swarm panic: exceeds release ceiling
-25725 swarm panic: exceeds release ceiling
+25720 swarm panic: exceeds release ceiling
 25784 swarm panic: exceeds release ceiling
 25791 swarm panic: exceeds release ceiling
 25803 swarm panic: exceeds release ceiling
 25835 swarm panic: exceeds release ceiling
 25847 swarm panic: exceeds release ceiling
 25860 swarm panic: exceeds release ceiling
-25899 swarm panic: exceeds release ceiling
-25927 swarm panic: exceeds release ceiling
 25945 swarm panic: exceeds release ceiling
-26019 swarm panic: exceeds release ceiling
+26041 swarm panic: exceeds release ceiling
 26047 swarm panic: exceeds release ceiling
 26095 swarm panic: exceeds release ceiling
-26111 swarm panic: exceeds release ceiling
 26130 swarm panic: exceeds release ceiling
-26181 swarm panic: exceeds release ceiling
 26192 swarm panic: exceeds release ceiling
-26268 swarm panic: exceeds release ceiling
 26311 swarm panic: exceeds release ceiling
 26335 swarm panic: exceeds release ceiling
 26407 swarm panic: exceeds release ceiling
-26416 swarm panic: exceeds release ceiling
-26499 swarm panic: exceeds release ceiling
-26578 swarm panic: exceeds release ceiling
-26647 swarm panic: exceeds release ceiling
+26522 swarm panic: exceeds release ceiling
+26577 swarm panic: exceeds release ceiling
+26633 swarm panic: exceeds release ceiling
 26651 swarm panic: exceeds release ceiling
 26824 swarm panic: exceeds release ceiling
 26869 swarm panic: exceeds release ceiling
+26872 swarm panic: exceeds release ceiling
 26899 swarm panic: exceeds release ceiling
 26984 swarm panic: exceeds release ceiling
-26992 swarm panic: exceeds release ceiling
 27005 swarm panic: exceeds release ceiling
-27020 swarm panic: exceeds release ceiling
-27040 swarm panic: exceeds release ceiling
 27066 swarm panic: exceeds release ceiling
-27089 swarm panic: exceeds release ceiling
 27094 swarm panic: exceeds release ceiling
-27154 swarm panic: exceeds release ceiling
-27174 swarm panic: exceeds release ceiling
-27189 swarm panic: exceeds release ceiling
 27212 swarm panic: exceeds release ceiling
-27297 swarm panic: exceeds release ceiling
+27264 swarm panic: exceeds release ceiling
 27341 swarm panic: exceeds release ceiling
 27377 swarm panic: exceeds release ceiling
 27451 swarm panic: exceeds release ceiling
+27456 swarm panic: exceeds release ceiling
 27542 swarm panic: exceeds release ceiling
-27628 swarm panic: exceeds release ceiling
 27636 swarm panic: exceeds release ceiling
 27702 swarm panic: exceeds release ceiling
 27734 swarm panic: exceeds release ceiling
 27742 swarm panic: exceeds release ceiling
-27944 swarm panic: exceeds release ceiling
 28005 swarm panic: exceeds release ceiling
 28041 swarm panic: exceeds release ceiling
 28068 swarm panic: exceeds release ceiling
-28100 swarm panic: exceeds release ceiling
 28168 swarm panic: exceeds release ceiling
-28179 swarm panic: exceeds release ceiling
 28184 swarm panic: exceeds release ceiling
-28200 swarm panic: exceeds release ceiling
+28215 swarm panic: exceeds release ceiling
 28245 swarm panic: exceeds release ceiling
 28248 swarm panic: exceeds release ceiling
-28253 swarm panic: exceeds release ceiling
-28397 swarm panic: exceeds release ceiling
-28423 swarm panic: exceeds release ceiling
 28468 swarm panic: exceeds release ceiling
 28493 swarm panic: exceeds release ceiling
+28494 swarm panic: exceeds release ceiling
 28669 swarm panic: exceeds release ceiling
-28758 swarm panic: exceeds release ceiling
-28862 swarm panic: exceeds release ceiling
+28779 swarm panic: exceeds release ceiling
+28850 swarm panic: exceeds release ceiling
 28868 swarm panic: exceeds release ceiling
 28918 swarm panic: exceeds release ceiling
 28984 swarm panic: exceeds release ceiling
-29141 swarm panic: exceeds release ceiling
-29203 swarm panic: exceeds release ceiling
-29216 swarm panic: exceeds release ceiling
 29311 swarm panic: exceeds release ceiling
 29325 swarm panic: exceeds release ceiling
 29338 swarm panic: exceeds release ceiling
 29346 swarm panic: exceeds release ceiling
-29415 swarm panic: exceeds release ceiling
-29504 swarm panic: exceeds release ceiling
 29574 swarm panic: exceeds release ceiling
-29664 swarm panic: exceeds release ceiling
 29679 swarm panic: exceeds release ceiling
 29771 swarm panic: exceeds release ceiling
-29817 swarm panic: exceeds release ceiling
-29831 swarm panic: exceeds release ceiling
+29802 swarm panic: exceeds release ceiling
 30005 swarm panic: exceeds release ceiling
-30063 swarm panic: exceeds release ceiling
 30154 swarm panic: exceeds release ceiling
-30187 swarm panic: exceeds release ceiling
-30502 swarm panic: exceeds release ceiling
-30526 swarm panic: exceeds release ceiling
+30186 swarm panic: exceeds release ceiling
+30318 swarm panic: exceeds release ceiling
 30542 swarm panic: exceeds release ceiling
-30555 swarm panic: exceeds release ceiling
-30601 swarm panic: exceeds release ceiling
-30677 swarm panic: exceeds release ceiling
 30680 swarm panic: exceeds release ceiling
+30682 swarm panic: exceeds release ceiling
 30706 swarm panic: exceeds release ceiling
-30937 swarm panic: exceeds release ceiling
+30774 swarm panic: exceeds release ceiling
+30976 swarm panic: exceeds release ceiling
 31192 swarm panic: exceeds release ceiling
 31225 swarm panic: exceeds release ceiling
 31335 swarm panic: exceeds release ceiling
-31366 swarm panic: exceeds release ceiling
 31478 swarm panic: exceeds release ceiling
 31494 swarm panic: exceeds release ceiling
-31530 swarm panic: exceeds release ceiling
-31534 swarm panic: exceeds release ceiling
 31593 swarm panic: exceeds release ceiling
-31734 swarm panic: exceeds release ceiling
-31859 swarm panic: exceeds release ceiling
-31942 swarm panic: exceeds release ceiling
-31946 swarm panic: exceeds release ceiling
+31674 swarm panic: exceeds release ceiling
+31902 swarm panic: exceeds release ceiling
 31977 swarm panic: exceeds release ceiling
 32024 swarm panic: exceeds release ceiling
+32042 swarm panic: exceeds release ceiling
+32056 swarm panic: exceeds release ceiling
+32081 swarm panic: exceeds release ceiling
 32164 swarm panic: exceeds release ceiling
 32279 swarm panic: exceeds release ceiling
 32304 swarm panic: exceeds release ceiling
-32327 swarm panic: exceeds release ceiling
 32344 swarm panic: exceeds release ceiling
 32372 swarm panic: exceeds release ceiling
-32475 swarm panic: exceeds release ceiling
+32374 swarm panic: exceeds release ceiling
 32507 swarm panic: exceeds release ceiling
-32552 swarm panic: exceeds release ceiling
+32554 swarm panic: exceeds release ceiling
 32560 swarm panic: exceeds release ceiling
-32712 swarm panic: exceeds release ceiling
-32776 swarm panic: exceeds release ceiling
-32835 swarm panic: exceeds release ceiling
-32839 swarm panic: exceeds release ceiling
+32590 swarm panic: exceeds release ceiling
+32815 swarm panic: exceeds release ceiling
+32960 swarm panic: exceeds release ceiling
 33046 swarm panic: exceeds release ceiling
-33194 swarm panic: exceeds release ceiling
+33056 swarm panic: exceeds release ceiling
 33201 swarm panic: exceeds release ceiling
-33297 swarm panic: exceeds release ceiling
 33310 swarm panic: exceeds release ceiling
 33324 swarm panic: exceeds release ceiling
-33386 swarm panic: exceeds release ceiling
-33762 swarm panic: exceeds release ceiling
-33764 swarm panic: exceeds release ceiling
 33809 swarm panic: exceeds release ceiling
 33834 swarm panic: exceeds release ceiling
-33850 swarm panic: exceeds release ceiling
 33851 swarm panic: exceeds release ceiling
-33874 swarm panic: exceeds release ceiling
 33930 swarm panic: exceeds release ceiling
-34078 swarm panic: exceeds release ceiling
-34081 swarm panic: exceeds release ceiling
+34020 swarm panic: exceeds release ceiling
 34102 swarm panic: exceeds release ceiling
 34109 swarm panic: exceeds release ceiling
 34161 swarm panic: exceeds release ceiling
 34272 swarm panic: exceeds release ceiling
-34279 swarm panic: exceeds release ceiling
-34326 swarm panic: exceeds release ceiling
+34294 swarm panic: exceeds release ceiling
 34340 swarm panic: exceeds release ceiling
 34413 swarm panic: exceeds release ceiling
-34474 swarm panic: exceeds release ceiling
 34509 swarm panic: exceeds release ceiling
 34576 swarm panic: exceeds release ceiling
 34594 swarm panic: exceeds release ceiling
-34611 swarm panic: exceeds release ceiling
-34657 swarm panic: exceeds release ceiling
 34668 swarm panic: exceeds release ceiling
-34680 swarm panic: exceeds release ceiling
-34718 swarm panic: exceeds release ceiling
-34808 swarm panic: exceeds release ceiling
-34843 swarm panic: exceeds release ceiling
 34887 swarm panic: exceeds release ceiling
+34997 swarm panic: exceeds release ceiling
 35001 swarm panic: exceeds release ceiling
-35089 swarm panic: exceeds release ceiling
 35125 swarm panic: exceeds release ceiling
 35134 swarm panic: exceeds release ceiling
 35162 swarm panic: exceeds release ceiling
-35204 swarm panic: exceeds release ceiling
 35302 swarm panic: exceeds release ceiling
-35316 swarm panic: exceeds release ceiling
-35318 swarm panic: exceeds release ceiling
-35319 swarm panic: exceeds release ceiling
 35423 swarm panic: exceeds release ceiling
+35536 swarm panic: exceeds release ceiling
 35537 swarm panic: exceeds release ceiling
+35562 swarm panic: exceeds release ceiling
 35598 swarm panic: exceeds release ceiling
 35689 swarm panic: exceeds release ceiling
-35692 swarm panic: exceeds release ceiling
-35758 swarm panic: exceeds release ceiling
 35783 swarm panic: exceeds release ceiling
 35798 swarm panic: exceeds release ceiling
-35802 swarm panic: exceeds release ceiling
-35837 swarm panic: exceeds release ceiling
-35920 swarm panic: exceeds release ceiling
 35975 swarm panic: exceeds release ceiling
 36040 swarm panic: exceeds release ceiling
 36097 swarm panic: exceeds release ceiling
 36137 swarm panic: exceeds release ceiling
-36152 swarm panic: exceeds release ceiling
 36272 swarm panic: exceeds release ceiling
-36380 swarm panic: exceeds release ceiling
+36279 swarm panic: exceeds release ceiling
+36366 swarm panic: exceeds release ceiling
+36405 swarm panic: exceeds release ceiling
+36419 swarm panic: exceeds release ceiling
 36439 swarm panic: exceeds release ceiling
 36481 swarm panic: exceeds release ceiling
 36517 swarm panic: exceeds release ceiling
 36536 swarm panic: exceeds release ceiling
 36580 swarm panic: exceeds release ceiling
+36589 swarm panic: exceeds release ceiling
 36682 swarm panic: exceeds release ceiling
 36689 swarm panic: exceeds release ceiling
 36693 swarm panic: exceeds release ceiling
 36781 swarm panic: exceeds release ceiling
+36818 swarm panic: exceeds release ceiling
+36838 swarm panic: exceeds release ceiling
 36839 swarm panic: exceeds release ceiling
 36854 swarm panic: exceeds release ceiling
 36953 swarm panic: exceeds release ceiling
@@ -878,61 +687,50 @@
 37016 swarm panic: exceeds release ceiling
 37121 swarm panic: exceeds release ceiling
 37166 swarm panic: exceeds release ceiling
-37180 swarm panic: exceeds release ceiling
 37315 swarm panic: exceeds release ceiling
 37317 swarm panic: exceeds release ceiling
+37341 swarm panic: exceeds release ceiling
 37351 swarm panic: exceeds release ceiling
-37500 swarm panic: exceeds release ceiling
 37512 swarm panic: exceeds release ceiling
-37518 swarm panic: exceeds release ceiling
+37526 swarm panic: exceeds release ceiling
 37527 swarm panic: exceeds release ceiling
 37645 swarm panic: exceeds release ceiling
 37714 swarm panic: exceeds release ceiling
-37748 swarm panic: exceeds release ceiling
 37818 swarm panic: exceeds release ceiling
-37920 swarm panic: exceeds release ceiling
 37963 swarm panic: exceeds release ceiling
 37979 swarm panic: exceeds release ceiling
 37983 swarm panic: exceeds release ceiling
 38014 swarm panic: exceeds release ceiling
 38122 swarm panic: exceeds release ceiling
-38245 swarm panic: exceeds release ceiling
 38320 swarm panic: exceeds release ceiling
 38385 swarm panic: exceeds release ceiling
 38563 swarm panic: exceeds release ceiling
-38582 swarm panic: exceeds release ceiling
 38592 swarm panic: exceeds release ceiling
 38690 swarm panic: exceeds release ceiling
 38921 swarm panic: exceeds release ceiling
-38961 swarm panic: exceeds release ceiling
 39113 swarm panic: exceeds release ceiling
 39114 swarm panic: exceeds release ceiling
-39149 swarm panic: exceeds release ceiling
 39247 swarm panic: exceeds release ceiling
+39251 swarm panic: exceeds release ceiling
 39302 swarm panic: exceeds release ceiling
-39313 swarm panic: exceeds release ceiling
 39321 swarm panic: exceeds release ceiling
-39343 swarm panic: exceeds release ceiling
 39381 swarm panic: exceeds release ceiling
-39448 swarm panic: exceeds release ceiling
+39405 swarm panic: exceeds release ceiling
 39522 swarm panic: exceeds release ceiling
 39586 swarm panic: exceeds release ceiling
-39596 swarm panic: exceeds release ceiling
 39635 swarm panic: exceeds release ceiling
-39655 swarm panic: exceeds release ceiling
 39681 swarm panic: exceeds release ceiling
 39728 swarm panic: exceeds release ceiling
-39754 swarm panic: exceeds release ceiling
-39850 swarm panic: exceeds release ceiling
+39770 swarm panic: exceeds release ceiling
+39892 swarm panic: exceeds release ceiling
 39982 swarm panic: exceeds release ceiling
-40049 swarm panic: exceeds release ceiling
+40003 swarm panic: exceeds release ceiling
+40042 swarm panic: exceeds release ceiling
 40126 swarm panic: exceeds release ceiling
-40127 swarm panic: exceeds release ceiling
 40130 swarm panic: exceeds release ceiling
 40141 swarm panic: exceeds release ceiling
-40210 swarm panic: exceeds release ceiling
+40218 swarm panic: exceeds release ceiling
 40295 swarm panic: exceeds release ceiling
-40326 swarm panic: exceeds release ceiling
 40335 swarm panic: exceeds release ceiling
 40364 swarm panic: exceeds release ceiling
 40389 swarm panic: exceeds release ceiling
@@ -941,14 +739,12 @@
 40423 swarm panic: exceeds release ceiling
 40506 swarm panic: exceeds release ceiling
 40516 swarm panic: exceeds release ceiling
-40534 swarm panic: exceeds release ceiling
-40566 swarm panic: exceeds release ceiling
 40670 swarm panic: exceeds release ceiling
-40677 swarm panic: exceeds release ceiling
 40994 swarm panic: exceeds release ceiling
 41176 swarm panic: exceeds release ceiling
+41196 swarm panic: exceeds release ceiling
 41251 swarm panic: exceeds release ceiling
-41339 swarm panic: exceeds release ceiling
+41259 swarm panic: exceeds release ceiling
 41354 swarm panic: exceeds release ceiling
 41492 swarm panic: exceeds release ceiling
 41531 swarm panic: exceeds release ceiling
@@ -956,12 +752,14 @@
 41671 swarm panic: exceeds release ceiling
 41674 swarm panic: exceeds release ceiling
 41676 swarm panic: exceeds release ceiling
-41683 swarm panic: exceeds release ceiling
 41714 swarm panic: exceeds release ceiling
+41803 swarm panic: exceeds release ceiling
 41939 swarm panic: exceeds release ceiling
-41961 swarm panic: exceeds release ceiling
+41988 swarm panic: exceeds release ceiling
 42001 swarm panic: exceeds release ceiling
 42014 swarm panic: exceeds release ceiling
+42020 swarm panic: exceeds release ceiling
+42030 swarm panic: exceeds release ceiling
 42045 swarm panic: exceeds release ceiling
 42051 swarm panic: exceeds release ceiling
 42125 swarm panic: exceeds release ceiling
@@ -971,250 +769,201 @@
 42242 swarm panic: exceeds release ceiling
 42284 swarm panic: exceeds release ceiling
 42297 swarm panic: exceeds release ceiling
+42354 swarm panic: exceeds release ceiling
+42390 swarm panic: exceeds release ceiling
 42391 swarm panic: exceeds release ceiling
 42434 swarm panic: exceeds release ceiling
-42447 swarm panic: exceeds release ceiling
-42483 swarm panic: exceeds release ceiling
+42457 swarm panic: exceeds release ceiling
 42506 swarm panic: exceeds release ceiling
 42587 swarm panic: exceeds release ceiling
 42614 swarm panic: exceeds release ceiling
 42633 swarm panic: exceeds release ceiling
 42699 swarm panic: exceeds release ceiling
-42709 swarm panic: exceeds release ceiling
 42714 swarm panic: exceeds release ceiling
+42722 swarm panic: exceeds release ceiling
 42731 swarm panic: exceeds release ceiling
 42809 swarm panic: exceeds release ceiling
 42818 swarm panic: exceeds release ceiling
-42852 swarm panic: exceeds release ceiling
-42948 swarm panic: exceeds release ceiling
-42986 swarm panic: exceeds release ceiling
 43031 swarm panic: exceeds release ceiling
 43035 swarm panic: exceeds release ceiling
+43042 swarm panic: exceeds release ceiling
+43054 swarm panic: exceeds release ceiling
 43060 swarm panic: exceeds release ceiling
 43076 swarm panic: exceeds release ceiling
 43083 swarm panic: exceeds release ceiling
-43093 swarm panic: exceeds release ceiling
-43183 swarm panic: exceeds release ceiling
-43193 swarm panic: exceeds release ceiling
-43339 swarm panic: exceeds release ceiling
 43417 swarm panic: exceeds release ceiling
-43467 swarm panic: exceeds release ceiling
 43531 swarm panic: exceeds release ceiling
-43561 swarm panic: exceeds release ceiling
+43547 swarm panic: exceeds release ceiling
 43664 swarm panic: exceeds release ceiling
-43676 swarm panic: exceeds release ceiling
 43755 swarm panic: exceeds release ceiling
 43866 swarm panic: exceeds release ceiling
-43909 swarm panic: exceeds release ceiling
 43948 swarm panic: exceeds release ceiling
 43993 swarm panic: exceeds release ceiling
-44000 swarm panic: exceeds release ceiling
-44003 swarm panic: exceeds release ceiling
-44014 swarm panic: exceeds release ceiling
 44016 swarm panic: exceeds release ceiling
+44075 swarm panic: exceeds release ceiling
 44077 swarm panic: exceeds release ceiling
-44090 swarm panic: exceeds release ceiling
 44194 swarm panic: exceeds release ceiling
 44235 swarm panic: exceeds release ceiling
 44267 swarm panic: exceeds release ceiling
-44295 swarm panic: exceeds release ceiling
-44298 swarm panic: exceeds release ceiling
+44319 swarm panic: exceeds release ceiling
 44360 swarm panic: exceeds release ceiling
-44467 swarm panic: exceeds release ceiling
+44562 swarm panic: exceeds release ceiling
 44736 swarm panic: exceeds release ceiling
 44742 swarm panic: exceeds release ceiling
-44775 swarm panic: exceeds release ceiling
-44797 swarm panic: exceeds release ceiling
 44827 swarm panic: exceeds release ceiling
 44829 swarm panic: exceeds release ceiling
 44842 swarm panic: exceeds release ceiling
 44873 swarm panic: exceeds release ceiling
+44999 swarm panic: exceeds release ceiling
 45005 swarm panic: exceeds release ceiling
 45050 swarm panic: exceeds release ceiling
+45135 swarm panic: exceeds release ceiling
 45222 swarm panic: exceeds release ceiling
-45248 swarm panic: exceeds release ceiling
 45256 swarm panic: exceeds release ceiling
+45389 swarm panic: exceeds release ceiling
 45403 swarm panic: exceeds release ceiling
+45464 swarm panic: exceeds release ceiling
 45488 swarm panic: exceeds release ceiling
+45514 swarm panic: exceeds release ceiling
 45523 swarm panic: exceeds release ceiling
 45562 swarm panic: exceeds release ceiling
-45598 swarm panic: exceeds release ceiling
 45656 swarm panic: exceeds release ceiling
-45709 swarm panic: exceeds release ceiling
-45810 swarm panic: exceeds release ceiling
-45880 swarm panic: exceeds release ceiling
-45883 swarm panic: exceeds release ceiling
 45948 swarm panic: exceeds release ceiling
 45959 swarm panic: exceeds release ceiling
 45965 swarm panic: exceeds release ceiling
 46015 swarm panic: exceeds release ceiling
 46024 swarm panic: exceeds release ceiling
-46033 swarm panic: exceeds release ceiling
-46036 swarm panic: exceeds release ceiling
 46168 swarm panic: exceeds release ceiling
-46195 swarm panic: exceeds release ceiling
 46198 swarm panic: exceeds release ceiling
-46230 swarm panic: exceeds release ceiling
-46245 swarm panic: exceeds release ceiling
 46265 swarm panic: exceeds release ceiling
 46286 swarm panic: exceeds release ceiling
 46287 swarm panic: exceeds release ceiling
-46352 swarm panic: exceeds release ceiling
 46364 swarm panic: exceeds release ceiling
-46576 swarm panic: exceeds release ceiling
+46369 swarm panic: exceeds release ceiling
 46600 swarm panic: exceeds release ceiling
 46741 swarm panic: exceeds release ceiling
 46760 swarm panic: exceeds release ceiling
 47047 swarm panic: exceeds release ceiling
-47052 swarm panic: exceeds release ceiling
 47054 swarm panic: exceeds release ceiling
 47129 swarm panic: exceeds release ceiling
+47153 swarm panic: exceeds release ceiling
 47160 swarm panic: exceeds release ceiling
 47210 swarm panic: exceeds release ceiling
-47293 swarm panic: exceeds release ceiling
 47399 swarm panic: exceeds release ceiling
-47406 swarm panic: exceeds release ceiling
 47434 swarm panic: exceeds release ceiling
-47531 swarm panic: exceeds release ceiling
 47559 swarm panic: exceeds release ceiling
 47581 swarm panic: exceeds release ceiling
-47686 swarm panic: exceeds release ceiling
-47697 swarm panic: exceeds release ceiling
-47736 swarm panic: exceeds release ceiling
+47677 swarm panic: exceeds release ceiling
 47779 swarm panic: exceeds release ceiling
-47784 swarm panic: exceeds release ceiling
 47802 swarm panic: exceeds release ceiling
-47836 swarm panic: exceeds release ceiling
 47879 swarm panic: exceeds release ceiling
-47894 swarm panic: exceeds release ceiling
 47927 swarm panic: exceeds release ceiling
-47983 swarm panic: exceeds release ceiling
+47929 swarm panic: exceeds release ceiling
+48022 swarm panic: exceeds release ceiling
 48036 swarm panic: exceeds release ceiling
-48100 swarm panic: exceeds release ceiling
-48105 swarm panic: exceeds release ceiling
 48229 swarm panic: exceeds release ceiling
 48241 swarm panic: exceeds release ceiling
 48351 swarm panic: exceeds release ceiling
 48378 swarm panic: exceeds release ceiling
-48516 swarm panic: exceeds release ceiling
+48399 swarm panic: exceeds release ceiling
 48555 swarm panic: exceeds release ceiling
 48603 swarm panic: exceeds release ceiling
 48624 swarm panic: exceeds release ceiling
 48751 swarm panic: exceeds release ceiling
-48770 swarm panic: exceeds release ceiling
+48817 swarm panic: exceeds release ceiling
 48819 swarm panic: exceeds release ceiling
-48828 swarm panic: exceeds release ceiling
 48844 swarm panic: exceeds release ceiling
 48868 swarm panic: exceeds release ceiling
+48905 swarm panic: exceeds release ceiling
 48958 swarm panic: exceeds release ceiling
-49037 swarm panic: exceeds release ceiling
 49078 swarm panic: exceeds release ceiling
-49216 swarm panic: exceeds release ceiling
-49262 swarm panic: exceeds release ceiling
-49338 swarm panic: exceeds release ceiling
 49340 swarm panic: exceeds release ceiling
 49344 swarm panic: exceeds release ceiling
-49408 swarm panic: exceeds release ceiling
 49465 swarm panic: exceeds release ceiling
-49473 swarm panic: exceeds release ceiling
 49476 swarm panic: exceeds release ceiling
 49488 swarm panic: exceeds release ceiling
 49535 swarm panic: exceeds release ceiling
 49582 swarm panic: exceeds release ceiling
 49599 swarm panic: exceeds release ceiling
-49649 swarm panic: exceeds release ceiling
+49628 swarm panic: exceeds release ceiling
+49752 swarm panic: exceeds release ceiling
 49773 swarm panic: exceeds release ceiling
 49780 swarm panic: exceeds release ceiling
 49791 swarm panic: exceeds release ceiling
 49817 swarm panic: exceeds release ceiling
-49949 swarm panic: exceeds release ceiling
 
-# A cell marked for handoff can leave the handoff pipeline (540 seeds)
+# A cell marked for handoff can leave the handoff pipeline (438 seeds)
 108 swarm panic: is outside the pipeline
+135 swarm panic: is outside the pipeline
 300 swarm panic: is outside the pipeline
-359 swarm panic: is outside the pipeline
 391 swarm panic: is outside the pipeline
 438 swarm panic: is outside the pipeline
 539 swarm panic: is outside the pipeline
+570 swarm panic: is outside the pipeline
 631 swarm panic: is outside the pipeline
 695 swarm panic: is outside the pipeline
 724 swarm panic: is outside the pipeline
-752 swarm panic: is outside the pipeline
 755 swarm panic: is outside the pipeline
-825 swarm panic: is outside the pipeline
-916 swarm panic: is outside the pipeline
+922 swarm panic: is outside the pipeline
 1037 swarm panic: is outside the pipeline
-1805 swarm panic: is outside the pipeline
-1895 swarm panic: is outside the pipeline
+1118 swarm panic: is outside the pipeline
+1185 swarm panic: is outside the pipeline
+1430 swarm panic: is outside the pipeline
+1553 swarm panic: is outside the pipeline
+1588 swarm panic: is outside the pipeline
 1910 swarm panic: is outside the pipeline
-1944 swarm panic: is outside the pipeline
-1977 swarm panic: is outside the pipeline
-2043 swarm panic: is outside the pipeline
 2048 swarm panic: is outside the pipeline
-2056 swarm panic: is outside the pipeline
 2301 swarm panic: is outside the pipeline
-2324 swarm panic: is outside the pipeline
-2359 swarm panic: is outside the pipeline
+2491 swarm panic: is outside the pipeline
 2615 swarm panic: is outside the pipeline
+3250 swarm panic: is outside the pipeline
 3365 swarm panic: is outside the pipeline
 3386 swarm panic: is outside the pipeline
-3458 swarm panic: is outside the pipeline
-3584 swarm panic: is outside the pipeline
 3608 swarm panic: is outside the pipeline
 3636 swarm panic: is outside the pipeline
-3665 swarm panic: is outside the pipeline
+3968 swarm panic: is outside the pipeline
 4024 swarm panic: is outside the pipeline
 4040 swarm panic: is outside the pipeline
-4346 swarm panic: is outside the pipeline
-4507 swarm panic: is outside the pipeline
-4703 swarm panic: is outside the pipeline
-4730 swarm panic: is outside the pipeline
-4754 swarm panic: is outside the pipeline
+4109 swarm panic: is outside the pipeline
+4442 swarm panic: is outside the pipeline
 4920 swarm panic: is outside the pipeline
 5000 swarm panic: is outside the pipeline
-5169 swarm panic: is outside the pipeline
 5320 swarm panic: is outside the pipeline
-5346 swarm panic: is outside the pipeline
 5460 swarm panic: is outside the pipeline
-5508 swarm panic: is outside the pipeline
-5515 swarm panic: is outside the pipeline
-5556 swarm panic: is outside the pipeline
-5695 swarm panic: is outside the pipeline
-5754 swarm panic: is outside the pipeline
-5880 swarm panic: is outside the pipeline
 5904 swarm panic: is outside the pipeline
+5922 swarm panic: is outside the pipeline
 5999 swarm panic: is outside the pipeline
-6111 swarm panic: is outside the pipeline
-6180 swarm panic: is outside the pipeline
+6198 swarm panic: is outside the pipeline
 6219 swarm panic: is outside the pipeline
-6413 swarm panic: is outside the pipeline
+6248 swarm panic: is outside the pipeline
 6424 swarm panic: is outside the pipeline
 6432 swarm panic: is outside the pipeline
+6489 swarm panic: is outside the pipeline
 6535 swarm panic: is outside the pipeline
 6600 swarm panic: is outside the pipeline
 6673 swarm panic: is outside the pipeline
-6735 swarm panic: is outside the pipeline
-6832 swarm panic: is outside the pipeline
+6833 swarm panic: is outside the pipeline
 6911 swarm panic: is outside the pipeline
-6991 swarm panic: is outside the pipeline
+7019 swarm panic: is outside the pipeline
 7089 swarm panic: is outside the pipeline
 7136 swarm panic: is outside the pipeline
-7212 swarm panic: is outside the pipeline
-7389 swarm panic: is outside the pipeline
+7375 swarm panic: is outside the pipeline
 7471 swarm panic: is outside the pipeline
 7493 swarm panic: is outside the pipeline
+7525 swarm alarm-refired
+7525 swarm panic: is outside the pipeline
 7712 swarm panic: is outside the pipeline
+7760 swarm panic: is outside the pipeline
 7829 swarm panic: is outside the pipeline
 7835 swarm panic: is outside the pipeline
-8033 swarm panic: is outside the pipeline
-8203 swarm panic: is outside the pipeline
+7981 swarm panic: is outside the pipeline
+8131 swarm panic: is outside the pipeline
 8311 swarm panic: is outside the pipeline
-8362 swarm panic: is outside the pipeline
-8371 swarm panic: is outside the pipeline
+8342 swarm panic: is outside the pipeline
+8386 swarm panic: is outside the pipeline
 8404 swarm panic: is outside the pipeline
-8427 swarm panic: is outside the pipeline
-8439 swarm panic: is outside the pipeline
-8604 swarm panic: is outside the pipeline
+8435 swarm panic: is outside the pipeline
+8618 swarm panic: is outside the pipeline
 8723 swarm panic: is outside the pipeline
 8724 swarm panic: is outside the pipeline
 8824 swarm panic: is outside the pipeline
@@ -1222,655 +971,567 @@
 9022 swarm panic: is outside the pipeline
 9040 swarm panic: is outside the pipeline
 9139 swarm panic: is outside the pipeline
-9275 swarm panic: is outside the pipeline
+9162 swarm panic: is outside the pipeline
+9334 swarm panic: is outside the pipeline
 9480 swarm panic: is outside the pipeline
 9508 swarm panic: is outside the pipeline
+9562 swarm panic: is outside the pipeline
 9832 swarm panic: is outside the pipeline
 9926 swarm panic: is outside the pipeline
-10116 swarm panic: is outside the pipeline
-10181 swarm panic: is outside the pipeline
-10209 swarm panic: is outside the pipeline
+10022 swarm panic: is outside the pipeline
+10172 swarm panic: is outside the pipeline
 10279 swarm panic: is outside the pipeline
+10296 swarm panic: is outside the pipeline
 10484 swarm panic: is outside the pipeline
 10614 swarm panic: is outside the pipeline
 10640 swarm panic: is outside the pipeline
-10679 swarm panic: is outside the pipeline
+10726 swarm panic: is outside the pipeline
 10729 swarm panic: is outside the pipeline
 10732 swarm panic: is outside the pipeline
 10822 swarm panic: is outside the pipeline
-11029 swarm panic: is outside the pipeline
+10861 swarm panic: is outside the pipeline
+10898 swarm panic: is outside the pipeline
 11124 swarm panic: is outside the pipeline
-11160 swarm panic: is outside the pipeline
-11297 swarm panic: is outside the pipeline
+11441 swarm panic: is outside the pipeline
 11558 swarm panic: is outside the pipeline
-11563 swarm panic: is outside the pipeline
 11571 swarm panic: is outside the pipeline
 11709 swarm panic: is outside the pipeline
-11728 swarm panic: is outside the pipeline
-11807 swarm panic: is outside the pipeline
+11734 swarm panic: is outside the pipeline
+12007 swarm panic: is outside the pipeline
 12051 swarm panic: is outside the pipeline
 12120 swarm panic: is outside the pipeline
 12143 swarm panic: is outside the pipeline
 12148 swarm panic: is outside the pipeline
 12169 swarm panic: is outside the pipeline
 12283 swarm panic: is outside the pipeline
+12328 swarm panic: is outside the pipeline
 12363 swarm panic: is outside the pipeline
 12436 swarm panic: is outside the pipeline
 12635 swarm panic: is outside the pipeline
 12761 swarm panic: is outside the pipeline
 12844 swarm panic: is outside the pipeline
+12900 swarm panic: is outside the pipeline
 12943 swarm panic: is outside the pipeline
 12949 swarm panic: is outside the pipeline
 12961 swarm panic: is outside the pipeline
+13057 swarm panic: is outside the pipeline
 13106 swarm panic: is outside the pipeline
-13115 swarm panic: is outside the pipeline
 13237 swarm panic: is outside the pipeline
-13285 swarm panic: is outside the pipeline
+13241 swarm panic: is outside the pipeline
 13312 swarm panic: is outside the pipeline
-13431 swarm panic: is outside the pipeline
-13551 swarm panic: is outside the pipeline
+13454 swarm panic: is outside the pipeline
+13506 swarm panic: is outside the pipeline
 13662 swarm panic: is outside the pipeline
 13702 swarm panic: is outside the pipeline
 13895 swarm panic: is outside the pipeline
 14019 swarm panic: is outside the pipeline
 14024 swarm panic: is outside the pipeline
-14142 swarm panic: is outside the pipeline
+14061 swarm panic: is outside the pipeline
 14440 swarm panic: is outside the pipeline
 14472 swarm panic: is outside the pipeline
-14963 swarm panic: is outside the pipeline
-15049 swarm panic: is outside the pipeline
-15093 swarm panic: is outside the pipeline
-15175 swarm panic: is outside the pipeline
+14652 swarm panic: is outside the pipeline
+14815 swarm panic: is outside the pipeline
+15122 swarm panic: is outside the pipeline
 15221 swarm panic: is outside the pipeline
 15279 swarm panic: is outside the pipeline
 15351 swarm panic: is outside the pipeline
-15664 swarm panic: is outside the pipeline
 15747 swarm panic: is outside the pipeline
-15784 swarm panic: is outside the pipeline
-15812 swarm panic: is outside the pipeline
-15870 swarm panic: is outside the pipeline
-15885 swarm panic: is outside the pipeline
-15886 swarm panic: is outside the pipeline
+15869 swarm panic: is outside the pipeline
 16067 swarm panic: is outside the pipeline
-16283 swarm panic: is outside the pipeline
+16265 swarm panic: is outside the pipeline
+16360 swarm panic: is outside the pipeline
 16386 swarm panic: is outside the pipeline
 16403 swarm panic: is outside the pipeline
+16432 swarm panic: is outside the pipeline
 16552 swarm panic: is outside the pipeline
 16623 swarm panic: is outside the pipeline
 16658 swarm panic: is outside the pipeline
-16787 swarm panic: is outside the pipeline
-16813 swarm panic: is outside the pipeline
+16708 swarm panic: is outside the pipeline
 16922 swarm panic: is outside the pipeline
 16925 swarm panic: is outside the pipeline
+17026 swarm panic: is outside the pipeline
+17028 swarm panic: is outside the pipeline
 17058 swarm panic: is outside the pipeline
-17075 swarm panic: is outside the pipeline
 17314 swarm panic: is outside the pipeline
 17377 swarm panic: is outside the pipeline
 17462 swarm panic: is outside the pipeline
+17466 swarm panic: is outside the pipeline
 17496 swarm panic: is outside the pipeline
-17547 swarm panic: is outside the pipeline
+17888 swarm panic: is outside the pipeline
 17988 swarm panic: is outside the pipeline
-18007 swarm panic: is outside the pipeline
-18088 swarm panic: is outside the pipeline
 18153 swarm panic: is outside the pipeline
+18180 swarm panic: is outside the pipeline
 18263 swarm panic: is outside the pipeline
 18362 swarm panic: is outside the pipeline
-18402 swarm panic: is outside the pipeline
 18444 swarm panic: is outside the pipeline
-18509 swarm panic: is outside the pipeline
-18553 swarm panic: is outside the pipeline
 18750 swarm panic: is outside the pipeline
 18772 swarm panic: is outside the pipeline
 18787 swarm panic: is outside the pipeline
 18965 swarm panic: is outside the pipeline
 18969 swarm panic: is outside the pipeline
 19004 swarm panic: is outside the pipeline
+19044 swarm panic: is outside the pipeline
 19218 swarm panic: is outside the pipeline
 19399 swarm panic: is outside the pipeline
-19492 swarm panic: is outside the pipeline
+19497 swarm panic: is outside the pipeline
+19537 swarm panic: is outside the pipeline
 19586 swarm panic: is outside the pipeline
-19625 swarm panic: is outside the pipeline
-19637 swarm panic: is outside the pipeline
+19605 swarm panic: is outside the pipeline
 19733 swarm panic: is outside the pipeline
 19934 swarm panic: is outside the pipeline
 20054 swarm panic: is outside the pipeline
 20177 swarm panic: is outside the pipeline
 20275 swarm panic: is outside the pipeline
-20364 swarm panic: is outside the pipeline
 20399 swarm panic: is outside the pipeline
-20488 swarm panic: is outside the pipeline
+20441 swarm panic: is outside the pipeline
 20530 swarm panic: is outside the pipeline
-20542 swarm panic: is outside the pipeline
 20793 swarm panic: is outside the pipeline
+20937 swarm panic: is outside the pipeline
 20997 swarm panic: is outside the pipeline
-21034 swarm panic: is outside the pipeline
 21093 swarm panic: is outside the pipeline
 21210 swarm panic: is outside the pipeline
-21259 swarm panic: is outside the pipeline
-21496 swarm panic: is outside the pipeline
-21521 swarm panic: is outside the pipeline
-21613 swarm panic: is outside the pipeline
+21562 swarm panic: is outside the pipeline
 21617 swarm panic: is outside the pipeline
 21625 swarm panic: is outside the pipeline
 21702 swarm panic: is outside the pipeline
-21863 swarm panic: is outside the pipeline
-21921 swarm panic: is outside the pipeline
-22003 swarm panic: is outside the pipeline
+21976 swarm panic: is outside the pipeline
+22051 swarm panic: is outside the pipeline
 22129 swarm panic: is outside the pipeline
+22135 swarm panic: is outside the pipeline
 22139 swarm panic: is outside the pipeline
-22170 swarm panic: is outside the pipeline
-22253 swarm panic: is outside the pipeline
 22300 swarm panic: is outside the pipeline
 22315 swarm panic: is outside the pipeline
-22371 swarm panic: is outside the pipeline
 22447 swarm panic: is outside the pipeline
-22469 swarm panic: is outside the pipeline
-22575 swarm panic: is outside the pipeline
+22464 swarm panic: is outside the pipeline
 22616 swarm panic: is outside the pipeline
 22649 swarm panic: is outside the pipeline
 22710 swarm panic: is outside the pipeline
-22882 swarm panic: is outside the pipeline
 22889 swarm panic: is outside the pipeline
 22984 swarm panic: is outside the pipeline
 22998 swarm panic: is outside the pipeline
-23096 swarm panic: is outside the pipeline
 23203 swarm panic: is outside the pipeline
 23263 swarm panic: is outside the pipeline
-23537 swarm panic: is outside the pipeline
+23325 swarm panic: is outside the pipeline
 23718 swarm panic: is outside the pipeline
 23727 swarm panic: is outside the pipeline
 23773 swarm panic: is outside the pipeline
-23804 swarm panic: is outside the pipeline
 23879 swarm panic: is outside the pipeline
 23917 swarm panic: is outside the pipeline
 23938 swarm panic: is outside the pipeline
 23952 swarm panic: is outside the pipeline
 24002 swarm panic: is outside the pipeline
-24329 swarm panic: is outside the pipeline
+24015 swarm panic: is outside the pipeline
+24116 swarm panic: is outside the pipeline
 24331 swarm panic: is outside the pipeline
 24455 swarm panic: is outside the pipeline
-24483 swarm panic: is outside the pipeline
-24796 swarm panic: is outside the pipeline
 24800 swarm panic: is outside the pipeline
+24957 swarm panic: is outside the pipeline
 24992 swarm panic: is outside the pipeline
-25071 swarm panic: is outside the pipeline
-25074 swarm panic: is outside the pipeline
 25077 swarm panic: is outside the pipeline
-25097 swarm panic: is outside the pipeline
+25091 swarm panic: is outside the pipeline
 25108 swarm panic: is outside the pipeline
 25204 swarm panic: is outside the pipeline
-25294 swarm panic: is outside the pipeline
 25351 swarm panic: is outside the pipeline
-25390 swarm panic: is outside the pipeline
-25566 swarm panic: is outside the pipeline
+25488 swarm panic: is outside the pipeline
 25594 swarm panic: is outside the pipeline
 25693 swarm panic: is outside the pipeline
 25768 swarm panic: is outside the pipeline
-25775 swarm panic: is outside the pipeline
-25840 swarm panic: is outside the pipeline
 25921 swarm panic: is outside the pipeline
 25932 swarm panic: is outside the pipeline
+25970 swarm panic: is outside the pipeline
+25981 swarm panic: is outside the pipeline
+26074 swarm panic: is outside the pipeline
 26090 swarm panic: is outside the pipeline
 26109 swarm panic: is outside the pipeline
 26113 swarm panic: is outside the pipeline
-26149 swarm panic: is outside the pipeline
 26170 swarm panic: is outside the pipeline
-26250 swarm panic: is outside the pipeline
-26671 swarm panic: is outside the pipeline
+26374 swarm panic: is outside the pipeline
+26390 swarm panic: is outside the pipeline
+26485 swarm panic: is outside the pipeline
+26506 swarm panic: is outside the pipeline
 26733 swarm panic: is outside the pipeline
-26753 swarm panic: is outside the pipeline
 26761 swarm panic: is outside the pipeline
 27032 swarm panic: is outside the pipeline
-27035 swarm panic: is outside the pipeline
 27108 swarm panic: is outside the pipeline
 27110 swarm panic: is outside the pipeline
-27279 swarm panic: is outside the pipeline
-27292 swarm panic: is outside the pipeline
-27391 swarm panic: is outside the pipeline
+27189 swarm panic: is outside the pipeline
 27403 swarm panic: is outside the pipeline
-27632 swarm panic: is outside the pipeline
-27694 swarm panic: is outside the pipeline
+27679 swarm panic: is outside the pipeline
 27819 swarm panic: is outside the pipeline
 27837 swarm panic: is outside the pipeline
 27848 swarm panic: is outside the pipeline
-27973 swarm panic: is outside the pipeline
 28026 swarm panic: is outside the pipeline
 28032 swarm panic: is outside the pipeline
 28139 swarm panic: is outside the pipeline
-28196 swarm panic: is outside the pipeline
-28226 swarm panic: is outside the pipeline
-28228 swarm panic: is outside the pipeline
+28275 swarm panic: is outside the pipeline
+28344 swarm panic: is outside the pipeline
 28390 swarm panic: is outside the pipeline
-28443 swarm panic: is outside the pipeline
-28569 swarm panic: is outside the pipeline
+28399 swarm panic: is outside the pipeline
+28434 swarm panic: is outside the pipeline
 28605 swarm panic: is outside the pipeline
 28716 swarm panic: is outside the pipeline
 28760 swarm panic: is outside the pipeline
 28792 swarm panic: is outside the pipeline
-28824 swarm panic: is outside the pipeline
-29015 swarm panic: is outside the pipeline
-29075 swarm panic: is outside the pipeline
+28936 swarm panic: is outside the pipeline
 29120 swarm panic: is outside the pipeline
+29133 swarm panic: is outside the pipeline
 29399 swarm panic: is outside the pipeline
 29609 swarm panic: is outside the pipeline
 29785 swarm panic: is outside the pipeline
 29787 swarm panic: is outside the pipeline
-29947 swarm panic: is outside the pipeline
 29968 swarm panic: is outside the pipeline
 30111 swarm panic: is outside the pipeline
-30134 swarm panic: is outside the pipeline
-30176 swarm panic: is outside the pipeline
+30182 swarm alarm-refired
+30182 swarm panic: is outside the pipeline
 30341 swarm panic: is outside the pipeline
-30357 swarm panic: is outside the pipeline
-30452 swarm panic: is outside the pipeline
 30485 swarm panic: is outside the pipeline
 30539 swarm panic: is outside the pipeline
-30898 swarm panic: is outside the pipeline
-30913 swarm panic: is outside the pipeline
-30961 swarm panic: is outside the pipeline
 31044 swarm panic: is outside the pipeline
-31056 swarm panic: is outside the pipeline
 31073 swarm panic: is outside the pipeline
+31285 swarm panic: is outside the pipeline
 31328 swarm panic: is outside the pipeline
-31343 swarm panic: is outside the pipeline
 31451 swarm panic: is outside the pipeline
-31473 swarm panic: is outside the pipeline
 31596 swarm panic: is outside the pipeline
 31601 swarm panic: is outside the pipeline
 31646 swarm panic: is outside the pipeline
 31756 swarm panic: is outside the pipeline
 31764 swarm panic: is outside the pipeline
-31902 swarm panic: is outside the pipeline
-32117 swarm panic: is outside the pipeline
-32429 swarm panic: is outside the pipeline
+32037 swarm panic: is outside the pipeline
+32045 swarm panic: is outside the pipeline
+32461 swarm panic: is outside the pipeline
 32469 swarm panic: is outside the pipeline
-32498 swarm panic: is outside the pipeline
-32570 swarm panic: is outside the pipeline
 32647 swarm panic: is outside the pipeline
 32728 swarm panic: is outside the pipeline
 32865 swarm panic: is outside the pipeline
-32979 swarm panic: is outside the pipeline
-33084 swarm panic: is outside the pipeline
 33135 swarm panic: is outside the pipeline
 33139 swarm panic: is outside the pipeline
 33165 swarm panic: is outside the pipeline
 33179 swarm panic: is outside the pipeline
-33187 swarm panic: is outside the pipeline
 33210 swarm panic: is outside the pipeline
 33237 swarm panic: is outside the pipeline
+33295 swarm panic: is outside the pipeline
 33377 swarm panic: is outside the pipeline
-33489 swarm panic: is outside the pipeline
-33574 swarm panic: is outside the pipeline
 33688 swarm panic: is outside the pipeline
-33721 swarm panic: is outside the pipeline
-33847 swarm panic: is outside the pipeline
 33853 swarm panic: is outside the pipeline
-34011 swarm panic: is outside the pipeline
-34037 swarm panic: is outside the pipeline
 34090 swarm panic: is outside the pipeline
-34235 swarm panic: is outside the pipeline
+34160 swarm panic: is outside the pipeline
 34271 swarm panic: is outside the pipeline
-34294 swarm panic: is outside the pipeline
-34511 swarm panic: is outside the pipeline
 34610 swarm panic: is outside the pipeline
-34617 swarm panic: is outside the pipeline
-34670 swarm panic: is outside the pipeline
-34706 swarm panic: is outside the pipeline
 34822 swarm panic: is outside the pipeline
-35004 swarm panic: is outside the pipeline
-35060 swarm panic: is outside the pipeline
 35123 swarm panic: is outside the pipeline
-35239 swarm panic: is outside the pipeline
 35272 swarm panic: is outside the pipeline
 35308 swarm panic: is outside the pipeline
 35503 swarm panic: is outside the pipeline
-35919 swarm panic: is outside the pipeline
-36001 swarm panic: is outside the pipeline
+35554 swarm panic: is outside the pipeline
+35669 swarm panic: is outside the pipeline
+35920 swarm panic: is outside the pipeline
 36143 swarm panic: is outside the pipeline
+36190 swarm panic: is outside the pipeline
+36375 swarm panic: is outside the pipeline
 36700 swarm panic: is outside the pipeline
-36927 swarm panic: is outside the pipeline
-36945 swarm panic: is outside the pipeline
-36967 swarm panic: is outside the pipeline
-37037 swarm panic: is outside the pipeline
-37228 swarm panic: is outside the pipeline
-37234 swarm panic: is outside the pipeline
-37268 swarm panic: is outside the pipeline
 37338 swarm panic: is outside the pipeline
-37419 swarm panic: is outside the pipeline
 37540 swarm panic: is outside the pipeline
 37559 swarm panic: is outside the pipeline
-37701 swarm panic: is outside the pipeline
 37704 swarm panic: is outside the pipeline
 37706 swarm panic: is outside the pipeline
 37731 swarm panic: is outside the pipeline
 37836 swarm panic: is outside the pipeline
-38036 swarm panic: is outside the pipeline
 38039 swarm panic: is outside the pipeline
-38113 swarm panic: is outside the pipeline
-38370 swarm panic: is outside the pipeline
+38327 swarm panic: is outside the pipeline
 38429 swarm panic: is outside the pipeline
 38504 swarm panic: is outside the pipeline
 38520 swarm panic: is outside the pipeline
+38651 swarm panic: is outside the pipeline
 38737 swarm panic: is outside the pipeline
 38764 swarm panic: is outside the pipeline
-38778 swarm panic: is outside the pipeline
+38800 swarm panic: is outside the pipeline
 38801 swarm panic: is outside the pipeline
 38855 swarm panic: is outside the pipeline
 39053 swarm panic: is outside the pipeline
 39064 swarm panic: is outside the pipeline
 39112 swarm panic: is outside the pipeline
-39172 swarm panic: is outside the pipeline
-39293 swarm panic: is outside the pipeline
+39175 swarm panic: is outside the pipeline
 39463 swarm panic: is outside the pipeline
-39469 swarm panic: is outside the pipeline
 39611 swarm panic: is outside the pipeline
-39638 swarm panic: is outside the pipeline
-39893 swarm panic: is outside the pipeline
+39845 swarm panic: is outside the pipeline
 40024 swarm panic: is outside the pipeline
-40411 swarm panic: is outside the pipeline
 40426 swarm panic: is outside the pipeline
-40465 swarm panic: is outside the pipeline
 40927 swarm panic: is outside the pipeline
-41012 swarm panic: is outside the pipeline
-41177 swarm panic: is outside the pipeline
+41103 swarm panic: is outside the pipeline
+41200 swarm panic: is outside the pipeline
 41403 swarm panic: is outside the pipeline
-41452 swarm panic: is outside the pipeline
 41491 swarm panic: is outside the pipeline
 41575 swarm panic: is outside the pipeline
 41589 swarm panic: is outside the pipeline
 41611 swarm panic: is outside the pipeline
 41711 swarm panic: is outside the pipeline
-41780 swarm panic: is outside the pipeline
-42016 swarm panic: is outside the pipeline
+41792 swarm panic: is outside the pipeline
+42136 swarm panic: is outside the pipeline
+42221 swarm panic: is outside the pipeline
 42286 swarm panic: is outside the pipeline
-42458 swarm panic: is outside the pipeline
 42509 swarm panic: is outside the pipeline
-42655 swarm panic: is outside the pipeline
-42693 swarm panic: is outside the pipeline
 42696 swarm panic: is outside the pipeline
-42759 swarm panic: is outside the pipeline
-42763 swarm panic: is outside the pipeline
-42871 swarm panic: is outside the pipeline
-42889 swarm panic: is outside the pipeline
-42943 swarm panic: is outside the pipeline
-42976 swarm panic: is outside the pipeline
+42900 swarm panic: is outside the pipeline
 43009 swarm panic: is outside the pipeline
-43021 swarm panic: is outside the pipeline
 43084 swarm panic: is outside the pipeline
+43179 swarm panic: is outside the pipeline
 43187 swarm panic: is outside the pipeline
 43414 swarm panic: is outside the pipeline
+43553 swarm panic: is outside the pipeline
+43599 swarm panic: is outside the pipeline
 43764 swarm panic: is outside the pipeline
 43803 swarm panic: is outside the pipeline
 43814 swarm panic: is outside the pipeline
 43888 swarm panic: is outside the pipeline
+43964 swarm panic: is outside the pipeline
 44174 swarm panic: is outside the pipeline
 44214 swarm panic: is outside the pipeline
-44305 swarm panic: is outside the pipeline
 44323 swarm panic: is outside the pipeline
 44379 swarm panic: is outside the pipeline
 44398 swarm panic: is outside the pipeline
-44444 swarm panic: is outside the pipeline
-44608 swarm panic: is outside the pipeline
-44645 swarm panic: is outside the pipeline
-44721 swarm panic: is outside the pipeline
-44852 swarm panic: is outside the pipeline
+44440 swarm panic: is outside the pipeline
+44944 swarm panic: is outside the pipeline
 44974 swarm panic: is outside the pipeline
-45150 swarm panic: is outside the pipeline
-45200 swarm panic: is outside the pipeline
-45282 swarm panic: is outside the pipeline
-45345 swarm panic: is outside the pipeline
+45184 swarm panic: is outside the pipeline
 45354 swarm panic: is outside the pipeline
-45648 swarm panic: is outside the pipeline
-45675 swarm panic: is outside the pipeline
-45746 swarm panic: is outside the pipeline
+45651 swarm panic: is outside the pipeline
 45753 swarm panic: is outside the pipeline
-45777 swarm panic: is outside the pipeline
-45853 swarm panic: is outside the pipeline
+46087 swarm panic: is outside the pipeline
 46164 swarm panic: is outside the pipeline
 46183 swarm panic: is outside the pipeline
 46185 swarm panic: is outside the pipeline
 46223 swarm panic: is outside the pipeline
-46234 swarm panic: is outside the pipeline
+46280 swarm panic: is outside the pipeline
 46390 swarm panic: is outside the pipeline
-46672 swarm panic: is outside the pipeline
+46571 swarm panic: is outside the pipeline
 46683 swarm panic: is outside the pipeline
 46707 swarm panic: is outside the pipeline
-46723 swarm panic: is outside the pipeline
 46782 swarm panic: is outside the pipeline
 46842 swarm panic: is outside the pipeline
 46878 swarm panic: is outside the pipeline
 46925 swarm panic: is outside the pipeline
 47201 swarm panic: is outside the pipeline
 47242 swarm panic: is outside the pipeline
-47288 swarm panic: is outside the pipeline
 47304 swarm panic: is outside the pipeline
-47358 swarm panic: is outside the pipeline
 47396 swarm panic: is outside the pipeline
+47663 swarm panic: is outside the pipeline
 47735 swarm panic: is outside the pipeline
-47750 swarm panic: is outside the pipeline
-47864 swarm panic: is outside the pipeline
+47736 swarm panic: is outside the pipeline
 47966 swarm panic: is outside the pipeline
-48079 swarm panic: is outside the pipeline
-48094 swarm panic: is outside the pipeline
 48441 swarm panic: is outside the pipeline
-48469 swarm panic: is outside the pipeline
 48567 swarm panic: is outside the pipeline
+48586 swarm panic: is outside the pipeline
+48652 swarm panic: is outside the pipeline
 48853 swarm panic: is outside the pipeline
-48967 swarm panic: is outside the pipeline
 48973 swarm panic: is outside the pipeline
-49008 swarm panic: is outside the pipeline
-49014 swarm panic: is outside the pipeline
 49171 swarm panic: is outside the pipeline
-49375 swarm panic: is outside the pipeline
+49317 swarm panic: is outside the pipeline
 49507 swarm panic: is outside the pipeline
 49540 swarm panic: is outside the pipeline
 49618 swarm panic: is outside the pipeline
 49706 swarm panic: is outside the pipeline
 49727 swarm panic: is outside the pipeline
 49769 swarm panic: is outside the pipeline
-49847 swarm panic: is outside the pipeline
-49917 swarm panic: is outside the pipeline
+49875 swarm panic: is outside the pipeline
 
 # A preserve during the startup inventory strands a confirming cell (178 seeds)
-155 swarm panic: left the owner read
+45 swarm panic: left the owner read
 494 swarm panic: left the owner read
 564 swarm panic: left the owner read
 659 swarm panic: left the owner read
-670 swarm panic: left the owner read
+1004 swarm panic: left the owner read
 1084 swarm panic: left the owner read
+1463 swarm panic: left the owner read
 1492 swarm panic: left the owner read
 1555 swarm panic: left the owner read
+1565 swarm panic: left the owner read
 1622 swarm panic: left the owner read
-2137 swarm panic: left the owner read
+1935 swarm panic: left the owner read
+2002 swarm panic: left the owner read
+2351 swarm panic: left the owner read
+2621 swarm panic: left the owner read
 2805 swarm panic: left the owner read
 2847 swarm panic: left the owner read
 3401 swarm panic: left the owner read
-4285 swarm panic: left the owner read
+3739 swarm panic: left the owner read
+3848 swarm panic: left the owner read
 4295 swarm panic: left the owner read
 4699 swarm panic: left the owner read
-5619 swarm panic: left the owner read
-5694 swarm panic: left the owner read
-5747 swarm panic: left the owner read
-6281 swarm panic: left the owner read
-6384 swarm panic: left the owner read
-6457 swarm panic: left the owner read
+4788 swarm panic: left the owner read
+5362 swarm panic: left the owner read
+5806 swarm panic: left the owner read
 7028 swarm panic: left the owner read
-7038 swarm panic: left the owner read
 7078 swarm panic: left the owner read
-7152 swarm panic: left the owner read
-7224 swarm panic: left the owner read
+7111 swarm panic: left the owner read
 7575 swarm panic: left the owner read
-7667 swarm panic: left the owner read
-8758 swarm panic: left the owner read
+7595 swarm panic: left the owner read
+8828 swarm panic: left the owner read
+9046 swarm panic: left the owner read
 9148 swarm panic: left the owner read
-9278 swarm panic: left the owner read
-9427 swarm panic: left the owner read
+9150 swarm panic: left the owner read
 9664 swarm panic: left the owner read
+10355 swarm panic: left the owner read
 10476 swarm panic: left the owner read
 10721 swarm panic: left the owner read
-10926 swarm panic: left the owner read
-11801 swarm panic: left the owner read
+10922 swarm panic: left the owner read
+11179 swarm panic: left the owner read
 11823 swarm panic: left the owner read
 11929 swarm panic: left the owner read
+11982 swarm panic: left the owner read
 11996 swarm panic: left the owner read
-12114 swarm panic: left the owner read
-12189 swarm panic: left the owner read
-12758 swarm panic: left the owner read
-13508 swarm panic: left the owner read
+12454 swarm panic: left the owner read
+12717 swarm panic: left the owner read
+12962 swarm panic: left the owner read
+13004 swarm panic: left the owner read
 13541 swarm panic: left the owner read
-13589 swarm panic: left the owner read
 14346 swarm panic: left the owner read
+14482 swarm panic: left the owner read
+14638 swarm panic: left the owner read
+14935 swarm panic: left the owner read
+14973 swarm panic: left the owner read
 15235 swarm panic: left the owner read
+15504 swarm panic: left the owner read
+15701 swarm panic: left the owner read
 15772 swarm panic: left the owner read
 15835 swarm panic: left the owner read
 16020 swarm panic: left the owner read
-16065 swarm panic: left the owner read
 16083 swarm panic: left the owner read
 16176 swarm panic: left the owner read
-16265 swarm panic: left the owner read
-16321 swarm panic: left the owner read
-16438 swarm panic: left the owner read
 16669 swarm panic: left the owner read
 16699 swarm panic: left the owner read
+16757 swarm panic: left the owner read
 17117 swarm panic: left the owner read
-17156 swarm panic: left the owner read
 17181 swarm panic: left the owner read
-17317 swarm panic: left the owner read
+17209 swarm panic: left the owner read
 17676 swarm panic: left the owner read
+17760 swarm panic: left the owner read
 17783 swarm panic: left the owner read
-18204 swarm panic: left the owner read
-18755 swarm panic: left the owner read
+18704 swarm panic: left the owner read
 18790 swarm panic: left the owner read
-20381 swarm panic: left the owner read
-20469 swarm panic: left the owner read
+20448 swarm panic: left the owner read
 20805 swarm panic: left the owner read
 21471 swarm panic: left the owner read
 21705 swarm panic: left the owner read
-21892 swarm panic: left the owner read
-21994 swarm panic: left the owner read
+21795 swarm panic: left the owner read
 22001 swarm panic: left the owner read
+22089 swarm panic: left the owner read
 22140 swarm panic: left the owner read
-22397 swarm panic: left the owner read
+22506 swarm panic: left the owner read
 22515 swarm panic: left the owner read
 22725 swarm panic: left the owner read
+23089 swarm panic: left the owner read
+23132 swarm panic: left the owner read
 23287 swarm panic: left the owner read
-23358 swarm panic: left the owner read
 23847 swarm panic: left the owner read
-24109 swarm panic: left the owner read
-24457 swarm panic: left the owner read
+24456 swarm panic: left the owner read
 24617 swarm panic: left the owner read
 24670 swarm panic: left the owner read
-24858 swarm panic: left the owner read
+24850 swarm panic: left the owner read
 25018 swarm panic: left the owner read
-25654 swarm panic: left the owner read
+25258 swarm panic: left the owner read
+25335 swarm panic: left the owner read
+25496 swarm panic: left the owner read
 26292 swarm panic: left the owner read
-26580 swarm panic: left the owner read
-26747 swarm panic: left the owner read
-26924 swarm panic: left the owner read
-27958 swarm panic: left the owner read
+26314 swarm panic: left the owner read
+26512 swarm panic: left the owner read
 28338 swarm panic: left the owner read
-28682 swarm panic: left the owner read
-29044 swarm panic: left the owner read
-29501 swarm panic: left the owner read
-29885 swarm panic: left the owner read
+29197 swarm panic: left the owner read
 29978 swarm panic: left the owner read
 30127 swarm panic: left the owner read
-30172 swarm panic: left the owner read
-30491 swarm panic: left the owner read
-30862 swarm panic: left the owner read
+30133 swarm panic: left the owner read
+30657 swarm panic: left the owner read
 31022 swarm panic: left the owner read
 31147 swarm panic: left the owner read
 31541 swarm panic: left the owner read
 31656 swarm panic: left the owner read
 31998 swarm panic: left the owner read
-32085 swarm panic: left the owner read
+32050 swarm panic: left the owner read
 32209 swarm panic: left the owner read
 32376 swarm panic: left the owner read
 32524 swarm panic: left the owner read
-32715 swarm panic: left the owner read
 32807 swarm panic: left the owner read
-32832 swarm panic: left the owner read
 32906 swarm panic: left the owner read
-33231 swarm panic: left the owner read
+33113 swarm panic: left the owner read
+33555 swarm panic: left the owner read
 33637 swarm panic: left the owner read
-34268 swarm panic: left the owner read
+34042 swarm panic: left the owner read
+34676 swarm panic: left the owner read
 34771 swarm panic: left the owner read
 34800 swarm panic: left the owner read
-35294 swarm panic: left the owner read
+35106 swarm panic: left the owner read
 35430 swarm panic: left the owner read
 35498 swarm panic: left the owner read
-35619 swarm panic: left the owner read
+35692 swarm panic: left the owner read
 35977 swarm panic: left the owner read
-36339 swarm panic: left the owner read
-36353 swarm panic: left the owner read
-36472 swarm panic: left the owner read
+36055 swarm panic: left the owner read
+36369 swarm panic: left the owner read
 36630 swarm panic: left the owner read
-36723 swarm panic: left the owner read
-37020 swarm panic: left the owner read
 37023 swarm panic: left the owner read
 37035 swarm panic: left the owner read
-37165 swarm panic: left the owner read
+37216 swarm panic: left the owner read
+37234 swarm panic: left the owner read
+37265 swarm panic: left the owner read
 37313 swarm panic: left the owner read
+37461 swarm panic: left the owner read
 37624 swarm panic: left the owner read
-38289 swarm panic: left the owner read
+38028 swarm panic: left the owner read
+38692 swarm panic: left the owner read
+38709 swarm panic: left the owner read
 38787 swarm panic: left the owner read
-38865 swarm panic: left the owner read
-39388 swarm panic: left the owner read
+39210 swarm panic: left the owner read
+39677 swarm panic: left the owner read
+39726 swarm panic: left the owner read
 39814 swarm panic: left the owner read
-40018 swarm panic: left the owner read
 40738 swarm panic: left the owner read
+40835 swarm panic: left the owner read
+40852 swarm panic: left the owner read
 40897 swarm panic: left the owner read
 41105 swarm panic: left the owner read
-41915 swarm panic: left the owner read
+41321 swarm panic: left the owner read
 42035 swarm panic: left the owner read
-42281 swarm panic: left the owner read
+42053 swarm panic: left the owner read
+42456 swarm panic: left the owner read
 42512 swarm panic: left the owner read
-42955 swarm panic: left the owner read
+42514 swarm panic: left the owner read
+42837 swarm panic: left the owner read
+42926 swarm panic: left the owner read
+43065 swarm panic: left the owner read
 43201 swarm panic: left the owner read
-43602 swarm panic: left the owner read
 44067 swarm panic: left the owner read
-44304 swarm panic: left the owner read
-44334 swarm panic: left the owner read
 44373 swarm panic: left the owner read
-45208 swarm panic: left the owner read
+44606 swarm panic: left the owner read
 45215 swarm panic: left the owner read
-45554 swarm panic: left the owner read
-46068 swarm panic: left the owner read
-46172 swarm panic: left the owner read
-46614 swarm panic: left the owner read
-47896 swarm panic: left the owner read
+45345 swarm panic: left the owner read
+46382 swarm panic: left the owner read
+47298 swarm panic: left the owner read
 47902 swarm panic: left the owner read
-48381 swarm panic: left the owner read
-48458 swarm panic: left the owner read
-48531 swarm panic: left the owner read
-48536 swarm panic: left the owner read
+47993 swarm panic: left the owner read
 48738 swarm panic: left the owner read
 48859 swarm panic: left the owner read
+49184 swarm panic: left the owner read
 49290 swarm panic: left the owner read
 49717 swarm panic: left the owner read
 49902 swarm panic: left the owner read
 49974 swarm panic: left the owner read
 
-# A takeover does not fence a session that has no log record yet (2 seeds)
+# A takeover does not fence a session that has no log record yet (7 seeds)
 863 swarm lost-write
-1079 swarm lost-write
+9258 swarm lost-write
+15037 swarm lost-write
+22437 swarm lost-write
+31280 swarm lost-write
+41601 swarm lost-write
+47293 swarm lost-write
 
-# A failed wake-entry write for a re-arm reads as success (1 seed)
-2157 swarm alarm-undiscoverable
-
-# Not yet attributed to a finding (15 seeds)
+# Not yet attributed to a finding (11 seeds)
+870 swarm alarm-undiscoverable
 6035 swarm lost-write
 8120 swarm liveness
-8162 swarm lost-write
-11019 swarm liveness
 11408 swarm alarm-undiscoverable
 18924 swarm alarm-undiscoverable
+21120 swarm liveness
 26553 swarm alarm-undiscoverable
-27670 swarm liveness
 28783 swarm alarm-undiscoverable
-36921 swarm liveness
-37984 swarm alarm-undiscoverable
 42325 swarm lost-write
 42747 swarm lost-write
-44554 swarm alarm-undiscoverable
 49899 swarm liveness

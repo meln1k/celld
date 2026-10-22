@@ -154,7 +154,12 @@ impl World {
                     .insert(cell, epoch);
                 immediate.push_back(Event::Published { op, result: Ok(()) });
             }
-            Effect::EvictionAdmission { .. } | Effect::EvictionFinished { .. } => {}
+            Effect::EvictionAdmission { request, result } => {
+                self.eviction_admitted(id, request, result)
+            }
+            Effect::EvictionFinished { request, result } => {
+                self.eviction_answered(id, request, result)
+            }
             Effect::EnsureDurable {
                 op, cell, epoch, ..
             } => self.await_durable(id, op, &cell, epoch, Proof::Everything, Failure::Definite),
@@ -204,22 +209,7 @@ impl World {
                 cause,
                 bounded,
             } => self.stop_runtime(id, op, cell, epoch, cause, bounded, immediate),
-            Effect::AbandonEvictionStop { op, cell } => {
-                let proc = self.procs.get_mut(&id).unwrap();
-                let found = proc
-                    .replicas
-                    .iter_mut()
-                    .find(|((name, _), replica)| {
-                        *name == cell && replica.stop.as_ref().is_some_and(|stop| stop.op == op)
-                    })
-                    .map(|(_, replica)| replica);
-                if let Some(replica) = found {
-                    // The final sync has not finished, so no handoff snapshot
-                    // is visible yet: the stop can still give the cell back.
-                    replica.stop = None;
-                    self.work(id, 1, Work::Deliver(Event::RuntimeStopCancelled { op }));
-                }
-            }
+            Effect::AbandonEvictionStop { op, cell } => self.abandon_stop(id, op, &cell),
             Effect::FireAlarm {
                 op,
                 cell,

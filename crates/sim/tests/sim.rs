@@ -5,7 +5,7 @@
 //! `--mutation NAME` for a mutation run. `CELLD_SIM_SEEDS` widens the swarm
 //! sweep here; the CLI runs any range (`--seeds 0..10000`).
 
-use celld_sim::{run, Lifecycle, Mutation, Outcome, SimConfig};
+use celld_sim::{run, Coverage, Lifecycle, Mutation, Outcome, SimConfig, Stops};
 
 fn report(outcome: &Outcome) -> String {
     let mut lines = vec![format!("seed {}", outcome.seed)];
@@ -208,7 +208,7 @@ fn a_follower_that_appends_after_its_seal_loses_a_write() {
 }
 
 /// Nodes leave on purpose, half of them for a same-node reload. No policy
-/// evictions and no balancing: those reach open core findings
+/// evictions, no balancing and no slow stops: those reach open core findings
 /// (docs/testing.md) that would fail a seed before its plant is reached.
 fn shutdowns(seed: u64) -> SimConfig {
     SimConfig {
@@ -218,6 +218,7 @@ fn shutdowns(seed: u64) -> SimConfig {
             rebalance: false,
         },
         evict_gap_ms: None,
+        stops: Stops::off(),
         ..SimConfig::swarm(seed)
     }
 }
@@ -274,6 +275,69 @@ fn a_drain_that_ends_before_its_releases_is_caught() {
         Mutation::DrainEarly,
         0..10,
         &["drain-left-owner"]
+    ));
+}
+
+/// Every evict tick asks the operator's way, every eviction takes long
+/// enough to be abandoned, and hosts wedge. No shutdowns and no balancing,
+/// whose open core findings would fail a seed before its plant is reached.
+fn stopping(seed: u64) -> SimConfig {
+    SimConfig {
+        evict_gap_ms: Some((50, 300)),
+        lifecycle: Lifecycle::off(),
+        stops: Stops {
+            max_capture_ms: 300,
+            wedges: 6.0,
+            operator: true,
+            quiet: true,
+        },
+        ..SimConfig::swarm(seed)
+    }
+}
+
+#[test]
+fn stopping_fleets_pass_and_reach_every_stop_outcome() {
+    let mut coverage = Coverage::default();
+    let mut totals = celld_sim::Stats::default();
+    for seed in 0..16 {
+        let outcome = run(seed, &stopping(seed));
+        assert!(!outcome.failed(), "{}", report(&outcome));
+        coverage.absorb(&outcome.coverage);
+        totals.absorb(&outcome.stats);
+    }
+    for event in [
+        "EvictRequested",
+        "RuntimeStopCancelled",
+        "RuntimeStopFailed",
+    ] {
+        assert!(coverage.events.contains_key(event), "{event}: {coverage:?}");
+    }
+    for effect in ["EvictionAdmission", "EvictionFinished"] {
+        assert!(
+            coverage.effects.contains_key(effect),
+            "{effect}: {coverage:?}"
+        );
+    }
+    assert!(totals.stop_retries > 0, "{totals:?}");
+}
+
+#[test]
+fn answering_an_eviction_at_its_admission_is_caught() {
+    assert!(caught_in(
+        stopping,
+        Mutation::AnswerOnAdmission,
+        0..5,
+        &["eviction-misreported"]
+    ));
+}
+
+#[test]
+fn an_abandonment_the_core_never_hears_of_leaves_an_eviction_unanswered() {
+    assert!(caught_in(
+        stopping,
+        Mutation::SilentAbandon,
+        0..12,
+        &["eviction-unanswered"]
     ));
 }
 

@@ -51,6 +51,8 @@ impl World {
                 handoffs: BTreeMap::new(),
                 directory: None,
                 accepts: BTreeMap::new(),
+                evictions: BTreeMap::new(),
+                wedged_until: 0,
                 halting: false,
             },
         );
@@ -208,6 +210,7 @@ impl World {
             }
             Work::UploadKick { cell, epoch } => self.kick_upload(id, &cell, epoch),
             Work::WaiterDeadline { cell, epoch, op } => self.waiter_deadline(id, &cell, epoch, op),
+            Work::StopStep { cell, epoch, op } => self.stop_step(id, &cell, epoch, op),
             Work::LoadTick => {
                 let proc = &self.procs[&id];
                 let load = pressure::Load {

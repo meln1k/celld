@@ -8,6 +8,7 @@ mod fleet;
 use super::*;
 use crate::store::Row;
 use alarms::AlarmLedger;
+use celld_logic::EvictSuccess;
 use fleet::FleetLedger;
 
 /// What a checker may read when a fact arrives.
@@ -203,6 +204,41 @@ impl Checker {
                 format!(
                     "{node} finished its drain while {} owner record(s) still name it, first {cell}",
                     held.len()
+                ),
+            );
+        }
+    }
+
+    /// An operator's eviction of `cell` on `id` answered `success`. Both
+    /// successes promise the process runs no runtime for the cell.
+    pub(super) fn on_eviction_succeeded(
+        &mut self,
+        view: View,
+        id: ProcId,
+        cell: &str,
+        success: EvictSuccess,
+        running: bool,
+    ) {
+        if running {
+            self.flag(
+                view.t,
+                "eviction-misreported",
+                format!("{id}/{cell}"),
+                format!("p{id} answered an eviction of {cell} {success:?} while it still runs it"),
+            );
+        }
+    }
+
+    /// Each `(process, cell)` eviction a live process has not answered. An
+    /// eviction ends in an answer, whether or not the cell left.
+    pub(super) fn on_evictions_unanswered(&mut self, view: View, waiting: &[(ProcId, String)]) {
+        for (id, cell) in waiting {
+            self.flag(
+                view.t,
+                "eviction-unanswered",
+                format!("{id}/{cell}"),
+                format!(
+                    "p{id} never answered an eviction of {cell} asked before the faults healed"
                 ),
             );
         }

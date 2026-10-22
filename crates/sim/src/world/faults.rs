@@ -8,6 +8,7 @@ pub(super) enum FaultKind {
     Pause,
     Partition,
     ClockStep,
+    Wedge,
 }
 
 impl World {
@@ -73,6 +74,11 @@ impl World {
                     self.procs.get_mut(&id).unwrap().wall_step_ms += delta;
                     self.note(|| format!("step wall clock of p{id} by {delta} ms"));
                 }
+                FaultKind::Wedge => {
+                    let duration = self.fault_rng.range(1_000, 2 * OPERATION_DEADLINE_MS);
+                    self.procs.get_mut(&id).unwrap().wedged_until = self.t + duration;
+                    self.note(|| format!("wedge the host of p{id} for {duration} ms"));
+                }
             }
         }
         let rate = match kind {
@@ -80,6 +86,7 @@ impl World {
             FaultKind::Pause => faults.pauses,
             FaultKind::Partition => faults.partitions,
             FaultKind::ClockStep => faults.clock_steps,
+            FaultKind::Wedge => self.config.stops.wedges,
         };
         let gap = self.fault_gap(rate);
         self.after(gap, What::Fault(kind));
@@ -103,6 +110,9 @@ impl World {
         let Some(&id) = self.work_rng.pick(&live) else {
             return;
         };
+        if self.config.stops.operator {
+            return self.operator_evict(id);
+        }
         if self.preserving(id) {
             // The actor refuses an eviction once a preserve began.
             return;
@@ -119,6 +129,9 @@ impl World {
         self.note(|| "chaos ends: faults heal".into());
         for node in &mut self.nodes {
             node.partition = None;
+        }
+        for proc in self.procs.values_mut() {
+            proc.wedged_until = 0;
         }
         let paused: Vec<ProcId> = self
             .procs
@@ -151,6 +164,7 @@ impl World {
     pub(super) fn start_audit(&mut self) {
         self.audit = true;
         self.note(|| "audit: the fleet dies; a fresh node restores every cell".into());
+        self.check_evictions_answered();
         let procs: Vec<ProcId> = self.procs.keys().copied().collect();
         for id in procs {
             self.crash(id, true);

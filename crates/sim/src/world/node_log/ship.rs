@@ -468,7 +468,7 @@ impl World {
         let log = &self.procs[&id].log;
         log.closing
             || log.shipper.as_ref().is_none_or(|shipper| shipper.degraded)
-            || replica.stop.is_some()
+            || replica.stop.as_ref().is_some_and(Stop::publishing)
             || replica
                 .waiters
                 .iter()

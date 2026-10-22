@@ -20,6 +20,11 @@
 //! process on the node resumes from. Nodes also give idle cells to peers
 //! below their share of the fleet.
 //!
+//! Half the swarm also stops cells the way production does ([`Stops`]).
+//! An eviction captures its snapshot before its final upload, and a
+//! request during the capture abandons it. Hosts wedge and refuse to
+//! release, and the operator's evictions wait for their answers.
+//!
 //! What it checks:
 //!
 //! - **One writer per epoch.** No two processes run a runtime for, or
@@ -40,6 +45,9 @@
 //!   of its session's published log record.
 //! - **No local route without a runtime.** A request routed locally finds a
 //!   published runtime.
+//! - **An eviction answers once, and truly.** Every operator eviction is
+//!   answered, and one answered `Evicted` or `AlreadyAbsent` leaves no
+//!   runtime of the cell on its process.
 //! - **Core invariants.** `State::validate` after every event.
 //! - **An acknowledged alarm stays discoverable.** Whenever the alarm a
 //!   restore would load was armed by an acknowledged write, the bucket holds
@@ -132,10 +140,15 @@ pub enum Mutation {
     /// A drain counts as finished as soon as it releases everything,
     /// without waiting for the releases to land.
     DrainEarly,
+    /// The shell answers an operator's eviction as done once the core
+    /// admits it, before the cell has stopped.
+    AnswerOnAdmission,
+    /// An abandoned eviction gives the cell back without telling the core.
+    SilentAbandon,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 16] = [
+    pub const ALL: [Mutation; 18] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
@@ -152,6 +165,8 @@ impl Mutation {
         Mutation::ResumeStaleLive,
         Mutation::AcceptUnclaimed,
         Mutation::DrainEarly,
+        Mutation::AnswerOnAdmission,
+        Mutation::SilentAbandon,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -179,6 +194,8 @@ impl Mutation {
             Mutation::ResumeStaleLive => "resume-stale-live",
             Mutation::AcceptUnclaimed => "accept-unclaimed",
             Mutation::DrainEarly => "drain-early",
+            Mutation::AnswerOnAdmission => "answer-on-admission",
+            Mutation::SilentAbandon => "silent-abandon",
         }
     }
 }
@@ -211,6 +228,7 @@ pub struct SimConfig {
     /// is a per-cell upload.
     pub fleet: bool,
     pub lifecycle: Lifecycle,
+    pub stops: Stops,
     pub faults: Faults,
     pub mutation: Mutation,
     /// Keep a human-readable trace of every event and effect.
@@ -248,6 +266,41 @@ impl Lifecycle {
     /// balancing peer.
     pub fn hands_off(&self) -> bool {
         self.shutdowns > 0.0 || self.rebalance
+    }
+}
+
+/// How an eviction stop lets its cell go, and how an operator asks for one.
+#[derive(Clone, Debug)]
+pub struct Stops {
+    /// Longest an eviction takes to give its isolate turn back and capture
+    /// the handoff snapshot (`LtxRepl::evict` before the publish). Until the
+    /// capture ends, a request for the cell takes the eviction back.
+    pub max_capture_ms: u64,
+    /// Host wedges per simulated minute across the fleet, during the chaos
+    /// window. A wedged host refuses to release any cell for up to 30 s:
+    /// every stop attempt fails and is retried, and a bounded stop still
+    /// failing at its deadline restarts the cell in place.
+    pub wedges: f64,
+    /// The evict ticks ask the way an operator does (`POST /evict`, which
+    /// sends `EvictRequested`) and check the answer, instead of driving the
+    /// policy's `Event::Evict`.
+    pub operator: bool,
+    /// During the chaos window the workload leaves every other cell alone,
+    /// alternating every 20 s, so a stop of a quiet cell meets no request
+    /// that could take it back, and a wedged one runs to its deadline.
+    pub quiet: bool,
+}
+
+impl Stops {
+    /// Every stop finishes once its final upload lands, and only the policy
+    /// evicts.
+    pub fn off() -> Self {
+        Self {
+            max_capture_ms: 0,
+            wedges: 0.0,
+            operator: false,
+            quiet: false,
+        }
     }
 }
 
@@ -322,6 +375,7 @@ impl SimConfig {
             evict_gap_ms: Some((200, 2_000)),
             fleet: false,
             lifecycle: Lifecycle::off(),
+            stops: Stops::off(),
             faults: Faults::none(),
             mutation: Mutation::None,
             trace: false,
@@ -387,6 +441,7 @@ impl SimConfig {
             },
             fleet: false,
             lifecycle: Lifecycle::off(),
+            stops: Stops::off(),
             faults,
             mutation: Mutation::None,
             trace: false,
@@ -401,6 +456,14 @@ impl SimConfig {
                 shutdowns: rng.range(1, 4) as f64,
                 preserve_probability: *rng.pick(&[0.0, 0.5, 1.0]).unwrap(),
                 rebalance: rng.chance(0.5),
+            };
+        }
+        if rng.chance(0.5) {
+            config.stops = Stops {
+                max_capture_ms: *rng.pick(&[50, 300, 2_000]).unwrap(),
+                wedges: *rng.pick(&[0.0, 2.0, 6.0]).unwrap(),
+                operator: rng.chance(0.7),
+                quiet: rng.chance(0.5),
             };
         }
         config
@@ -489,6 +552,10 @@ pub struct Stats {
     pub handoff_requests: u64,
     /// Handoffs a successor acknowledged.
     pub handoffs_accepted: u64,
+    /// Evictions asked for the way an operator does.
+    pub operator_evictions: u64,
+    /// Eviction stop attempts the host failed, which the shell retried.
+    pub stop_retries: u64,
 }
 
 impl Stats {
@@ -538,6 +605,8 @@ impl Stats {
             rebalances,
             handoff_requests,
             handoffs_accepted,
+            operator_evictions,
+            stop_retries,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -582,6 +651,8 @@ impl Stats {
         self.rebalances += rebalances;
         self.handoff_requests += handoff_requests;
         self.handoffs_accepted += handoffs_accepted;
+        self.operator_evictions += operator_evictions;
+        self.stop_retries += stop_retries;
     }
 }
 
