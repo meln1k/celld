@@ -3310,8 +3310,13 @@ impl State {
             // (the `@cloudflare/containers` class sleeps for minutes inside
             // its alarm), which `begin_eviction` refuses until the deadline.
             // The alarm stays armed and covered for the successor; the
-            // timer below keeps it live should the cell stay after all.
-            Phase::Resident { .. } if self.draining && cell.quiescing => {
+            // timer below keeps it live should the cell stay after all. A
+            // balancing move releasing a dormant cell waits the same way:
+            // its successor fires the alarm, or a failed move leaves the
+            // cell here to fire it.
+            Phase::Resident { .. } | Phase::Dormant { .. }
+                if (self.draining && cell.quiescing) || cell.handoff =>
+            {
                 effects.push(Effect::ScheduleTimer {
                     timer: Timer::CellAlarm {
                         cell: id.to_string(),
@@ -3785,6 +3790,11 @@ impl State {
         {
             return;
         }
+        // A balancing move is releasing this cell. The hint repeats, and once
+        // the release settles the record says who wakes the alarm.
+        if self.cells.get(&id).is_some_and(|cell| cell.handoff) {
+            return;
+        }
         let mut cell = self.cells.remove(&id).unwrap_or_default();
         cell.alarm_wake = true;
         match cell.phase {
@@ -3905,6 +3915,8 @@ impl State {
                 cell.alarm_wake = false;
                 cell.resume_demand = false;
                 self.resuming_cells.remove(&id);
+                cell.confirming = false;
+                self.settle_confirmation(&id);
             }
             self.cells.insert(id, cell);
         }
@@ -5625,8 +5637,6 @@ impl State {
         if !self.draining {
             return;
         }
-        let mut in_flight = self.handoffs_in_flight();
-
         // A reserved cell can become idle on any event. Promote it into the
         // ordinary eviction state without spending another handoff permit.
         let quiescing: Vec<CellId> = self.quiescing_cells.iter().cloned().collect();
@@ -5638,7 +5648,7 @@ impl State {
         // and sorting the resident inventory: peer traffic still reaches the
         // draining actor, and repeating that complete scan for every queued
         // request can starve the node-lease timer until the donor self-fences.
-        if in_flight >= self.config.max_releases {
+        if self.handoffs_in_flight() >= self.config.max_releases {
             return;
         }
 
@@ -5660,7 +5670,7 @@ impl State {
             })
             .collect();
         for (id, epoch) in dormant_queues {
-            if in_flight >= self.config.max_releases {
+            if self.handoffs_in_flight() >= self.config.max_releases {
                 return;
             }
             let op = self.cell_op(&id);
@@ -5672,7 +5682,6 @@ impl State {
                 cell: id,
                 epoch,
             });
-            in_flight += 1;
         }
 
         // Reserve the complete batch even when its cells are active. Future
@@ -5714,7 +5723,7 @@ impl State {
             },
         );
         for (id, _, _, _, _) in residents {
-            if in_flight >= self.config.max_releases {
+            if self.handoffs_in_flight() >= self.config.max_releases {
                 return;
             }
             let requests = self
@@ -5723,6 +5732,11 @@ impl State {
                 .filter_map(|(request, cell)| (cell == &id).then_some(*request))
                 .collect();
             let cell = self.cells.get_mut(&id).expect("resident cell listed above");
+            // Failing an earlier cell's outputs can start an eviction of
+            // this one, which already counts as a handoff.
+            if !matches!(cell.phase, Phase::Resident { .. }) {
+                continue;
+            }
             let alarm = match cell.alarm {
                 Some(AlarmState::Firing { op, .. }) => Some(op),
                 _ => None,
@@ -5738,7 +5752,6 @@ impl State {
                 alarm,
                 keep_hibernatable: false,
             });
-            in_flight += 1;
             let _ = self.begin_eviction(&id, true, effects);
         }
         // A cell evicted before the drain kept its record on this node --
@@ -5758,11 +5771,10 @@ impl State {
             })
             .collect();
         for (id, epoch) in dormant {
-            if in_flight >= self.config.max_releases {
+            if self.handoffs_in_flight() >= self.config.max_releases {
                 return;
             }
             self.release_dormant(&id, epoch, effects);
-            in_flight += 1;
         }
     }
 
@@ -5905,6 +5917,15 @@ impl State {
         // batch reserves more cells than permits, and the pump promotes
         // them as permits return.
         if self.eviction_permits.len() >= self.eviction_ceiling() {
+            return Err(EvictRefusal::ConcurrencyLimit);
+        }
+        // A drain counts every handoff against `max_releases`. A quiescing
+        // cell already holds its slot; any other eviction -- policy, operator
+        // or capacity -- takes a new one, so it must find room.
+        if self.draining
+            && !self.quiescing_cells.contains(id)
+            && self.handoffs_in_flight() >= self.config.max_releases
+        {
             return Err(EvictRefusal::ConcurrencyLimit);
         }
         let op = self.cell_op(id);
@@ -6691,6 +6712,9 @@ impl State {
             cell.waiting_activation = None;
             cell.alarm = None;
             cell.alarm_wake = false;
+            // A fenced node moves nothing; a release still in flight settles
+            // the record without adopting.
+            cell.handoff = false;
             cell.websockets.clear();
             self.cells.insert(id, cell);
         }

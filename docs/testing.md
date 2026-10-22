@@ -362,17 +362,6 @@ listed failures are not yet attributed to a finding. Replay a seed with
   fails the activation if the fold fails. The cell is then `Dormant`, and a
   rebalance or a drain releases it. The adopter restores from the per-cell
   prefixes and loses the acknowledged rows.
-- **An eviction during a drain overruns the release ceiling** (25, 120, 122).
-  A policy eviction, or one the capacity pump starts, takes an eviction
-  permit without counting the drain's releases, and `State::validate`
-  reports more handoffs than `CELLD_RELEASES`.
-- **A cell marked for handoff can leave the handoff pipeline** (108, 135,
-  300). A wake hint, the capacity pump or a fence moves it to
-  `WaitingActivation`, `ReadingOwner` or `Fenced` with the mark still set,
-  and `State::validate` fails.
-- **A preserve during the startup inventory strands a confirming cell**
-  (45, 494, 564). `BeginPreserve` cancels the queued owner read but leaves
-  the cell in the confirmation set, and `State::validate` fails.
 
 Report a schedule that breaks a guarantee, an untested fault, or a measurement
 that you cannot reproduce in the
