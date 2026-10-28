@@ -53,6 +53,7 @@ impl World {
                 accepts: BTreeMap::new(),
                 evictions: BTreeMap::new(),
                 wedged_until: 0,
+                deployed_at: 0,
                 halting: false,
             },
         );

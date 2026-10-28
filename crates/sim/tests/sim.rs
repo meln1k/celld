@@ -5,7 +5,7 @@
 //! `--mutation NAME` for a mutation run. `CELLD_SIM_SEEDS` widens the swarm
 //! sweep here; the CLI runs any range (`--seeds 0..10000`).
 
-use celld_sim::{run, Coverage, Lifecycle, Mutation, Outcome, SimConfig, Stops};
+use celld_sim::{run, Coverage, Deploys, Lifecycle, Mutation, Outcome, SimConfig, Stops};
 
 fn report(outcome: &Outcome) -> String {
     let mut lines = vec![format!("seed {}", outcome.seed)];
@@ -68,7 +68,7 @@ fn swarm_seeds_pass() {
     let seeds: u64 = std::env::var("CELLD_SIM_SEEDS")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(24);
+        .unwrap_or(32);
     let mut failures = Vec::new();
     let mut totals = celld_sim::Stats::default();
     for seed in 0..seeds {
@@ -338,6 +338,58 @@ fn an_abandonment_the_core_never_hears_of_leaves_an_eviction_unanswered() {
         Mutation::SilentAbandon,
         0..12,
         &["eviction-unanswered"]
+    ));
+}
+
+/// Nodes adopt a new generation every few seconds. No shutdowns and no
+/// balancing, whose open core findings would fail a seed before its plant
+/// is reached.
+fn deploying(seed: u64) -> SimConfig {
+    SimConfig {
+        lifecycle: Lifecycle::off(),
+        deploys: Deploys {
+            rate: 20.0,
+            max_age_ms: 1_000,
+            eager: false,
+        },
+        ..SimConfig::swarm(seed)
+    }
+}
+
+#[test]
+fn deploying_fleets_pass_and_swap_their_cells() {
+    let mut coverage = Coverage::default();
+    for seed in 0..12 {
+        let outcome = run(seed, &deploying(seed));
+        assert!(!outcome.failed(), "{}", report(&outcome));
+        coverage.absorb(&outcome.coverage);
+    }
+    assert!(
+        coverage.events.contains_key("GenerationChanged"),
+        "{coverage:?}"
+    );
+}
+
+/// From seed 3: on seed 2 the reopened database reports an alarm older
+/// than one the core already holds, which no real database can, and the
+/// core's invariants stop the run first.
+#[test]
+fn a_swap_that_reopens_from_the_upload_loses_a_write() {
+    assert!(caught_in(
+        deploying,
+        Mutation::SwapFromUpload,
+        3..8,
+        &["lost-write", "ack-before-durable"]
+    ));
+}
+
+#[test]
+fn a_runtime_reported_on_the_old_generation_stays_stale() {
+    assert!(caught_in(
+        deploying,
+        Mutation::StaleGeneration,
+        0..8,
+        &["generation-stale"]
     ));
 }
 

@@ -23,7 +23,9 @@
 //! Half the swarm also stops cells the way production does ([`Stops`]).
 //! An eviction captures its snapshot before its final upload, and a
 //! request during the capture abandons it. Hosts wedge and refuse to
-//! release, and the operator's evictions wait for their answers.
+//! release, and the operator's evictions wait for their answers. Half
+//! deploys new generations, which swap resident cells to fresh isolates at
+//! the same epoch on the open database ([`Deploys`]).
 //!
 //! What it checks:
 //!
@@ -48,6 +50,9 @@
 //! - **An eviction answers once, and truly.** Every operator eviction is
 //!   answered, and one answered `Evicted` or `AlreadyAbsent` leaves no
 //!   runtime of the cell on its process.
+//! - **Every resident cell reaches its node's generation.** Once a deploy is
+//!   older than its maximum age and the faults have healed, no resident
+//!   runtime still runs an older generation.
 //! - **Core invariants.** `State::validate` after every event.
 //! - **An acknowledged alarm stays discoverable.** Whenever the alarm a
 //!   restore would load was armed by an acknowledged write, the bucket holds
@@ -145,10 +150,16 @@ pub enum Mutation {
     AnswerOnAdmission,
     /// An abandoned eviction gives the cell back without telling the core.
     SilentAbandon,
+    /// A swap reopens the database from its last upload instead of the open
+    /// handle, dropping the tail it had not uploaded.
+    SwapFromUpload,
+    /// The host reports a restarted runtime on the generation before the
+    /// current one.
+    StaleGeneration,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 18] = [
+    pub const ALL: [Mutation; 20] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
@@ -167,6 +178,8 @@ impl Mutation {
         Mutation::DrainEarly,
         Mutation::AnswerOnAdmission,
         Mutation::SilentAbandon,
+        Mutation::SwapFromUpload,
+        Mutation::StaleGeneration,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -196,6 +209,8 @@ impl Mutation {
             Mutation::DrainEarly => "drain-early",
             Mutation::AnswerOnAdmission => "answer-on-admission",
             Mutation::SilentAbandon => "silent-abandon",
+            Mutation::SwapFromUpload => "swap-from-upload",
+            Mutation::StaleGeneration => "stale-generation",
         }
     }
 }
@@ -229,6 +244,7 @@ pub struct SimConfig {
     pub fleet: bool,
     pub lifecycle: Lifecycle,
     pub stops: Stops,
+    pub deploys: Deploys,
     pub faults: Faults,
     pub mutation: Mutation,
     /// Keep a human-readable trace of every event and effect.
@@ -300,6 +316,31 @@ impl Stops {
             wedges: 0.0,
             operator: false,
             quiet: false,
+        }
+    }
+}
+
+/// New application generations, which move resident cells to fresh
+/// isolates (`Event::GenerationChanged`).
+#[derive(Clone, Debug)]
+pub struct Deploys {
+    /// Node reloads per simulated minute across the fleet, during the chaos
+    /// window. Each one adopts the next generation on one node, as a node's
+    /// pointer watcher does.
+    pub rate: f64,
+    /// How long a stale cell waits for a safe point before its swap is
+    /// forced (`generation::max_age`).
+    pub max_age_ms: u64,
+    /// Name every cell's class eager, so every swap is forced at once.
+    pub eager: bool,
+}
+
+impl Deploys {
+    pub fn off() -> Self {
+        Self {
+            rate: 0.0,
+            max_age_ms: 0,
+            eager: false,
         }
     }
 }
@@ -376,6 +417,7 @@ impl SimConfig {
             fleet: false,
             lifecycle: Lifecycle::off(),
             stops: Stops::off(),
+            deploys: Deploys::off(),
             faults: Faults::none(),
             mutation: Mutation::None,
             trace: false,
@@ -442,6 +484,7 @@ impl SimConfig {
             fleet: false,
             lifecycle: Lifecycle::off(),
             stops: Stops::off(),
+            deploys: Deploys::off(),
             faults,
             mutation: Mutation::None,
             trace: false,
@@ -464,6 +507,13 @@ impl SimConfig {
                 wedges: *rng.pick(&[0.0, 2.0, 6.0]).unwrap(),
                 operator: rng.chance(0.7),
                 quiet: rng.chance(0.5),
+            };
+        }
+        if rng.chance(0.5) {
+            config.deploys = Deploys {
+                rate: *rng.pick(&[2.0, 6.0, 20.0]).unwrap(),
+                max_age_ms: *rng.pick(&[0, 1_000, 5_000]).unwrap(),
+                eager: rng.chance(0.2),
             };
         }
         config
@@ -556,6 +606,8 @@ pub struct Stats {
     pub operator_evictions: u64,
     /// Eviction stop attempts the host failed, which the shell retried.
     pub stop_retries: u64,
+    /// Generations nodes adopted.
+    pub deploys: u64,
 }
 
 impl Stats {
@@ -607,6 +659,7 @@ impl Stats {
             handoffs_accepted,
             operator_evictions,
             stop_retries,
+            deploys,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -653,6 +706,7 @@ impl Stats {
         self.handoffs_accepted += handoffs_accepted;
         self.operator_evictions += operator_evictions;
         self.stop_retries += stop_retries;
+        self.deploys += deploys;
     }
 }
 

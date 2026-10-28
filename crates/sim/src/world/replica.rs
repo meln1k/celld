@@ -227,7 +227,10 @@ impl World {
         let key = (cell.clone(), epoch);
         let (checker, view) = self.checks();
         checker.on_runtime_start(view, id, &cell, epoch);
-        let generation = self.procs[&id].state.current_generation();
+        let mut generation = self.procs[&id].state.current_generation();
+        if self.config.mutation == Mutation::StaleGeneration {
+            generation = generation.saturating_sub(1);
+        }
         let proc = self.procs.get_mut(&id).unwrap();
         let result = match proc.replicas.get_mut(&key) {
             Some(replica) => {
@@ -274,7 +277,12 @@ impl World {
         };
         replica.running = false;
         match cause {
-            StopCause::Swap => immediate.push_back(Event::RuntimeStopped { op }),
+            StopCause::Swap => {
+                if self.config.mutation == Mutation::SwapFromUpload {
+                    replica.content.truncate(replica.uploaded);
+                }
+                immediate.push_back(Event::RuntimeStopped { op })
+            }
             StopCause::Fence => {
                 // Close in place: no durability pass, the file stays live.
                 let replica = proc.replicas.remove(&key).unwrap();

@@ -244,6 +244,23 @@ impl Checker {
         }
     }
 
+    /// Each `(process, cell, its generation, the node's)` still stale long
+    /// after its node's deploy.
+    pub(super) fn on_stale_generations(
+        &mut self,
+        view: View,
+        stale: &[(ProcId, String, u64, u64)],
+    ) {
+        for (id, cell, generation, current) in stale {
+            self.flag(
+                view.t,
+                "generation-stale",
+                format!("{id}/{cell}"),
+                format!("p{id} still runs {cell} on generation {generation}, not {current}"),
+            );
+        }
+    }
+
     pub(super) fn on_local_route_without_runtime(
         &mut self,
         t: Time,

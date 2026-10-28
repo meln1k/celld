@@ -164,12 +164,23 @@ the way an operator does (`EvictRequested`), and the checks are:
 - **eviction-unanswered**: an eviction asked before the faults healed is
   still waiting at the audit.
 
-`answer-on-admission` and `silent-abandon` cover this path. `--coverage`
-lists how often a sweep reached each core event and effect, and the ones it
-never reached.
+`answer-on-admission` and `silent-abandon` cover this path.
 
-It does not yet model WebSockets, generation swaps, deletion, or memory
-pressure.
+Half the swarm also deploys. During the chaos window a node adopts the next
+generation (`GenerationChanged`), and its resident cells swap to fresh
+isolates at the same epoch on the open database: at a safe point, by force
+once the maximum age passes, or at once when every class is eager. The check
+is:
+
+- **generation-stale**: a resident runtime still runs an older generation
+  well after its node's deploy passed its maximum age.
+
+`swap-from-upload` (a swap that reopens from the last upload, dropping the
+unuploaded tail) and `stale-generation` cover this path. `--coverage` lists
+how often a sweep reached each core event and effect, and the ones it never
+reached.
+
+It does not yet model WebSockets, deletion, or memory pressure.
 
 ### The shell on a simulated runtime
 

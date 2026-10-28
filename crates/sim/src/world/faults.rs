@@ -9,6 +9,7 @@ pub(super) enum FaultKind {
     Partition,
     ClockStep,
     Wedge,
+    Deploy,
 }
 
 impl World {
@@ -79,6 +80,7 @@ impl World {
                     self.procs.get_mut(&id).unwrap().wedged_until = self.t + duration;
                     self.note(|| format!("wedge the host of p{id} for {duration} ms"));
                 }
+                FaultKind::Deploy => self.deploy(id),
             }
         }
         let rate = match kind {
@@ -87,6 +89,7 @@ impl World {
             FaultKind::Partition => faults.partitions,
             FaultKind::ClockStep => faults.clock_steps,
             FaultKind::Wedge => self.config.stops.wedges,
+            FaultKind::Deploy => self.config.deploys.rate,
         };
         let gap = self.fault_gap(rate);
         self.after(gap, What::Fault(kind));
@@ -122,6 +125,52 @@ impl World {
             self.stats.evictions_requested += 1;
             self.drive(id, Event::Evict { cell });
         }
+    }
+
+    /// One node adopts the next generation, as `adopt_deployment` does.
+    fn deploy(&mut self, id: ProcId) {
+        let deploys = self.config.deploys.clone();
+        let proc = self.procs.get_mut(&id).unwrap();
+        let generation = proc.state.current_generation() + 1;
+        proc.deployed_at = self.t;
+        let eager_classes = if deploys.eager {
+            self.cells.clone()
+        } else {
+            Vec::new()
+        };
+        self.stats.deploys += 1;
+        self.note(|| format!("p{id} adopts generation {generation}"));
+        let now_mono_ms = self.procs[&id].mono(self.t);
+        self.drive(
+            id,
+            Event::GenerationChanged {
+                generation,
+                now_mono_ms,
+                max_age_ms: deploys.max_age_ms,
+                eager_classes,
+            },
+        );
+    }
+
+    /// Every resident runtime on a node whose last deploy is long past its
+    /// maximum age runs that node's generation.
+    pub(super) fn check_generations(&mut self) {
+        let settled = self.config.deploys.max_age_ms + GENERATION_SLACK_MS;
+        let mut stale = Vec::new();
+        for (id, proc) in &self.procs {
+            let current = proc.state.current_generation();
+            if current == 0 || self.t < proc.deployed_at + settled || proc.shutdown.is_some() {
+                continue;
+            }
+            for cell in proc.state.residents() {
+                let generation = proc.state.cell_generation(&cell).unwrap_or(current);
+                if generation != current {
+                    stale.push((*id, cell, generation, current));
+                }
+            }
+        }
+        let (checker, view) = self.checks();
+        checker.on_stale_generations(view, &stale);
     }
 
     pub(super) fn chaos_end(&mut self) {
@@ -165,6 +214,7 @@ impl World {
         self.audit = true;
         self.note(|| "audit: the fleet dies; a fresh node restores every cell".into());
         self.check_evictions_answered();
+        self.check_generations();
         let procs: Vec<ProcId> = self.procs.keys().copied().collect();
         for id in procs {
             self.crash(id, true);

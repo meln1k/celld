@@ -65,6 +65,8 @@ const OPERATION_DEADLINE_MS: u64 = 15_000;
 const DURABILITY_TIMEOUT_MS: u64 = 10_000;
 const CLIENT_TIMEOUT_MS: u64 = 20_000;
 const PROBE_WINDOW_MS: u64 = 30_000;
+/// How long past a deploy's maximum age a stale cell may still be swapping.
+const GENERATION_SLACK_MS: u64 = 5_000;
 const LOAD_SAMPLE_MS: u64 = 1_000;
 
 pub fn run(seed: u64, config: &SimConfig) -> Outcome {
@@ -372,6 +374,8 @@ struct Proc {
     evictions: BTreeMap<RequestId, Asked>,
     /// The host refuses to release any cell before this instant.
     wedged_until: Time,
+    /// When this process last adopted a generation.
+    deployed_at: Time,
     halting: bool,
 }
 
@@ -597,6 +601,7 @@ impl World {
             (FaultKind::Partition, faults.partitions),
             (FaultKind::ClockStep, faults.clock_steps),
             (FaultKind::Wedge, self.config.stops.wedges),
+            (FaultKind::Deploy, self.config.deploys.rate),
         ] {
             if rate > 0.0 {
                 let gap = self.fault_gap(rate);
