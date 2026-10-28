@@ -25,7 +25,10 @@
 //! request during the capture abandons it. Hosts wedge and refuse to
 //! release, and the operator's evictions wait for their answers. Half
 //! deploys new generations, which swap resident cells to fresh isolates at
-//! the same epoch on the open database ([`Deploys`]).
+//! the same epoch on the open database ([`Deploys`]). Half runs work on
+//! resident runtimes besides routed requests ([`ResidentWork`]): WebSockets
+//! that pin or hibernate with their cell, output gates, and top-level
+//! Worker requests.
 //!
 //! What it checks:
 //!
@@ -53,6 +56,9 @@
 //! - **Every resident cell reaches its node's generation.** Once a deploy is
 //!   older than its maximum age and the faults have healed, no resident
 //!   runtime still runs an older generation.
+//! - **No runtime stops under its own work.** An eviction or a swap never
+//!   stops a runtime that a regular or outbound socket, or a Worker request
+//!   the core routed to it, still holds.
 //! - **Core invariants.** `State::validate` after every event.
 //! - **An acknowledged alarm stays discoverable.** Whenever the alarm a
 //!   restore would load was armed by an acknowledged write, the bucket holds
@@ -156,10 +162,15 @@ pub enum Mutation {
     /// The host reports a restarted runtime on the generation before the
     /// current one.
     StaleGeneration,
+    /// The shell never tells the core a regular or outbound socket opened.
+    UnreportedSocket,
+    /// The shell reports a resident Worker request finished as soon as it is
+    /// routed, while it still runs.
+    UnpinnedWorker,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 20] = [
+    pub const ALL: [Mutation; 22] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
@@ -180,6 +191,8 @@ impl Mutation {
         Mutation::SilentAbandon,
         Mutation::SwapFromUpload,
         Mutation::StaleGeneration,
+        Mutation::UnreportedSocket,
+        Mutation::UnpinnedWorker,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -211,6 +224,8 @@ impl Mutation {
             Mutation::SilentAbandon => "silent-abandon",
             Mutation::SwapFromUpload => "swap-from-upload",
             Mutation::StaleGeneration => "stale-generation",
+            Mutation::UnreportedSocket => "unreported-socket",
+            Mutation::UnpinnedWorker => "unpinned-worker",
         }
     }
 }
@@ -245,6 +260,7 @@ pub struct SimConfig {
     pub lifecycle: Lifecycle,
     pub stops: Stops,
     pub deploys: Deploys,
+    pub resident: ResidentWork,
     pub faults: Faults,
     pub mutation: Mutation,
     /// Keep a human-readable trace of every event and effect.
@@ -345,6 +361,36 @@ impl Deploys {
     }
 }
 
+/// Work that runs on a resident runtime besides routed requests: WebSockets,
+/// output gates and top-level Worker requests.
+#[derive(Clone, Debug)]
+pub struct ResidentWork {
+    /// Sockets opened per simulated minute across the fleet, each on a cell
+    /// a process runs: hibernatable, regular or outbound. A socket sends
+    /// messages, which enter as `WebSocketRequestAt`, until its client
+    /// closes it.
+    pub sockets: f64,
+    /// Longest a client keeps a socket open.
+    pub max_socket_ms: u64,
+    /// Top-level Worker requests per simulated minute across the fleet,
+    /// which the core may run on an idle resident (`WorkerRequest`).
+    pub workers: f64,
+    /// The chance that a handler's write raises an output gate
+    /// (`GateRequestAt`), which its reply waits for.
+    pub gates: f64,
+}
+
+impl ResidentWork {
+    pub fn off() -> Self {
+        Self {
+            sockets: 0.0,
+            max_socket_ms: 0,
+            workers: 0.0,
+            gates: 0.0,
+        }
+    }
+}
+
 /// Fault rates, per simulated minute across the whole fleet, and the bucket's
 /// per-operation loss.
 #[derive(Clone, Debug)]
@@ -418,6 +464,7 @@ impl SimConfig {
             lifecycle: Lifecycle::off(),
             stops: Stops::off(),
             deploys: Deploys::off(),
+            resident: ResidentWork::off(),
             faults: Faults::none(),
             mutation: Mutation::None,
             trace: false,
@@ -485,6 +532,7 @@ impl SimConfig {
             lifecycle: Lifecycle::off(),
             stops: Stops::off(),
             deploys: Deploys::off(),
+            resident: ResidentWork::off(),
             faults,
             mutation: Mutation::None,
             trace: false,
@@ -514,6 +562,14 @@ impl SimConfig {
                 rate: *rng.pick(&[2.0, 6.0, 20.0]).unwrap(),
                 max_age_ms: *rng.pick(&[0, 1_000, 5_000]).unwrap(),
                 eager: rng.chance(0.2),
+            };
+        }
+        if rng.chance(0.5) {
+            config.resident = ResidentWork {
+                sockets: *rng.pick(&[6.0, 30.0]).unwrap(),
+                max_socket_ms: *rng.pick(&[2_000, 20_000]).unwrap(),
+                workers: *rng.pick(&[0.0, 30.0, 120.0]).unwrap(),
+                gates: *rng.pick(&[0.0, 0.3]).unwrap(),
             };
         }
         config
@@ -608,6 +664,13 @@ pub struct Stats {
     pub stop_retries: u64,
     /// Generations nodes adopted.
     pub deploys: u64,
+    /// Sockets clients opened, and those the core refused.
+    pub sockets_opened: u64,
+    pub sockets_refused: u64,
+    /// Worker requests the core ran on a resident.
+    pub workers_routed: u64,
+    /// Output gates the core admitted to the work that raised them.
+    pub gates_admitted: u64,
 }
 
 impl Stats {
@@ -660,6 +723,10 @@ impl Stats {
             operator_evictions,
             stop_retries,
             deploys,
+            sockets_opened,
+            sockets_refused,
+            workers_routed,
+            gates_admitted,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -707,6 +774,10 @@ impl Stats {
         self.operator_evictions += operator_evictions;
         self.stop_retries += stop_retries;
         self.deploys += deploys;
+        self.sockets_opened += sockets_opened;
+        self.sockets_refused += sockets_refused;
+        self.workers_routed += workers_routed;
+        self.gates_admitted += gates_admitted;
     }
 }
 

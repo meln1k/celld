@@ -54,6 +54,9 @@ impl World {
                 evictions: BTreeMap::new(),
                 wedged_until: 0,
                 deployed_at: 0,
+                sockets: BTreeMap::new(),
+                workers: BTreeMap::new(),
+                gates: BTreeMap::new(),
                 halting: false,
             },
         );
@@ -212,6 +215,10 @@ impl World {
             Work::UploadKick { cell, epoch } => self.kick_upload(id, &cell, epoch),
             Work::WaiterDeadline { cell, epoch, op } => self.waiter_deadline(id, &cell, epoch, op),
             Work::StopStep { cell, epoch, op } => self.stop_step(id, &cell, epoch, op),
+            Work::SocketMessage { websocket } => self.socket_message(id, websocket),
+            Work::SocketClose { websocket } => self.socket_close(id, websocket),
+            Work::WorkerEnd { request } => self.worker_end(id, request),
+            Work::GateEnd { gate } => self.drive(id, Event::ActivityFinished { request: gate }),
             Work::LoadTick => {
                 let proc = &self.procs[&id];
                 let load = pressure::Load {

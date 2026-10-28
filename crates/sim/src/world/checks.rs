@@ -261,6 +261,28 @@ impl Checker {
         }
     }
 
+    /// An eviction or a swap stopped a runtime that live sockets or Worker
+    /// requests still held.
+    pub(super) fn on_runtime_cut(
+        &mut self,
+        t: Time,
+        id: ProcId,
+        cell: &str,
+        epoch: Epoch,
+        sockets: usize,
+        workers: usize,
+    ) {
+        self.flag(
+            t,
+            "runtime-cut",
+            format!("{id}/{cell}/{epoch}"),
+            format!(
+                "p{id} stopped {cell} epoch {epoch} under {sockets} live socket(s) and \
+                 {workers} Worker request(s)"
+            ),
+        );
+    }
+
     pub(super) fn on_local_route_without_runtime(
         &mut self,
         t: Time,

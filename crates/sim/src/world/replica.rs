@@ -267,6 +267,7 @@ impl World {
         bounded: bool,
         immediate: &mut VecDeque<Event>,
     ) {
+        self.resident_work_stops(id, &cell, epoch, cause, immediate);
         let key = (cell.clone(), epoch);
         let node = self.procs[&id].node;
         let proc = self.procs.get_mut(&id).unwrap();

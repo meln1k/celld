@@ -180,7 +180,21 @@ unuploaded tail) and `stale-generation` cover this path. `--coverage` lists
 how often a sweep reached each core event and effect, and the ones it never
 reached.
 
-It does not yet model WebSockets, deletion, or memory pressure.
+Half the swarm also runs work on residents besides routed requests. A
+running handler accepts a socket, or the cell opens one: hibernatable,
+regular or outbound. Its messages are client operations that enter at the
+socket (`WebSocketRequestAt`), so the write checks cover them. A handler's
+write can raise an output gate (`GateRequestAt`) that its reply waits for,
+and top-level Worker requests run on idle residents (`WorkerRequest`). The
+check is:
+
+- **runtime-cut**: an eviction or a swap stopped a runtime that a regular
+  or outbound socket, or a Worker request the core routed to it, still
+  held.
+
+`unreported-socket` and `unpinned-worker` cover this path.
+
+It does not yet model deletion or memory pressure.
 
 ### The shell on a simulated runtime
 

@@ -118,10 +118,20 @@ impl World {
                 rebalance,
             } => self.adopt_released(id, op, cell, released_epoch, rebalance, immediate),
             Effect::CancelCellActivity {
-                requests, alarm, ..
+                cell,
+                requests,
+                websockets,
+                alarm,
+                ..
             } => {
                 if let Some(op) = alarm {
                     self.abort_alarm(id, op);
+                }
+                for websocket in websockets {
+                    self.socket_dropped(id, cell.clone(), websocket, immediate);
+                }
+                for request in &requests {
+                    self.worker_cancelled(id, *request, immediate);
                 }
                 let proc = self.procs.get_mut(&id).unwrap();
                 let mut ended = Vec::new();
@@ -217,7 +227,12 @@ impl World {
                 scheduled_ms,
             } => self.fire_alarm(id, op, cell, epoch, scheduled_ms),
             Effect::Complete { request, result } => self.complete(id, request, result),
-            Effect::CompleteWorker { .. } | Effect::CloseWebSocket { .. } => {}
+            Effect::CompleteWorker { request, route } => {
+                self.complete_worker(id, request, route, immediate)
+            }
+            Effect::CloseWebSocket { cell, websocket } => {
+                self.socket_refused(id, cell, websocket, immediate)
+            }
             Effect::Halt { .. } => {
                 self.procs.get_mut(&id).unwrap().halting = true;
             }

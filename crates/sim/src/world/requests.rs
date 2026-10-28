@@ -12,7 +12,7 @@ impl World {
         request: RequestId,
         result: Result<Route, celld_logic::RequestError>,
     ) {
-        if self.handoff_routed(id, request, &result) {
+        if self.handoff_routed(id, request, &result) || self.gate_routed(id, request, &result) {
             return;
         }
         let proc = self.procs.get_mut(&id).unwrap();
@@ -225,6 +225,9 @@ impl World {
             .get_mut(&request)
             .unwrap();
         ctx.committed = Some((write, position));
+        if self.config.resident.gates > 0.0 && self.work_rng.chance(self.config.resident.gates) {
+            self.raise_gate(id, request, cell.clone());
+        }
         if matches!(op, Some(AlarmOp::Set(_)))
             && self.launch_arm_gate(id, &cell, alarm, ArmWaiter::Request(request))
         {
@@ -266,6 +269,17 @@ impl World {
             // The reply waits behind the wake-entry PUT.
             ctx.answer = Answer::HeldByArmGate;
             return;
+        }
+        if let Some(gate) = ctx.gate {
+            if !ctx.aborted {
+                ctx.answer = Answer::HeldByGate;
+                return;
+            }
+            // Cancelled with its gate still queued: the gate goes with it.
+            ctx.gate = None;
+            proc.gates.remove(&gate);
+            self.drive(id, Event::Cancel { request: gate });
+            return self.handler_end(id, request);
         }
         ctx.answer = Answer::Sent;
         if ctx.aborted || ctx.epoch.is_none() {

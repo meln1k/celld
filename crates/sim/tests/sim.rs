@@ -5,7 +5,9 @@
 //! `--mutation NAME` for a mutation run. `CELLD_SIM_SEEDS` widens the swarm
 //! sweep here; the CLI runs any range (`--seeds 0..10000`).
 
-use celld_sim::{run, Coverage, Deploys, Lifecycle, Mutation, Outcome, SimConfig, Stops};
+use celld_sim::{
+    run, Coverage, Deploys, Lifecycle, Mutation, Outcome, ResidentWork, SimConfig, Stops,
+};
 
 fn report(outcome: &Outcome) -> String {
     let mut lines = vec![format!("seed {}", outcome.seed)];
@@ -209,7 +211,8 @@ fn a_follower_that_appends_after_its_seal_loses_a_write() {
 
 /// Nodes leave on purpose, half of them for a same-node reload. No policy
 /// evictions, no balancing and no slow stops: those reach open core findings
-/// (docs/testing.md) that would fail a seed before its plant is reached.
+/// (docs/testing.md) that would fail a seed before its plant is reached. No
+/// resident work either, which moves the schedules the plants were found on.
 fn shutdowns(seed: u64) -> SimConfig {
     SimConfig {
         lifecycle: Lifecycle {
@@ -219,6 +222,7 @@ fn shutdowns(seed: u64) -> SimConfig {
         },
         evict_gap_ms: None,
         stops: Stops::off(),
+        resident: ResidentWork::off(),
         ..SimConfig::swarm(seed)
     }
 }
@@ -390,6 +394,67 @@ fn a_runtime_reported_on_the_old_generation_stays_stale() {
         Mutation::StaleGeneration,
         0..8,
         &["generation-stale"]
+    ));
+}
+
+/// Sockets, gates and Worker requests on every resident. No shutdowns and
+/// no balancing, whose open core findings would fail a seed before its
+/// plant is reached.
+fn busy(seed: u64) -> SimConfig {
+    SimConfig {
+        lifecycle: Lifecycle::off(),
+        resident: ResidentWork {
+            sockets: 30.0,
+            max_socket_ms: 20_000,
+            workers: 120.0,
+            gates: 0.3,
+        },
+        ..SimConfig::swarm(seed)
+    }
+}
+
+#[test]
+fn busy_residents_pass_and_reach_their_events() {
+    let mut coverage = Coverage::default();
+    for seed in 0..12 {
+        let outcome = run(seed, &busy(seed));
+        assert!(!outcome.failed(), "{}", report(&outcome));
+        coverage.absorb(&outcome.coverage);
+    }
+    for event in [
+        "WebSocketOpened",
+        "WebSocketClosed",
+        "WebSocketRequestAt",
+        "GateRequestAt",
+        "WorkerRequest",
+    ] {
+        assert!(coverage.events.contains_key(event), "{event}: {coverage:?}");
+    }
+    for effect in ["CompleteWorker", "CloseWebSocket"] {
+        assert!(
+            coverage.effects.contains_key(effect),
+            "{effect}: {coverage:?}"
+        );
+    }
+}
+
+#[test]
+fn a_socket_the_core_never_hears_of_is_cut() {
+    assert!(caught_in(
+        busy,
+        Mutation::UnreportedSocket,
+        0..4,
+        &["runtime-cut"]
+    ));
+}
+
+#[test]
+fn a_worker_reported_finished_too_early_is_cut() {
+    assert!(caught_in(
+        busy,
+        Mutation::UnpinnedWorker,
+        0..4,
+        &["runtime-cut"]
     ));
 }
 

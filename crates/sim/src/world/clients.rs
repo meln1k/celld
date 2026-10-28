@@ -68,6 +68,7 @@ impl World {
                 ingress,
                 succeeded: false,
                 dispatch: Dispatch::default(),
+                socket: None,
             },
         );
         op
@@ -83,6 +84,7 @@ impl World {
         entry.attempt += 1;
         let attempt = entry.attempt;
         let ingress = entry.ingress;
+        let socket = entry.socket;
         self.stats.requests += 1;
         let candidates: Vec<usize> = match ingress {
             Some(node) => vec![node],
@@ -90,10 +92,14 @@ impl World {
                 .filter(|node| self.nodes[*node].proc.is_some())
                 .collect(),
         };
-        let target = self
-            .work_rng
-            .pick(&candidates)
-            .and_then(|node| self.nodes[*node].proc);
+        // A socket's message arrives where the socket is open.
+        let target = match socket {
+            Some((proc, _)) => self.procs.contains_key(&proc).then_some(proc),
+            None => self
+                .work_rng
+                .pick(&candidates)
+                .and_then(|node| self.nodes[*node].proc),
+        };
         let timeout = if self.ops[&op].retry {
             5_000
         } else {
@@ -157,13 +163,25 @@ impl World {
                 alarm,
                 committed: None,
                 arm_gate: ArmGate::None,
+                gate: None,
                 answer: Answer::Pending,
                 aborted: false,
                 activity: Activity::Running,
                 replied: false,
             },
         );
-        let event = if via == Some(0) {
+        let socket = self.ops[&op].socket.filter(|(proc, websocket)| {
+            *proc == id && via.is_none() && self.procs[&id].sockets.contains_key(websocket)
+        });
+        let event = if let Some((_, websocket)) = socket {
+            Event::WebSocketRequestAt {
+                request,
+                cell,
+                websocket,
+                now_ms: 0,
+                now_mono_ms: 0,
+            }
+        } else if via == Some(0) {
             Event::CapacityRequestAt {
                 request,
                 cell,

@@ -16,7 +16,8 @@
 //! the phases, alarms and their wake entries in [`alarms`], the fleet
 //! durability tier in [`node_log`], graceful shutdowns and balancing in
 //! [`lifecycle`], the handoff of released cells in [`handoff`], and
-//! eviction stops and the operator's evictions in [`stops`]. The
+//! eviction stops and the operator's evictions in [`stops`], and sockets,
+//! gates and Worker requests on resident runtimes in [`resident`]. The
 //! checkers in [`checks`] only read what the shell reports.
 
 mod alarms;
@@ -29,6 +30,7 @@ mod node_log;
 mod process;
 mod replica;
 mod requests;
+mod resident;
 mod shell;
 mod stops;
 mod store_rpc;
@@ -53,6 +55,7 @@ use handoff::{Accept, Handoff};
 use lifecycle::{LifeTask, Shutdown};
 use node_log::{Fragment, LogShell, LogWork, RecoverMode};
 use replica::{Proof, Waiter};
+use resident::Socket;
 use stops::{Asked, Stop};
 use store_rpc::{Call, Reply, StoreReq, StoreRes};
 
@@ -140,6 +143,22 @@ enum Work {
         op: OpId,
     },
     LoadTick,
+    /// A client sends a message on its socket.
+    SocketMessage {
+        websocket: u64,
+    },
+    /// A client closes its socket.
+    SocketClose {
+        websocket: u64,
+    },
+    /// A resident Worker request ends.
+    WorkerEnd {
+        request: RequestId,
+    },
+    /// An admitted output gate's effect has left.
+    GateEnd {
+        gate: RequestId,
+    },
     ClientArrive {
         op: u64,
         attempt: u32,
@@ -220,6 +239,8 @@ enum What {
     Fault(FaultKind),
     Shutdown,
     EvictTick,
+    SocketTick,
+    WorkerTick,
     ChaosEnd,
     Probe,
     CloseLogs,
@@ -290,6 +311,8 @@ struct ReqCtx {
     alarm: Option<AlarmIntent>,
     committed: Option<(WriteId, u64)>,
     arm_gate: ArmGate,
+    /// The output gate this handler raised and waits for.
+    gate: Option<RequestId>,
     answer: Answer,
     aborted: bool,
     activity: Activity,
@@ -305,6 +328,8 @@ enum Answer {
     Pending,
     /// The handler ended, and its reply waits behind the wake-entry PUT.
     HeldByArmGate,
+    /// The handler ended, and its reply waits for its output gate.
+    HeldByGate,
     /// The reply went to the core.
     Sent,
 }
@@ -376,6 +401,12 @@ struct Proc {
     wedged_until: Time,
     /// When this process last adopted a generation.
     deployed_at: Time,
+    /// Client sockets open on this process.
+    sockets: BTreeMap<u64, Socket>,
+    /// Worker requests running on residents: the cell and epoch.
+    workers: BTreeMap<RequestId, (String, Epoch)>,
+    /// Output gates raised, by gate request, with the handler they hold.
+    gates: BTreeMap<RequestId, RequestId>,
     halting: bool,
 }
 
@@ -405,6 +436,8 @@ struct ClientOp {
     ingress: Option<usize>,
     succeeded: bool,
     dispatch: Dispatch,
+    /// The process and socket a socket message arrives on.
+    socket: Option<(ProcId, u64)>,
 }
 
 /// The ingress node's forwarding loop for one client attempt
@@ -446,6 +479,7 @@ struct World {
     ops: BTreeMap<u64, ClientOp>,
     next_op: u64,
     next_request: RequestId,
+    next_websocket: u64,
     next_write: WriteId,
     next_partition: u64,
     cells: Vec<String>,
@@ -508,6 +542,7 @@ impl World {
             ops: BTreeMap::new(),
             next_op: 1,
             next_request: 1,
+            next_websocket: 1,
             next_write: 1,
             next_partition: 1,
             cells,
@@ -589,6 +624,12 @@ impl World {
         self.at(1, What::ClientNew);
         if self.config.evict_gap_ms.is_some() {
             self.at(100, What::EvictTick);
+        }
+        if self.config.resident.sockets > 0.0 {
+            self.at(200, What::SocketTick);
+        }
+        if self.config.resident.workers > 0.0 {
+            self.at(300, What::WorkerTick);
         }
         if self.config.lifecycle.shutdowns > 0.0 {
             let gap = self.fault_gap(self.config.lifecycle.shutdowns);
@@ -688,6 +729,8 @@ impl World {
             What::Fault(kind) => self.fault(kind),
             What::Shutdown => self.shutdown_fault(),
             What::EvictTick => self.evict_tick(),
+            What::SocketTick => self.socket_tick(),
+            What::WorkerTick => self.worker_tick(),
             What::ChaosEnd => self.chaos_end(),
             What::Probe => self.probe(),
             // The fleet shuts down gracefully before the audit kills it.
@@ -809,6 +852,11 @@ fn stamp(event: &mut Event, wall: u64, mono: u64) {
             now_ms,
             now_mono_ms,
             ..
+        }
+        | Event::WebSocketRequestAt {
+            now_ms,
+            now_mono_ms,
+            ..
         } => {
             *now_ms = wall;
             *now_mono_ms = mono;
@@ -818,7 +866,8 @@ fn stamp(event: &mut Event, wall: u64, mono: u64) {
         | Event::CapacityRequestAt { now_mono_ms, .. }
         | Event::OutputAt { now_mono_ms, .. }
         | Event::LoadSampled { now_mono_ms, .. }
-        | Event::EvictRequested { now_mono_ms, .. } => *now_mono_ms = mono,
+        | Event::EvictRequested { now_mono_ms, .. }
+        | Event::GateRequestAt { now_mono_ms, .. } => *now_mono_ms = mono,
         Event::OwnerRead { now_ms, .. } | Event::NodeLeaseRead { now_ms, .. } => *now_ms = wall,
         Event::AlarmObserved {
             now_ms,

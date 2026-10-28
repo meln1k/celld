@@ -3577,10 +3577,17 @@ impl State {
         websocket: WebSocketId,
         effects: &mut Vec<Effect>,
     ) {
+        // A hibernatable socket outlives the runtime, so on a quiescing cell
+        // its events wait for the restarted one like any request. Run here,
+        // they kept a swapping cell busy past its single forced cancel, and a
+        // gate one of them raised then waited for the swap that waited for it.
         let held_resident = self.node_authoritative()
             && self.cells.get(&id).is_some_and(|cell| {
                 matches!(cell.phase, Phase::Resident { .. })
-                    && cell.websockets.contains_key(&websocket)
+                    && cell
+                        .websockets
+                        .get(&websocket)
+                        .is_some_and(|kind| !cell.quiescing || *kind != WebSocketKind::Hibernatable)
             });
         if held_resident {
             self.complete_request(&id, request, Ok(Route::Local), effects);
@@ -6489,6 +6496,10 @@ impl State {
             // its reservation with residency, or the stale index consumes
             // a drain handoff slot even after the runtime is gone.
             self.quiescing_cells.remove(id);
+            // The sockets go with the runtime, as its running requests did
+            // above; `runtime_stopped` used to drop them only once the stop
+            // landed, and until then a stopping cell held a live transport.
+            cell.websockets.clear();
             set_phase(
                 &mut self.occupied,
                 cell,
