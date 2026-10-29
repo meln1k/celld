@@ -298,6 +298,8 @@ struct Replica {
     queued: usize,
     uploading: bool,
     running: bool,
+    /// Opened paged: it reads the chain below its epoch while it runs.
+    paged: bool,
     waiters: Vec<Waiter>,
     stop: Option<Stop>,
 }

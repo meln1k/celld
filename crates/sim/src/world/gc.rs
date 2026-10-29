@@ -52,19 +52,26 @@ impl World {
             return;
         }
         match (step, result) {
-            (GcStep::Scanned, Ok(StoreRes::Epochs(base, listed, recorded))) => {
-                let Some(base) = base else {
+            (GcStep::Scanned, Ok(StoreRes::Epochs(chain, listed, recorded))) => {
+                let Some(chain) = chain else {
                     return;
                 };
                 let (own, chain) = if self.config.mutation == Mutation::GcBelowOwn {
-                    (epoch + 1, epoch + 1)
+                    (epoch + 1, vec![epoch + 1])
                 } else {
-                    (epoch, base)
+                    (epoch, chain)
                 };
+                // ponytail: the background fill is off, so a paged cell
+                // reads its chain for its whole residency; model the fill's
+                // completion if GC under paging needs it.
+                let pinned = self.procs[&id]
+                    .replicas
+                    .get(&(cell.clone(), epoch))
+                    .is_some_and(|replica| replica.paged);
                 let grace_ms = self.config.epoch_gc.unwrap();
                 let now_ms = self.wall(id);
                 let Some(plan) =
-                    epoch_gc::plan(own, &[chain], &listed, recorded, false, now_ms, grace_ms)
+                    epoch_gc::plan(own, &chain, &listed, recorded, pinned, now_ms, grace_ms)
                 else {
                     return;
                 };

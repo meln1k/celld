@@ -200,9 +200,23 @@ calls the core's `epoch_gc::plan` and keeps production's order: list and
 plan, read `own.json`, record the retired mark, delete. Rows below the mark
 count as covered for the node log, as `covered_txid` treats them. No check
 is new: a wrong delete shows up as a lost write at the next restore.
-`gc-below-own` covers this path. Every upload in the model carries the
-whole database, so every epoch with objects opens at TXID 1. Paged epochs,
-which continue the chain below them, are not modelled.
+`gc-below-own` covers this path.
+
+In half the swarm, some bucket restores also page the cell, as
+`CELLD_LTX_PAGED` does. The new epoch continues the chain below it from the
+restored position instead of opening at TXID 1: its zero-page marker lands
+before the cell serves, and its uploads hold only the positions above the
+cut. A restore walks the chain as `EpochChain::build` does: down from the
+newest listed epoch, clipping each lower epoch below the span above it,
+linking only on an exact end at the cut, and stopping at the first span
+that opens at TXID 1. The background fill is off, so a paged cell pins its
+chain against epoch GC while it runs. The check is:
+
+- **unrestorable**: a restore lists objects for the cell but finds no chain
+  down to TXID 1.
+
+`newest-base` covers this path: it restores from the newest epoch that
+opens at TXID 1 and drops the paged epochs above it.
 
 In half the swarm, processes also hold memory against the pressure
 ceilings (`CELLD_MAX_RSS_MB` and 95% of the machine). A process holds a

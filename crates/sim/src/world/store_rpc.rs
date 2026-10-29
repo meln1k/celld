@@ -42,6 +42,12 @@ pub(super) enum StoreReq {
         cell: String,
         epoch: Epoch,
     },
+    /// A paged activation's marker.
+    PutMarker {
+        cell: String,
+        epoch: Epoch,
+        cut: u64,
+    },
     /// Epoch GC's listing of a cell's epoch prefixes.
     ScanEpochs {
         cell: String,
@@ -131,10 +137,10 @@ pub(super) enum StoreRes {
         peers: Vec<CapacityPeer>,
     },
     Put,
-    Chain(Option<Vec<WriteId>>),
-    /// The chain's base, the epochs below it, and the retired mark.
+    Chain(Result<Option<Vec<WriteId>>, ()>),
+    /// The restore chain, the epochs below its base, and the retired mark.
     Epochs(
-        Option<Epoch>,
+        Option<Vec<Epoch>>,
         Vec<celld_logic::epoch_gc::ListedEpoch>,
         Option<Epoch>,
     ),
@@ -220,6 +226,13 @@ pub(super) enum Reply {
         op: OpId,
         cell: String,
         spec: RestoreSpec,
+    },
+    /// A paged activation's marker landed: the cell may serve `content`.
+    Marker {
+        op: OpId,
+        cell: String,
+        spec: RestoreSpec,
+        content: Vec<WriteId>,
     },
     /// A step of a shell task (`alarms::Task`).
     Task {
@@ -420,9 +433,16 @@ impl World {
             StoreReq::ReadChain { cell, epoch } => {
                 StoreRes::Chain(self.store.read_chain(cell, *epoch))
             }
+            StoreReq::PutMarker { cell, epoch, cut } => {
+                let (cell, epoch) = (cell.clone(), *epoch);
+                let writers = self.store.put_marker(&cell, epoch, *cut, proc);
+                let (checker, view) = self.checks();
+                checker.on_upload(view, &cell, epoch, &writers);
+                StoreRes::Done
+            }
             StoreReq::ScanEpochs { cell } => {
-                let (base, listed, mark) = self.store.scan_epochs(cell);
-                StoreRes::Epochs(base, listed, mark)
+                let (chain, listed, mark) = self.store.scan_epochs(cell);
+                StoreRes::Epochs(chain, listed, mark)
             }
             StoreReq::PutRetired { cell, mark } => {
                 self.store.put_retired(cell, *mark);
@@ -669,10 +689,36 @@ impl World {
                 return;
             }
             Reply::Restore { op, cell, spec } => match result {
-                Ok(StoreRes::Chain(chain)) => {
+                Ok(StoreRes::Chain(Err(()))) => {
+                    self.checker.on_unrestorable(self.t, id, &cell, spec.epoch);
+                    Event::RestoreCompleted {
+                        op,
+                        result: Err(Failure::Definite),
+                    }
+                }
+                Ok(StoreRes::Chain(Ok(chain))) => {
                     self.stats.restores_bucket += 1;
                     let restored = chain.is_some();
                     let content = chain.unwrap_or_default();
+                    // A paged activation serves only once its marker is in
+                    // the epoch's prefix.
+                    if !content.is_empty()
+                        && self.config.paged > 0.0
+                        && self.net_rng.chance(self.config.paged)
+                    {
+                        let req = StoreReq::PutMarker {
+                            cell: cell.clone(),
+                            epoch: spec.epoch,
+                            cut: content.len() as u64,
+                        };
+                        let reply = Reply::Marker {
+                            op,
+                            cell,
+                            spec,
+                            content,
+                        };
+                        return self.store_call(id, req, reply);
+                    }
                     let alarm = self.restored_alarm(&content);
                     self.open_replica(id, &cell, spec.epoch, content, "bucket");
                     Event::RestoreCompleted {
@@ -681,6 +727,37 @@ impl World {
                     }
                 }
                 Ok(_) => unreachable!(),
+                Err(_) => Event::RestoreCompleted {
+                    op,
+                    result: Err(Failure::Definite),
+                },
+            },
+            Reply::Marker {
+                op,
+                cell,
+                spec,
+                content,
+            } => match result {
+                Ok(_) => {
+                    self.stats.paged_restores += 1;
+                    let alarm = self.restored_alarm(&content);
+                    self.open_replica(id, &cell, spec.epoch, content, "paged");
+                    let key = (cell, spec.epoch);
+                    self.procs
+                        .get_mut(&id)
+                        .unwrap()
+                        .replicas
+                        .get_mut(&key)
+                        .unwrap()
+                        .paged = true;
+                    Event::RestoreCompleted {
+                        op,
+                        result: Ok(RestoreOutcome {
+                            restored: true,
+                            alarm,
+                        }),
+                    }
+                }
                 Err(_) => Event::RestoreCompleted {
                     op,
                     result: Err(Failure::Definite),

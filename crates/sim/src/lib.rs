@@ -176,10 +176,13 @@ pub enum Mutation {
     /// walk down cannot see that emptying a heap returns most of a cell's
     /// cost.
     UnplacedHeaps,
+    /// A restore takes the newest epoch that opens at TXID 1 for the whole
+    /// chain, and ignores the paged epochs that continue it.
+    NewestBase,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 24] = [
+    pub const ALL: [Mutation; 25] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
@@ -204,6 +207,7 @@ impl Mutation {
         Mutation::UnpinnedWorker,
         Mutation::GcBelowOwn,
         Mutation::UnplacedHeaps,
+        Mutation::NewestBase,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -239,6 +243,7 @@ impl Mutation {
             Mutation::UnpinnedWorker => "unpinned-worker",
             Mutation::GcBelowOwn => "gc-below-own",
             Mutation::UnplacedHeaps => "unplaced-heaps",
+            Mutation::NewestBase => "newest-base",
         }
     }
 }
@@ -280,6 +285,11 @@ pub struct SimConfig {
     /// Memory the nodes hold against the pressure ceilings, or none: then
     /// every sample reports nothing and pressure shedding never engages.
     pub memory: Option<Memory>,
+    /// The share of bucket restores that page the cell (`CELLD_LTX_PAGED`):
+    /// the epoch continues the chain below it from the restored position
+    /// instead of opening at TXID 1. The background fill is off, so a paged
+    /// cell reads the chain for its whole residency.
+    pub paged: f64,
     pub faults: Faults,
     pub mutation: Mutation,
     /// Keep a human-readable trace of every event and effect.
@@ -511,6 +521,7 @@ impl SimConfig {
             resident: ResidentWork::off(),
             epoch_gc: None,
             memory: None,
+            paged: 0.0,
             faults: Faults::none(),
             mutation: Mutation::None,
             trace: false,
@@ -581,6 +592,7 @@ impl SimConfig {
             resident: ResidentWork::off(),
             epoch_gc: None,
             memory: None,
+            paged: 0.0,
             faults,
             mutation: Mutation::None,
             trace: false,
@@ -645,6 +657,9 @@ impl SimConfig {
                 surges: *rng.pick(&[0.0, 3.0, 10.0]).unwrap(),
                 max_surge_mb: *rng.pick(&[100, 400]).unwrap(),
             });
+        }
+        if rng.chance(0.5) {
+            config.paged = *rng.pick(&[0.3, 1.0]).unwrap();
         }
         config
     }
@@ -751,6 +766,8 @@ pub struct Stats {
     pub shed_samples: u64,
     /// Heaps whose last cell left.
     pub heaps_freed: u64,
+    /// Bucket restores that paged their cell.
+    pub paged_restores: u64,
 }
 
 impl Stats {
@@ -810,6 +827,7 @@ impl Stats {
             epochs_deleted,
             shed_samples,
             heaps_freed,
+            paged_restores,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -864,6 +882,7 @@ impl Stats {
         self.epochs_deleted += epochs_deleted;
         self.shed_samples += shed_samples;
         self.heaps_freed += heaps_freed;
+        self.paged_restores += paged_restores;
     }
 }
 

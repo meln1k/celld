@@ -217,6 +217,7 @@ impl World {
                 queued: len,
                 uploading: false,
                 running: false,
+                paged: false,
                 waiters: Vec::new(),
                 stop: None,
             },

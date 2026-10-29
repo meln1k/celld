@@ -303,7 +303,7 @@ impl World {
                     .filter(|((name, _), _)| name == cell)
                     .map(|(_, replica)| replica.content.clone())
                     .next_back()
-                    .or_else(|| self.store.read_chain(cell, Epoch::MAX))
+                    .or_else(|| self.store.read_chain(cell, Epoch::MAX).ok().flatten())
                     .map(|content| (cell.clone(), content))
             })
             .collect();

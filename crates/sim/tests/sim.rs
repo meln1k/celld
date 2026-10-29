@@ -96,7 +96,6 @@ fn swarm_seeds_pass() {
     assert!(totals.log_degrades > 0, "{totals:?}");
     assert!(totals.log_recoveries > 0, "{totals:?}");
     assert!(totals.drains > 0, "{totals:?}");
-    assert!(totals.clean_reloads > 0, "{totals:?}");
     assert!(totals.rebalances > 0, "{totals:?}");
     assert!(totals.handoffs_accepted > 0, "{totals:?}");
 }
@@ -176,6 +175,7 @@ fn fleet(seed: u64) -> SimConfig {
     SimConfig {
         fleet: true,
         memory: None,
+        paged: 0.0,
         ..SimConfig::swarm(seed)
     }
 }
@@ -225,11 +225,23 @@ fn shutdowns(seed: u64) -> SimConfig {
         stops: Stops::off(),
         resident: ResidentWork::off(),
         memory: None,
+        paged: 0.0,
         ..SimConfig::swarm(seed)
     }
 }
 
 /// Every shutdown hands its cells to a peer.
+#[test]
+fn shutting_down_fleets_pass_and_reload_cleanly() {
+    let mut totals = celld_sim::Stats::default();
+    for seed in 0..8 {
+        let outcome = run(seed, &shutdowns(seed));
+        assert!(!outcome.failed(), "{}", report(&outcome));
+        totals.absorb(&outcome.stats);
+    }
+    assert!(totals.clean_reloads > 0, "{totals:?}");
+}
+
 fn drains(seed: u64) -> SimConfig {
     let mut config = shutdowns(seed);
     config.lifecycle.preserve_probability = 0.0;
@@ -298,6 +310,7 @@ fn stopping(seed: u64) -> SimConfig {
             quiet: true,
         },
         memory: None,
+        paged: 0.0,
         ..SimConfig::swarm(seed)
     }
 }
@@ -360,6 +373,7 @@ fn deploying(seed: u64) -> SimConfig {
             eager: false,
         },
         memory: None,
+        paged: 0.0,
         ..SimConfig::swarm(seed)
     }
 }
@@ -414,6 +428,7 @@ fn busy(seed: u64) -> SimConfig {
             gates: 0.3,
         },
         memory: None,
+        paged: 0.0,
         ..SimConfig::swarm(seed)
     }
 }
@@ -475,6 +490,7 @@ fn collecting(seed: u64) -> SimConfig {
         // epoch shows.
         evict_gap_ms: Some((100, 600)),
         memory: None,
+        paged: 0.0,
         ..SimConfig::swarm(seed)
     }
 }
@@ -519,6 +535,7 @@ fn crowded(seed: u64) -> SimConfig {
     // stays pinned.
     config.lifecycle = Lifecycle::off();
     config.memory = None;
+    config.paged = 0.0;
     config
 }
 
@@ -594,5 +611,38 @@ fn a_walk_down_blind_to_heaps_stops_shedding() {
         Mutation::UnplacedHeaps,
         0..16,
         &["pressure-wedge", "liveness"]
+    ));
+}
+
+/// Every bucket restore pages its cell, and owners collect epochs, so
+/// chains of continuations grow and lose their lower epochs.
+fn paging(seed: u64) -> SimConfig {
+    SimConfig {
+        paged: 1.0,
+        epoch_gc: Some(0),
+        memory: None,
+        ..SimConfig::swarm(seed)
+    }
+}
+
+#[test]
+fn paging_fleets_pass_and_continue_their_chains() {
+    let mut totals = celld_sim::Stats::default();
+    for seed in 0..8 {
+        let outcome = run(seed, &paging(seed));
+        assert!(!outcome.failed(), "{}", report(&outcome));
+        totals.absorb(&outcome.stats);
+    }
+    assert!(totals.paged_restores > 0, "{totals:?}");
+    assert!(totals.epochs_deleted > 0, "{totals:?}");
+}
+
+#[test]
+fn a_restore_that_drops_paged_epochs_loses_a_write() {
+    assert!(caught_in(
+        paging,
+        Mutation::NewestBase,
+        0..8,
+        &["lost-write"]
     ));
 }

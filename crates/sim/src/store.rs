@@ -33,9 +33,28 @@ pub struct Prefix {
     /// What epoch GC deleted. Only `prefix_holds` reads it: a write proven
     /// durable here stays proven once a later base carries it.
     gone: BTreeMap<u64, WriteId>,
+    /// A paged epoch continues the chain below it from this position, and
+    /// holds only the positions above it. Zero opens at TXID 1.
+    pub cut: u64,
+    /// The paged epoch's zero-page marker, uploaded before the cell serves.
+    marker: bool,
 }
 
 impl Prefix {
+    /// Whether a listing finds the prefix: it holds an object.
+    fn listed(&self) -> bool {
+        self.marker || !self.entries.is_empty()
+    }
+
+    /// The span's first TXID.
+    fn lo(&self) -> u64 {
+        if self.cut > 0 {
+            self.cut + 1
+        } else {
+            self.entries.keys().next().copied().unwrap_or(1)
+        }
+    }
+
     /// The database a restore of this prefix produces: the contiguous run
     /// of positions from the first.
     pub fn content(&self) -> Vec<WriteId> {
@@ -394,9 +413,17 @@ impl Store {
         rows: &BTreeMap<u64, WriteId>,
         writer: ProcId,
     ) -> Vec<ProcId> {
+        let paged = self
+            .prefix(cell, epoch)
+            .is_some_and(|prefix| prefix.cut > 0);
         let base = match self.prefix(cell, epoch).map(Prefix::content) {
+            _ if paged => Vec::new(),
             Some(content) if !content.is_empty() => content,
-            _ => self.read_chain(cell, epoch).unwrap_or_default(),
+            _ => self
+                .read_chain(cell, epoch)
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
         };
         let key = self.prefix_key(cell, epoch);
         let prefix = self.prefixes.entry(key).or_default();
@@ -420,14 +447,65 @@ impl Store {
             .take_while(move |row| row.cell == cell)
     }
 
-    /// The newest prefix of `cell` that holds data: its epoch and the
-    /// content a restore of it produces.
+    /// The newest epoch of `cell`'s restore chain, and the content a
+    /// restore above it produces.
     pub fn newest_prefix(&self, cell: &str) -> Option<(Epoch, Vec<WriteId>)> {
-        self.prefixes
-            .range((cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX))
+        let spans = self.spans(cell, Epoch::MAX).ok()?;
+        Some((spans.first()?.0, self.assemble(cell, &spans)))
+    }
+
+    /// `EpochChain::build` over the epochs below `below`, newest first: walk
+    /// down from the newest listed epoch, clip each lower epoch to below the
+    /// span above it, link it only when it ends exactly at that cut, and
+    /// stop at the first span that opens at TXID 1. `Err` when objects are
+    /// listed but no span opens at 1 (`TxNotAvailable`); `Ok` and empty when
+    /// nothing is listed.
+    fn spans(&self, cell: &str, below: Epoch) -> Result<Vec<(Epoch, u64, u64)>, ()> {
+        let mut spans: Vec<(Epoch, u64, u64)> = Vec::new();
+        let range = (cell.to_string(), 0)..(cell.to_string(), below);
+        for ((_, epoch), prefix) in self.prefixes.range(range).rev() {
+            if !prefix.listed() {
+                continue;
+            }
+            let limit = spans.last().map(|(_, lo, _)| *lo);
+            let lo = prefix.lo();
+            if !prefix.marker && limit.is_some_and(|limit| lo >= limit) {
+                continue;
+            }
+            let mut ends = lo - 1;
+            while prefix.entries.contains_key(&(ends + 1))
+                && limit.is_none_or(|limit| ends + 1 < limit)
+            {
+                ends += 1;
+            }
+            // Linking on anything but the exact cut takes a fenced owner's
+            // late object for the base and loses what lies between it and
+            // the cut (`BreakLinkByOrder`).
+            if limit.is_some_and(|limit| ends + 1 != limit) {
+                continue;
+            }
+            spans.push((*epoch, lo, ends));
+            if lo == 1 {
+                return Ok(spans);
+            }
+        }
+        if spans.is_empty() {
+            Ok(spans)
+        } else {
+            Err(())
+        }
+    }
+
+    /// The database the spans restore: each span's positions, base first.
+    fn assemble(&self, cell: &str, spans: &[(Epoch, u64, u64)]) -> Vec<WriteId> {
+        spans
+            .iter()
             .rev()
-            .find(|(_, prefix)| !prefix.entries.is_empty())
-            .map(|((_, epoch), prefix)| (*epoch, prefix.content()))
+            .flat_map(|(epoch, lo, ends)| {
+                let entries = &self.prefixes[&(cell.to_string(), *epoch)].entries;
+                (*lo..=*ends).map(|position| entries[&position])
+            })
+            .collect()
     }
 
     /// Whether `row` is at its position in its epoch's prefix, or was until
@@ -452,20 +530,22 @@ impl Store {
         self.covers(row) || self.bundled.contains(row)
     }
 
-    /// `scan_epochs`: the restore chain's base, every epoch below it with
-    /// objects, and the retired mark. Every upload carries the whole
-    /// database, so each epoch with objects opens at TXID 1, and the chain
-    /// is its newest such epoch alone.
-    // ponytail: no paged epochs, so no continuation chains; model them
-    // with the fill pinning when the sim pages cells.
-    pub fn scan_epochs(&self, cell: &str) -> (Option<Epoch>, Vec<ListedEpoch>, Option<Epoch>) {
+    /// `scan_epochs`: the restore chain's epochs, oldest first, every epoch
+    /// below its base with objects, and the retired mark. No chain when it
+    /// is unrestorable.
+    pub fn scan_epochs(&self, cell: &str) -> (Option<Vec<Epoch>>, Vec<ListedEpoch>, Option<Epoch>) {
+        let chain: Option<Vec<Epoch>> = self
+            .spans(cell, Epoch::MAX)
+            .ok()
+            .filter(|spans| !spans.is_empty())
+            .map(|spans| spans.iter().rev().map(|(epoch, _, _)| *epoch).collect());
+        let base = chain.as_ref().and_then(|chain| chain.first().copied());
         let held: Vec<(Epoch, u64)> = self
             .prefixes
             .range((cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX))
-            .filter(|(_, prefix)| !prefix.entries.is_empty())
+            .filter(|(_, prefix)| prefix.listed())
             .map(|((_, epoch), prefix)| (*epoch, prefix.newest_ms))
             .collect();
-        let base = held.last().map(|(epoch, _)| *epoch);
         let listed = held
             .iter()
             .filter(|(epoch, _)| Some(*epoch) < base)
@@ -474,7 +554,7 @@ impl Store {
                 newest_ms: *newest_ms,
             })
             .collect();
-        (base, listed, self.retired.get(cell).copied())
+        (chain, listed, self.retired.get(cell).copied())
     }
 
     /// An unconditional PUT of the retired mark.
@@ -488,6 +568,7 @@ impl Store {
             if let Some(prefix) = self.prefixes.get_mut(&(cell.to_string(), *epoch)) {
                 let deleted = std::mem::take(&mut prefix.entries);
                 prefix.gone.extend(deleted);
+                prefix.marker = false;
             }
         }
     }
@@ -502,8 +583,9 @@ impl Store {
         }
     }
 
-    /// Upload the database content of `epoch` by position. Returns how many
-    /// distinct processes have now written this prefix.
+    /// Upload the database content of `epoch` by position, from above the
+    /// paged epoch's cut. Returns every process that has now written this
+    /// prefix.
     pub fn put_ltx(
         &mut self,
         cell: &str,
@@ -513,9 +595,24 @@ impl Store {
     ) -> Vec<ProcId> {
         let key = self.prefix_key(cell, epoch);
         let prefix = self.prefixes.entry(key).or_default();
-        for (index, write) in content.iter().enumerate() {
+        for (index, write) in content.iter().enumerate().skip(prefix.cut as usize) {
             prefix.entries.insert(index as u64 + 1, *write);
         }
+        prefix.newest_ms = self.now_ms;
+        if !prefix.writers.contains(&proc) {
+            prefix.writers.push(proc);
+        }
+        prefix.writers.clone()
+    }
+
+    /// A paged activation's zero-page marker: the epoch continues the chain
+    /// below it from `cut`. Returns every process that has now written this
+    /// prefix.
+    pub fn put_marker(&mut self, cell: &str, epoch: Epoch, cut: u64, proc: ProcId) -> Vec<ProcId> {
+        let key = self.prefix_key(cell, epoch);
+        let prefix = self.prefixes.entry(key).or_default();
+        prefix.cut = cut;
+        prefix.marker = true;
         prefix.newest_ms = self.now_ms;
         if !prefix.writers.contains(&proc) {
             prefix.writers.push(proc);
@@ -532,21 +629,26 @@ impl Store {
             .collect()
     }
 
-    /// The content a restore at `epoch` reads: the newest prefix below it
-    /// that holds data. Every upload carries the whole database, so that
-    /// prefix alone is the chain.
-    pub fn read_chain(&self, cell: &str, epoch: Epoch) -> Option<Vec<WriteId>> {
+    /// The content a restore at `epoch` reads, through the chain of the
+    /// epochs below it: `None` when none is listed, `Err` when the chain has
+    /// no base.
+    pub fn read_chain(&self, cell: &str, epoch: Epoch) -> Result<Option<Vec<WriteId>>, ()> {
         if self.mutation == Mutation::SharedPrefix {
-            return self
+            return Ok(self
                 .prefixes
                 .get(&(cell.to_string(), 0))
-                .map(Prefix::content);
+                .map(Prefix::content));
         }
-        self.prefixes
-            .range((cell.to_string(), 0)..(cell.to_string(), epoch))
-            .rev()
-            .find(|(_, prefix)| !prefix.entries.is_empty())
-            .map(|(_, prefix)| prefix.content())
+        if self.mutation == Mutation::NewestBase {
+            return Ok(self
+                .prefixes
+                .range((cell.to_string(), 0)..(cell.to_string(), epoch))
+                .rev()
+                .find(|(_, prefix)| prefix.cut == 0 && !prefix.entries.is_empty())
+                .map(|(_, prefix)| prefix.content()));
+        }
+        let spans = self.spans(cell, epoch)?;
+        Ok((!spans.is_empty()).then(|| self.assemble(cell, &spans)))
     }
 
     pub fn prefix(&self, cell: &str, epoch: Epoch) -> Option<&Prefix> {

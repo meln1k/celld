@@ -261,6 +261,17 @@ impl Checker {
         }
     }
 
+    /// A restore listed objects for the cell but no chain down to TXID 1:
+    /// something deleted or never wrote the base the epochs above continue.
+    pub(super) fn on_unrestorable(&mut self, t: Time, id: ProcId, cell: &str, epoch: Epoch) {
+        self.flag(
+            t,
+            "unrestorable",
+            format!("{cell}/{epoch}"),
+            format!("p{id} found no chain to TXID 1 restoring {cell} at epoch {epoch}"),
+        );
+    }
+
     /// A process sheds on memory pressure after the faults healed and has
     /// started no eviction for a while, although it holds more than one heap
     /// and one fits under the resume line.
