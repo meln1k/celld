@@ -183,9 +183,10 @@ pub struct NodeLeaseRecord {
     /// `ownership_index_generation` and, as the same value, in
     /// `probe_public_key`.
     pub generation: String,
-    /// The folded node-log state: `None` means this session never opened
-    /// a fleet log — it never acked past the bucket. Anything not sealed
-    /// gates a takeover of this node's cells behind node-log recovery.
+    /// The folded node-log state: `None` means this session has not opened
+    /// a fleet log — it has not acked past the bucket yet. Anything not
+    /// sealed gates a takeover of this node's cells behind node-log
+    /// recovery, which seals a `None` so the session cannot open one later.
     pub log_state: Option<crate::log_tier::LogState>,
     /// Object version observed by the read. Empty only in synthetic events.
     pub etag: String,

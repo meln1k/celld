@@ -5454,9 +5454,10 @@ impl NodeLogManager {
     /// reconciliation names the displaced owner exactly like one confirmed
     /// by the CAS response — the v0 ambiguous-CAS window is closed. `None`
     /// means the consumed record was released or absent, which the release
-    /// path already proved durable. Absence of a log record is a proof (the
-    /// node never acked past the bucket); a sealed record means recovery
-    /// already ran; anything else runs it now.
+    /// path already proved durable. A missing lease is a proof (the node
+    /// never acked past the bucket); a lease without a log record becomes
+    /// one once sealed; a sealed record means recovery already ran;
+    /// anything else runs it now.
     pub async fn ensure_recovered(&self, prior: Option<&str>) -> anyhow::Result<()> {
         self.ensure_predecessors_recovered().await?;
         let Some(prior) = prior else {
@@ -5471,21 +5472,49 @@ impl NodeLogManager {
         // lease record holds at most one session's state — recovery-
         // before-install is what keeps a predecessor's Open state from
         // being replaced unrecovered — so a single GET decides.
-        let folded = read_record(&self.bucket, prior).await?;
-        let session = folded
-            .as_ref()
-            .map(|folded| format!("{prior}/{}", folded.wire.generation));
-        match log_tier::takeover_gate(folded.as_ref().map(|folded| &folded.record)) {
-            log_tier::TakeoverGate::BucketComplete => {}
-            log_tier::TakeoverGate::RecoverFirst => {
-                self.recover_as(
-                    &session.expect("a record implies a session"),
-                    RecoverMode::Boot,
-                )
-                .await?
-            }
+        for _attempt in 0..5 {
+            let Some(folded) = read_record(&self.bucket, prior).await? else {
+                if self.seal_absent_log(prior).await? {
+                    return Ok(());
+                }
+                continue;
+            };
+            let session = format!("{prior}/{}", folded.wire.generation);
+            return match log_tier::takeover_gate(Some(&folded.record)) {
+                log_tier::TakeoverGate::BucketComplete => Ok(()),
+                log_tier::TakeoverGate::RecoverFirst => {
+                    self.recover_as(&session, RecoverMode::Boot).await
+                }
+            };
         }
-        Ok(())
+        Err(anyhow!(
+            "sealing the absent log of {prior} lost every CAS race"
+        ))
+    }
+
+    /// Seal a dead lease that carries no log ([`log_tier::sealed_absent`]),
+    /// so its session cannot open one later through a renewal whose etag
+    /// still matches. `false` means the lease moved under the CAS: re-read.
+    async fn seal_absent_log(&self, node: &str) -> anyhow::Result<bool> {
+        let Some((bytes, token)) = self.bucket.get(&lease_key(node)).await? else {
+            return Ok(true);
+        };
+        let wire: crate::ownership_store::NodeLeaseWire = serde_json::from_slice(&bytes)?;
+        if wire.log.is_some() {
+            return Ok(false);
+        }
+        let now = crate::ownership_store::now_ms();
+        anyhow::ensure!(
+            wire.expires_ms <= now,
+            "refusing to take over from {node}: its lease is live again (expires in {}ms)",
+            wire.expires_ms.saturating_sub(now)
+        );
+        let sealed = log_tier::sealed_absent();
+        Ok(
+            write_dead_record(&self.bucket, node, &wire, &sealed, false, &token)
+                .await?
+                .is_some(),
+        )
     }
 
     fn shipper_batch_in_flight(shipper: &FleetShipper) -> bool {

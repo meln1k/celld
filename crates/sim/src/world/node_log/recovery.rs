@@ -246,8 +246,27 @@ impl World {
         key: u64,
         read: Option<(NodeLeaseRecord, Option<LogWire>)>,
     ) {
-        let Some((lease, Some(wire))) = read else {
-            return self.recovery_ended(id, key, Ended::Done);
+        let (lease, wire) = match read {
+            Some((lease, Some(wire))) => (lease, wire),
+            // A takeover seals a foreign lease that never opened a log: its
+            // session cannot open one afterwards through a stale renewal.
+            Some((lease, None))
+                if self.job(id, key).fences() && lease.node != self.node_name(id) =>
+            {
+                if lease.expires_ms > self.wall(id) {
+                    return self.recovery_ended(id, key, Ended::Failed);
+                }
+                let req = StoreReq::CasLeaseLog {
+                    node: lease.node,
+                    etag: lease.etag,
+                    log: LogWire {
+                        record: log_tier::sealed_absent(),
+                        active: false,
+                    },
+                };
+                return self.recovery_call(id, key, Step::Finish, req);
+            }
+            _ => return self.recovery_ended(id, key, Ended::Done),
         };
         let found = Found {
             session: Session::of_lease(&lease),

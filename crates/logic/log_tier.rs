@@ -266,11 +266,28 @@ pub fn finish_recovery(record: &LogRecord, cert: Offset) -> Option<LogRecord> {
 /// May a per-cell takeover of this node's cells treat the bucket as
 /// complete? Absence is a proof, not a guess: the record is created before
 /// the first fleet-durable ack and never deleted, so no record means the
-/// node never acknowledged anything the bucket does not hold.
+/// node never acknowledged anything the bucket does not hold. It stays a
+/// proof only while no record can appear, so a takeover first seals an
+/// expired lease that carries none ([`sealed_absent`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TakeoverGate {
     BucketComplete,
     RecoverFirst,
+}
+
+/// The record a takeover writes into a dead lease that carries no log. The
+/// CAS moves the lease's etag, so a session that still believes it holds
+/// the lease cannot open a log through a renewal: the renewal is rejected,
+/// its readback finds a record it never wrote, and the session fences.
+pub fn sealed_absent() -> LogRecord {
+    LogRecord {
+        epoch: 0,
+        ensemble: BTreeSet::new(),
+        tiered: 0,
+        state: LogState::Sealed,
+        claimant: None,
+        claimed_ms: None,
+    }
 }
 
 pub fn takeover_gate(record: Option<&LogRecord>) -> TakeoverGate {

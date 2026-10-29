@@ -10,8 +10,8 @@
 use celld_logic::wake::{AlarmSnapshot, AlarmSource, PublicationId};
 use celld_logic::{
     on_event, pressure, CasOutcome, Channel, Config, Effect, Event, Failure, LeaseCasOutcome,
-    LocalCell, NodeLeaseSpec, OwnerRecord, OwnershipOnEvict, ProofSource, RestoreOutcome, State,
-    Timer,
+    LocalCell, NodeLeaseRecord, NodeLeaseSpec, OwnerRecord, OwnershipOnEvict, ProofSource,
+    RestoreOutcome, State, Timer,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -407,4 +407,71 @@ fn a_full_node_sheds_a_cell_whose_alarm_is_near() {
     shell.observe_alarm("a", NOW_MS as i64 + 600_000);
     shell.serve(2, "b");
     shell.state.validate().expect("state invariant");
+}
+
+/// A takeover of a cell whose owner's lease expired without opening a log.
+/// That session can still believe it holds the lease, by its own clock or
+/// through a renewal that lands late, and open a log through a renewal
+/// whose etag still matches; its fleet proofs then acknowledge writes into
+/// the superseded epoch. The claim must wait for recovery, which seals the
+/// absent log and so moves the etag (seeds 863, 9258, 15037).
+#[test]
+fn a_takeover_seals_a_lease_that_never_opened_a_log() {
+    let mut shell = Shell::new(2, |effect| {
+        matches!(
+            effect,
+            Effect::ReadNodeLease { .. } | Effect::RecoverNodeLog { .. }
+        )
+    });
+    shell.start();
+    shell.owners.insert(
+        "c".into(),
+        OwnerRecord {
+            node: Some("n1".into()),
+            epoch: 3,
+            etag: "owned".into(),
+        },
+    );
+    shell.send(Event::RequestAt {
+        request: 1,
+        cell: "c".into(),
+        now_mono_ms: MONO_MS,
+    });
+    let Some(Effect::ReadNodeLease { op, .. }) = shell.held.pop() else {
+        panic!("expected a lease read: {:?}", shell.held);
+    };
+    let effects = shell.send(Event::NodeLeaseRead {
+        op,
+        now_ms: NOW_MS,
+        result: Ok(Some(NodeLeaseRecord {
+            node: "n1".into(),
+            addr: "n1".into(),
+            expires_ms: NOW_MS - 1,
+            peer_protocol: 1,
+            generation: "g1".into(),
+            log_state: None,
+            etag: "lease-n1".into(),
+        })),
+    });
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CasOwner { .. })),
+        "claimed before recovery: {effects:?}"
+    );
+    let Some(Effect::RecoverNodeLog { op, .. }) = shell.held.pop() else {
+        panic!("expected node-log recovery: {effects:?}");
+    };
+    let effects = shell.send(Event::NodeLogRecovered { op, result: Ok(()) });
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::CasOwner {
+                epoch: 4,
+                takeover: true,
+                ..
+            }
+        )),
+        "{effects:?}"
+    );
 }
