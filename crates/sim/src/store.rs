@@ -7,6 +7,7 @@
 //! instant; the latency and loss around that instant belong to the world.
 
 use celld_logic::drain::DrainToken;
+use celld_logic::epoch_gc::{self, ListedEpoch};
 use celld_logic::log_tier::LogRecord;
 use celld_logic::wake::{parse_entry_key, Retirement};
 use celld_logic::{CasGuard, CasOutcome, Epoch, LeaseCasOutcome, NodeLeaseRecord, OwnerRecord};
@@ -25,8 +26,13 @@ use crate::{Mutation, ProcId, WriteId};
 pub struct Prefix {
     pub entries: BTreeMap<u64, WriteId>,
     /// Every process that ever uploaded into this prefix. More than one is
-    /// two writers in one epoch.
+    /// two writers in one epoch. Epoch GC deletes the objects, not this.
     pub writers: Vec<ProcId>,
+    /// The bucket's time of the newest upload, which the GC grace reads.
+    pub newest_ms: u64,
+    /// What epoch GC deleted. Only `prefix_holds` reads it: a write proven
+    /// durable here stays proven once a later base carries it.
+    gone: BTreeMap<u64, WriteId>,
 }
 
 impl Prefix {
@@ -159,6 +165,10 @@ pub struct Store {
     owners: BTreeMap<String, OwnerEntry>,
     leases: BTreeMap<String, LeaseEntry>,
     prefixes: BTreeMap<(String, Epoch), Prefix>,
+    /// `cells/<cell>/ltx/retired.json`: epoch GC's retired mark.
+    retired: BTreeMap<String, Epoch>,
+    /// The bucket's clock, set before each operation applies.
+    pub now_ms: u64,
     pub claims: Vec<Claim>,
     /// `log/<node>/<generation>/bundle/…`: every row each session's bundle
     /// flushes carried, in flush order.
@@ -183,6 +193,8 @@ impl Store {
             owners: BTreeMap::new(),
             leases: BTreeMap::new(),
             prefixes: BTreeMap::new(),
+            retired: BTreeMap::new(),
+            now_ms: 0,
             claims: Vec::new(),
             bundles: BTreeMap::new(),
             bundled: BTreeSet::new(),
@@ -391,6 +403,7 @@ impl Store {
         for (position, write) in rows {
             prefix.entries.insert(*position, *write);
         }
+        prefix.newest_ms = self.now_ms;
         if !prefix.writers.contains(&writer) {
             prefix.writers.push(writer);
         }
@@ -414,16 +427,66 @@ impl Store {
             .map(|((_, epoch), prefix)| (*epoch, prefix.content()))
     }
 
-    /// Whether `row` is at its position in its epoch's prefix.
+    /// Whether `row` is at its position in its epoch's prefix, or was until
+    /// epoch GC deleted the prefix.
     pub fn prefix_holds(&self, row: &Row) -> bool {
-        self.prefix(&row.cell, row.epoch)
-            .is_some_and(|prefix| prefix.entries.get(&row.position) == Some(&row.write))
+        self.prefix(&row.cell, row.epoch).is_some_and(|prefix| {
+            [&prefix.entries, &prefix.gone]
+                .iter()
+                .any(|entries| entries.get(&row.position) == Some(&row.write))
+        })
     }
 
-    /// Whether the bucket holds `row`: in its prefix, or in some session's
-    /// bundle.
+    /// Whether the per-cell layout covers `row`: its prefix holds it, or
+    /// epoch GC retired its epoch (`covered_txid`).
+    pub fn covers(&self, row: &Row) -> bool {
+        self.prefix_holds(row) || epoch_gc::retired(row.epoch, self.retired.get(&row.cell).copied())
+    }
+
+    /// Whether the bucket holds `row`: the per-cell layout covers it, or
+    /// some session's bundle carries it.
     pub fn holds(&self, row: &Row) -> bool {
-        self.prefix_holds(row) || self.bundled.contains(row)
+        self.covers(row) || self.bundled.contains(row)
+    }
+
+    /// `scan_epochs`: the restore chain's base, every epoch below it with
+    /// objects, and the retired mark. Every upload carries the whole
+    /// database, so each epoch with objects opens at TXID 1, and the chain
+    /// is its newest such epoch alone.
+    // ponytail: no paged epochs, so no continuation chains; model them
+    // with the fill pinning when the sim pages cells.
+    pub fn scan_epochs(&self, cell: &str) -> (Option<Epoch>, Vec<ListedEpoch>, Option<Epoch>) {
+        let held: Vec<(Epoch, u64)> = self
+            .prefixes
+            .range((cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX))
+            .filter(|(_, prefix)| !prefix.entries.is_empty())
+            .map(|((_, epoch), prefix)| (*epoch, prefix.newest_ms))
+            .collect();
+        let base = held.last().map(|(epoch, _)| *epoch);
+        let listed = held
+            .iter()
+            .filter(|(epoch, _)| Some(*epoch) < base)
+            .map(|(epoch, newest_ms)| ListedEpoch {
+                epoch: *epoch,
+                newest_ms: *newest_ms,
+            })
+            .collect();
+        (base, listed, self.retired.get(cell).copied())
+    }
+
+    /// An unconditional PUT of the retired mark.
+    pub fn put_retired(&mut self, cell: &str, mark: Epoch) {
+        self.retired.insert(cell.to_string(), mark);
+    }
+
+    /// `delete_all` on each epoch prefix.
+    pub fn delete_epochs(&mut self, cell: &str, epochs: &[Epoch]) {
+        for epoch in epochs {
+            if let Some(prefix) = self.prefixes.get_mut(&(cell.to_string(), *epoch)) {
+                let deleted = std::mem::take(&mut prefix.entries);
+                prefix.gone.extend(deleted);
+            }
+        }
     }
 
     fn prefix_key(&self, cell: &str, epoch: Epoch) -> (String, Epoch) {
@@ -450,6 +513,7 @@ impl Store {
         for (index, write) in content.iter().enumerate() {
             prefix.entries.insert(index as u64 + 1, *write);
         }
+        prefix.newest_ms = self.now_ms;
         if !prefix.writers.contains(&proc) {
             prefix.writers.push(proc);
         }

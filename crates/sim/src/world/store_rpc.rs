@@ -42,6 +42,18 @@ pub(super) enum StoreReq {
         cell: String,
         epoch: Epoch,
     },
+    /// Epoch GC's listing of a cell's epoch prefixes.
+    ScanEpochs {
+        cell: String,
+    },
+    PutRetired {
+        cell: String,
+        mark: Epoch,
+    },
+    DeleteEpochs {
+        cell: String,
+        epochs: Vec<Epoch>,
+    },
     WakePut {
         key: String,
     },
@@ -120,6 +132,12 @@ pub(super) enum StoreRes {
     },
     Put,
     Chain(Option<Vec<WriteId>>),
+    /// The chain's base, the epochs below it, and the retired mark.
+    Epochs(
+        Option<Epoch>,
+        Vec<celld_logic::epoch_gc::ListedEpoch>,
+        Option<Epoch>,
+    ),
     Done,
     Keys(Vec<String>),
     Retirement(Option<(Retirement, u64)>),
@@ -312,6 +330,7 @@ impl World {
         let proc = entry.proc;
         let sender = entry.node;
         let node = self.nodes[sender].name.clone();
+        self.store.now_ms = WALL_EPOCH_MS + self.t;
         let result = match &entry.req {
             StoreReq::ReadOwner { cell } => StoreRes::Owner(self.store.read_owner(cell)),
             StoreReq::CasOwner {
@@ -398,6 +417,18 @@ impl World {
             }
             StoreReq::ReadChain { cell, epoch } => {
                 StoreRes::Chain(self.store.read_chain(cell, *epoch))
+            }
+            StoreReq::ScanEpochs { cell } => {
+                let (base, listed, mark) = self.store.scan_epochs(cell);
+                StoreRes::Epochs(base, listed, mark)
+            }
+            StoreReq::PutRetired { cell, mark } => {
+                self.store.put_retired(cell, *mark);
+                StoreRes::Done
+            }
+            StoreReq::DeleteEpochs { cell, epochs } => {
+                self.store.delete_epochs(cell, epochs);
+                StoreRes::Done
             }
             StoreReq::WakePut { key } => {
                 let key = key.clone();

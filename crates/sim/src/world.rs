@@ -24,6 +24,7 @@ mod alarms;
 mod checks;
 mod clients;
 mod faults;
+mod gc;
 mod handoff;
 mod lifecycle;
 mod node_log;
@@ -143,6 +144,8 @@ enum Work {
         op: OpId,
     },
     LoadTick,
+    /// Epoch GC visits every cell the process runs.
+    GcTick,
     /// A client sends a message on its socket.
     SocketMessage {
         websocket: u64,

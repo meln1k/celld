@@ -72,8 +72,16 @@ pub(super) enum LifeTask {
     TokenRead,
     TokenClaim,
     ReadyToken,
-    ReadyPeers { token: Option<DrainToken> },
+    ReadyPeers {
+        token: Option<DrainToken>,
+    },
     RebalancePeers,
+    /// Epoch GC, one step of a pass over `cell` at the owner's `epoch`.
+    Gc {
+        cell: String,
+        epoch: Epoch,
+        step: super::gc::GcStep,
+    },
 }
 
 impl World {
@@ -493,7 +501,7 @@ impl World {
     // -----------------------------------------------------------------------
     // Bucket calls
 
-    fn life_call(&mut self, id: ProcId, req: StoreReq, task: LifeTask) {
+    pub(super) fn life_call(&mut self, id: ProcId, req: StoreReq, task: LifeTask) {
         let key = self.next_task;
         self.next_task += 1;
         self.procs
@@ -523,6 +531,7 @@ impl World {
             }
             LifeTask::ReadyPeers { token } => self.ready_peers(id, token, result),
             LifeTask::RebalancePeers => self.rebalance_peers(id, result),
+            LifeTask::Gc { cell, epoch, step } => self.gc_step(id, cell, epoch, step, result),
         }
     }
 }

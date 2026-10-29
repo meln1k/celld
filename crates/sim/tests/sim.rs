@@ -458,6 +458,42 @@ fn a_worker_reported_finished_too_early_is_cut() {
     ));
 }
 
+/// Owners delete superseded epochs as soon as they may, on the fleet, where
+/// writes reach the per-cell layout late. No shutdowns and no balancing,
+/// whose open core findings would fail a seed before its plant is reached.
+fn collecting(seed: u64) -> SimConfig {
+    SimConfig {
+        lifecycle: Lifecycle::off(),
+        epoch_gc: Some(0),
+        fleet: true,
+        // Frequent evictions restore often, which is when a deleted
+        // epoch shows.
+        evict_gap_ms: Some((100, 600)),
+        ..SimConfig::swarm(seed)
+    }
+}
+
+#[test]
+fn collecting_fleets_pass_and_delete_epochs() {
+    let mut totals = celld_sim::Stats::default();
+    for seed in 0..8 {
+        let outcome = run(seed, &collecting(seed));
+        assert!(!outcome.failed(), "{}", report(&outcome));
+        totals.absorb(&outcome.stats);
+    }
+    assert!(totals.epochs_deleted > 0, "{totals:?}");
+}
+
+#[test]
+fn epoch_gc_that_takes_its_own_epoch_for_the_base_loses_a_write() {
+    assert!(caught_in(
+        collecting,
+        Mutation::GcBelowOwn,
+        0..16,
+        &["lost-write", "ack-before-durable"]
+    ));
+}
+
 #[test]
 fn a_waker_that_ignores_orphans_loses_an_alarm() {
     assert!(caught(Mutation::NoOrphanWake, 10, &["alarm-lost"]));

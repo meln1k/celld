@@ -94,6 +94,10 @@ impl World {
             let tick = self.net_rng.range(1, LOAD_SAMPLE_MS);
             self.work(id, tick, Work::RebalanceTick);
         }
+        if self.config.epoch_gc.is_some() {
+            let tick = self.net_rng.range(1, gc::GC_TICK_MS);
+            self.work(id, tick, Work::GcTick);
+        }
     }
 
     fn core_config(&self) -> Config {
@@ -219,6 +223,7 @@ impl World {
             Work::SocketClose { websocket } => self.socket_close(id, websocket),
             Work::WorkerEnd { request } => self.worker_end(id, request),
             Work::GateEnd { gate } => self.drive(id, Event::ActivityFinished { request: gate }),
+            Work::GcTick => self.gc_tick(id),
             Work::LoadTick => {
                 let proc = &self.procs[&id];
                 let load = pressure::Load {

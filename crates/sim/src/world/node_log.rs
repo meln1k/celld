@@ -534,7 +534,7 @@ impl World {
         // Only the per-cell layout counts: a sealed record tells every
         // future recovery there is nothing to gather. The retained bundle
         // scan covers the cells this process no longer holds a replica of.
-        let in_prefix = |row: &Row| self.store.prefix_holds(row);
+        let in_prefix = |row: &Row| self.store.covers(row);
         let per_cell_complete = proc
             .replicas
             .values()

@@ -28,7 +28,8 @@
 //! the same epoch on the open database ([`Deploys`]). Half runs work on
 //! resident runtimes besides routed requests ([`ResidentWork`]): WebSockets
 //! that pin or hibernate with their cell, output gates, and top-level
-//! Worker requests.
+//! Worker requests. Half the swarm's owners delete superseded epoch
+//! prefixes (`epoch_gc`).
 //!
 //! What it checks:
 //!
@@ -167,10 +168,14 @@ pub enum Mutation {
     /// The shell reports a resident Worker request finished as soon as it is
     /// routed, while it still runs.
     UnpinnedWorker,
+    /// Epoch GC plans one epoch above the owner's: it takes the owner's
+    /// epoch for the chain's base and keeps no margin below it, although
+    /// that epoch may have nothing in its prefix yet.
+    GcBelowOwn,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 22] = [
+    pub const ALL: [Mutation; 23] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
@@ -193,6 +198,7 @@ impl Mutation {
         Mutation::StaleGeneration,
         Mutation::UnreportedSocket,
         Mutation::UnpinnedWorker,
+        Mutation::GcBelowOwn,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -226,6 +232,7 @@ impl Mutation {
             Mutation::StaleGeneration => "stale-generation",
             Mutation::UnreportedSocket => "unreported-socket",
             Mutation::UnpinnedWorker => "unpinned-worker",
+            Mutation::GcBelowOwn => "gc-below-own",
         }
     }
 }
@@ -261,6 +268,9 @@ pub struct SimConfig {
     pub stops: Stops,
     pub deploys: Deploys,
     pub resident: ResidentWork,
+    /// Owners delete superseded epoch prefixes this long after their last
+    /// upload (`CELLD_LTX_RETENTION_SECS`), or never.
+    pub epoch_gc: Option<u64>,
     pub faults: Faults,
     pub mutation: Mutation,
     /// Keep a human-readable trace of every event and effect.
@@ -465,6 +475,7 @@ impl SimConfig {
             stops: Stops::off(),
             deploys: Deploys::off(),
             resident: ResidentWork::off(),
+            epoch_gc: None,
             faults: Faults::none(),
             mutation: Mutation::None,
             trace: false,
@@ -533,6 +544,7 @@ impl SimConfig {
             stops: Stops::off(),
             deploys: Deploys::off(),
             resident: ResidentWork::off(),
+            epoch_gc: None,
             faults,
             mutation: Mutation::None,
             trace: false,
@@ -571,6 +583,9 @@ impl SimConfig {
                 workers: *rng.pick(&[0.0, 30.0, 120.0]).unwrap(),
                 gates: *rng.pick(&[0.0, 0.3]).unwrap(),
             };
+        }
+        if rng.chance(0.5) {
+            config.epoch_gc = Some(*rng.pick(&[0, 2_000, 10_000]).unwrap());
         }
         config
     }
@@ -671,6 +686,8 @@ pub struct Stats {
     pub workers_routed: u64,
     /// Output gates the core admitted to the work that raised them.
     pub gates_admitted: u64,
+    /// Epoch prefixes epoch GC deleted.
+    pub epochs_deleted: u64,
 }
 
 impl Stats {
@@ -727,6 +744,7 @@ impl Stats {
             sockets_refused,
             workers_routed,
             gates_admitted,
+            epochs_deleted,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -778,6 +796,7 @@ impl Stats {
         self.sockets_refused += sockets_refused;
         self.workers_routed += workers_routed;
         self.gates_admitted += gates_admitted;
+        self.epochs_deleted += epochs_deleted;
     }
 }
 

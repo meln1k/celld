@@ -194,6 +194,16 @@ check is:
 
 `unreported-socket` and `unpinned-worker` cover this path.
 
+In half the swarm, owners also run epoch GC, deleting the epoch prefixes
+below their restore chain's base once a grace period has passed. The pass
+calls the core's `epoch_gc::plan` and keeps production's order: list and
+plan, read `own.json`, record the retired mark, delete. Rows below the mark
+count as covered for the node log, as `covered_txid` treats them. No check
+is new: a wrong delete shows up as a lost write at the next restore.
+`gc-below-own` covers this path. Every upload in the model carries the
+whole database, so every epoch with objects opens at TXID 1. Paged epochs,
+which continue the chain below them, are not modelled.
+
 It does not yet model deletion or memory pressure.
 
 ### The shell on a simulated runtime
