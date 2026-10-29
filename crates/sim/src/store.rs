@@ -148,6 +148,9 @@ pub struct LeaseLoad {
     pub paced_handoff: bool,
     /// The process is handing its cells away.
     pub draining: bool,
+    /// The memory model's sample, when the run has one: the process is
+    /// shedding, its last sample cleared every resume line, and its bytes.
+    pub memory: Option<(bool, bool, u64)>,
 }
 
 /// One applied ownership install, in store order.

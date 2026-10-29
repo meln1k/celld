@@ -172,7 +172,11 @@ impl World {
             }
             Effect::EnsureDurable {
                 op, cell, epoch, ..
-            } => self.await_durable(id, op, &cell, epoch, Proof::Everything, Failure::Definite),
+            } => {
+                // Every eviction starts here.
+                self.shed_progress(id);
+                self.await_durable(id, op, &cell, epoch, Proof::Everything, Failure::Definite)
+            }
             Effect::AwaitDurable {
                 op,
                 cell,

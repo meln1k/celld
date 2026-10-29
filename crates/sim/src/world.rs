@@ -27,6 +27,7 @@ mod faults;
 mod gc;
 mod handoff;
 mod lifecycle;
+mod memory;
 mod node_log;
 mod process;
 mod replica;
@@ -410,6 +411,8 @@ struct Proc {
     workers: BTreeMap<RequestId, (String, Epoch)>,
     /// Output gates raised, by gate request, with the handler they hold.
     gates: BTreeMap<RequestId, RequestId>,
+    /// The heap each runtime started in, and memory no cell owns.
+    memory: memory::ProcMemory,
     halting: bool,
 }
 
@@ -646,6 +649,10 @@ impl World {
             (FaultKind::ClockStep, faults.clock_steps),
             (FaultKind::Wedge, self.config.stops.wedges),
             (FaultKind::Deploy, self.config.deploys.rate),
+            (
+                FaultKind::Surge,
+                self.config.memory.as_ref().map_or(0.0, |m| m.surges),
+            ),
         ] {
             if rate > 0.0 {
                 let gap = self.fault_gap(rate);

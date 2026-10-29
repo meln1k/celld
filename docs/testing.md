@@ -204,7 +204,22 @@ is new: a wrong delete shows up as a lost write at the next restore.
 whole database, so every epoch with objects opens at TXID 1. Paged epochs,
 which continue the chain below them, are not modelled.
 
-It does not yet model deletion or memory pressure.
+In half the swarm, processes also hold memory against the pressure
+ceilings (`CELLD_MAX_RSS_MB` and 95% of the machine). A process holds a
+fixed base, one heap per isolate and a realm per cell. Placement packs cells
+into the fullest heap with room, as `place_cell` does, and tells the core
+which heap each runtime started in. A heap comes back only when its last
+cell leaves. Surges add memory no cell owns for a few seconds. Load samples
+report the total, so the core's latch, walk down and admission gate run on
+it, and the lease reports it to peers that place cells. The ceiling always
+leaves one full heap under the resume line. The check is:
+
+- **pressure-wedge**: after faults heal, a process that is shedding and
+  holds more than one heap starts no eviction for 10 s.
+
+`unplaced-heaps` covers this path.
+
+It does not yet model deletion.
 
 ### The shell on a simulated runtime
 

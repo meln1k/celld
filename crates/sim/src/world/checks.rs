@@ -261,6 +261,21 @@ impl Checker {
         }
     }
 
+    /// A process sheds on memory pressure after the faults healed and has
+    /// started no eviction for a while, although it holds more than one heap
+    /// and one fits under the resume line.
+    pub(super) fn on_pressure_wedge(&mut self, t: Time, id: ProcId, mb: u64, residents: usize) {
+        self.flag(
+            t,
+            "pressure-wedge",
+            format!("{id}"),
+            format!(
+                "p{id} sheds at {mb} MB with {residents} residents and has started \
+                 no eviction since faults healed"
+            ),
+        );
+    }
+
     /// An eviction or a swap stopped a runtime that live sockets or Worker
     /// requests still held.
     pub(super) fn on_runtime_cut(

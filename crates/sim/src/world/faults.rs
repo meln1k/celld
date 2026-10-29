@@ -10,6 +10,7 @@ pub(super) enum FaultKind {
     ClockStep,
     Wedge,
     Deploy,
+    Surge,
 }
 
 impl World {
@@ -81,6 +82,7 @@ impl World {
                     self.note(|| format!("wedge the host of p{id} for {duration} ms"));
                 }
                 FaultKind::Deploy => self.deploy(id),
+                FaultKind::Surge => self.surge(id),
             }
         }
         let rate = match kind {
@@ -90,6 +92,7 @@ impl World {
             FaultKind::ClockStep => faults.clock_steps,
             FaultKind::Wedge => self.config.stops.wedges,
             FaultKind::Deploy => self.config.deploys.rate,
+            FaultKind::Surge => self.config.memory.as_ref().map_or(0.0, |m| m.surges),
         };
         let gap = self.fault_gap(rate);
         self.after(gap, What::Fault(kind));

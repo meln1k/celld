@@ -6,7 +6,7 @@
 //! sweep here; the CLI runs any range (`--seeds 0..10000`).
 
 use celld_sim::{
-    run, Coverage, Deploys, Lifecycle, Mutation, Outcome, ResidentWork, SimConfig, Stops,
+    run, Coverage, Deploys, Lifecycle, Memory, Mutation, Outcome, ResidentWork, SimConfig, Stops,
 };
 
 fn report(outcome: &Outcome) -> String {
@@ -175,6 +175,7 @@ fn retiring_a_wake_entry_without_proof_strands_an_alarm() {
 fn fleet(seed: u64) -> SimConfig {
     SimConfig {
         fleet: true,
+        memory: None,
         ..SimConfig::swarm(seed)
     }
 }
@@ -223,6 +224,7 @@ fn shutdowns(seed: u64) -> SimConfig {
         evict_gap_ms: None,
         stops: Stops::off(),
         resident: ResidentWork::off(),
+        memory: None,
         ..SimConfig::swarm(seed)
     }
 }
@@ -295,6 +297,7 @@ fn stopping(seed: u64) -> SimConfig {
             operator: true,
             quiet: true,
         },
+        memory: None,
         ..SimConfig::swarm(seed)
     }
 }
@@ -356,6 +359,7 @@ fn deploying(seed: u64) -> SimConfig {
             max_age_ms: 1_000,
             eager: false,
         },
+        memory: None,
         ..SimConfig::swarm(seed)
     }
 }
@@ -409,6 +413,7 @@ fn busy(seed: u64) -> SimConfig {
             workers: 120.0,
             gates: 0.3,
         },
+        memory: None,
         ..SimConfig::swarm(seed)
     }
 }
@@ -469,6 +474,7 @@ fn collecting(seed: u64) -> SimConfig {
         // Frequent evictions restore often, which is when a deleted
         // epoch shows.
         evict_gap_ms: Some((100, 600)),
+        memory: None,
         ..SimConfig::swarm(seed)
     }
 }
@@ -512,6 +518,7 @@ fn crowded(seed: u64) -> SimConfig {
     // Cells move only by eviction, crash and takeover, so a pinned slot
     // stays pinned.
     config.lifecycle = Lifecycle::off();
+    config.memory = None;
     config
 }
 
@@ -548,4 +555,44 @@ fn a_seed_replays_exactly() {
     assert!(!traced.trace.is_empty());
     let other = run(seed + 1, &SimConfig::swarm(seed));
     assert_ne!(first.trace_hash, other.trace_hash);
+}
+
+/// Nodes whose ceiling holds one full heap of two cells under its resume
+/// line, so every fleet sheds, and surges push them over.
+fn pressured(seed: u64) -> SimConfig {
+    SimConfig {
+        memory: Some(Memory {
+            base_mb: 200,
+            heap_mb: 48,
+            cell_mb: 6,
+            cells_per_heap: 2,
+            max_rss_mb: 325,
+            total_mb: 406,
+            surges: 10.0,
+            max_surge_mb: 400,
+        }),
+        ..SimConfig::swarm(seed)
+    }
+}
+
+#[test]
+fn pressured_fleets_pass_and_give_heaps_back() {
+    let mut totals = celld_sim::Stats::default();
+    for seed in 0..8 {
+        let outcome = run(seed, &pressured(seed));
+        assert!(!outcome.failed(), "{}", report(&outcome));
+        totals.absorb(&outcome.stats);
+    }
+    assert!(totals.shed_samples > 0, "{totals:?}");
+    assert!(totals.heaps_freed > 0, "{totals:?}");
+}
+
+#[test]
+fn a_walk_down_blind_to_heaps_stops_shedding() {
+    assert!(caught_in(
+        pressured,
+        Mutation::UnplacedHeaps,
+        0..16,
+        &["pressure-wedge", "liveness"]
+    ));
 }

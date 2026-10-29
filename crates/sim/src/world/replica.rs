@@ -239,6 +239,10 @@ impl World {
             }
             None => Err(Failure::Definite),
         };
+        let isolate = result
+            .is_ok()
+            .then(|| self.place_runtime(id, &cell, epoch))
+            .flatten();
         let delay = self.net_rng.range(1, 10);
         if result.is_ok() {
             // The isolate adopts the database and reports its alarm first.
@@ -249,7 +253,7 @@ impl World {
             delay,
             Work::Deliver(Event::RuntimeStarted {
                 op,
-                isolate: None,
+                isolate,
                 generation,
                 result,
             }),

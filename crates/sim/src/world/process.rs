@@ -57,6 +57,7 @@ impl World {
                 sockets: BTreeMap::new(),
                 workers: BTreeMap::new(),
                 gates: BTreeMap::new(),
+                memory: Default::default(),
                 halting: false,
             },
         );
@@ -119,7 +120,13 @@ impl World {
             owner_log_recovery_attempts: 240,
             alarm_resident_ms: self.config.alarm_resident_ms,
             idle_evict_ms: self.config.idle_evict_ms,
-            pressure: pressure::PressureConfig::from_limits(None, Some(0)),
+            pressure: match &self.config.memory {
+                Some(memory) => pressure::PressureConfig::from_limits(
+                    Some(memory.total_mb * super::memory::MB),
+                    Some(memory.max_rss_mb),
+                ),
+                None => pressure::PressureConfig::from_limits(None, Some(0)),
+            },
         }
     }
 
@@ -225,11 +232,13 @@ impl World {
             Work::GateEnd { gate } => self.drive(id, Event::ActivityFinished { request: gate }),
             Work::GcTick => self.gc_tick(id),
             Work::LoadTick => {
+                self.prune_heaps(id);
+                let bytes = self.memory_bytes(id);
                 let proc = &self.procs[&id];
                 let load = pressure::Load {
                     resident_cells: proc.state.residents().len(),
-                    rss_bytes: 0,
-                    in_use_bytes: 0,
+                    rss_bytes: bytes,
+                    in_use_bytes: bytes,
                     cgroup_working_set_bytes: None,
                     cgroup_current_bytes: None,
                     container_reserved_bytes: 0,
@@ -241,6 +250,7 @@ impl World {
                         now_mono_ms: 0,
                     },
                 );
+                self.check_pressure(id);
                 self.work(id, LOAD_SAMPLE_MS, Work::LoadTick);
             }
             Work::ClientArrive {

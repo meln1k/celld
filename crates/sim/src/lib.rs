@@ -172,10 +172,14 @@ pub enum Mutation {
     /// epoch for the chain's base and keeps no margin below it, although
     /// that epoch may have nothing in its prefix yet.
     GcBelowOwn,
+    /// The shell never tells the core which heap a runtime started in, so a
+    /// walk down cannot see that emptying a heap returns most of a cell's
+    /// cost.
+    UnplacedHeaps,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 23] = [
+    pub const ALL: [Mutation; 24] = [
         Mutation::SkipVerifyOwnership,
         Mutation::ReuseOlderSnapshot,
         Mutation::SharedPrefix,
@@ -199,6 +203,7 @@ impl Mutation {
         Mutation::UnreportedSocket,
         Mutation::UnpinnedWorker,
         Mutation::GcBelowOwn,
+        Mutation::UnplacedHeaps,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -233,6 +238,7 @@ impl Mutation {
             Mutation::UnreportedSocket => "unreported-socket",
             Mutation::UnpinnedWorker => "unpinned-worker",
             Mutation::GcBelowOwn => "gc-below-own",
+            Mutation::UnplacedHeaps => "unplaced-heaps",
         }
     }
 }
@@ -271,6 +277,9 @@ pub struct SimConfig {
     /// Owners delete superseded epoch prefixes this long after their last
     /// upload (`CELLD_LTX_RETENTION_SECS`), or never.
     pub epoch_gc: Option<u64>,
+    /// Memory the nodes hold against the pressure ceilings, or none: then
+    /// every sample reports nothing and pressure shedding never engages.
+    pub memory: Option<Memory>,
     pub faults: Faults,
     pub mutation: Mutation,
     /// Keep a human-readable trace of every event and effect.
@@ -369,6 +378,31 @@ impl Deploys {
             eager: false,
         }
     }
+}
+
+/// What a node's memory is made of, and the ceilings it is held to
+/// (`CELLD_MAX_RSS_MB` and the machine's size). Cells share V8 heaps, and a
+/// heap comes back only when its last cell leaves, so most of what a walk
+/// down returns comes from emptying heaps.
+#[derive(Clone, Debug)]
+pub struct Memory {
+    /// What the process holds with no cell at all.
+    pub base_mb: u64,
+    /// One isolate's heap.
+    pub heap_mb: u64,
+    /// One cell's realm inside its heap.
+    pub cell_mb: u64,
+    /// `PoolLimits::max_cells`: placement packs this many cells into a heap
+    /// before it builds another.
+    pub cells_per_heap: usize,
+    /// `CELLD_MAX_RSS_MB`, the ordinary ceiling.
+    pub max_rss_mb: u64,
+    /// The machine. The absolute cap is 95% of it.
+    pub total_mb: u64,
+    /// Surges per simulated minute across the fleet, during the chaos
+    /// window: memory no cell owns, held for a few seconds.
+    pub surges: f64,
+    pub max_surge_mb: u64,
 }
 
 /// Work that runs on a resident runtime besides routed requests: WebSockets,
@@ -476,6 +510,7 @@ impl SimConfig {
             deploys: Deploys::off(),
             resident: ResidentWork::off(),
             epoch_gc: None,
+            memory: None,
             faults: Faults::none(),
             mutation: Mutation::None,
             trace: false,
@@ -545,6 +580,7 @@ impl SimConfig {
             deploys: Deploys::off(),
             resident: ResidentWork::off(),
             epoch_gc: None,
+            memory: None,
             faults,
             mutation: Mutation::None,
             trace: false,
@@ -586,6 +622,29 @@ impl SimConfig {
         }
         if rng.chance(0.5) {
             config.epoch_gc = Some(*rng.pick(&[0, 2_000, 10_000]).unwrap());
+        }
+        if rng.chance(0.5) {
+            let (base_mb, heap_mb, cell_mb) = (200, 48, 6);
+            let cells_per_heap = *rng.pick(&[1, 2, 4]).unwrap();
+            // The resume line (80% of the ceiling) leaves room for at least
+            // one full heap, so a walk down can always get under it once
+            // a surge passes. A lower ceiling latches for good, which the
+            // core does on purpose.
+            let resume_mb = base_mb
+                + heap_mb * rng.range(1, 4)
+                + cell_mb * cells_per_heap as u64
+                + rng.range(0, 40);
+            let max_rss_mb = resume_mb * 5 / 4;
+            config.memory = Some(Memory {
+                base_mb,
+                heap_mb,
+                cell_mb,
+                cells_per_heap,
+                max_rss_mb,
+                total_mb: max_rss_mb * 5 / 4,
+                surges: *rng.pick(&[0.0, 3.0, 10.0]).unwrap(),
+                max_surge_mb: *rng.pick(&[100, 400]).unwrap(),
+            });
         }
         config
     }
@@ -688,6 +747,10 @@ pub struct Stats {
     pub gates_admitted: u64,
     /// Epoch prefixes epoch GC deleted.
     pub epochs_deleted: u64,
+    /// Load samples that left a node shedding on memory pressure.
+    pub shed_samples: u64,
+    /// Heaps whose last cell left.
+    pub heaps_freed: u64,
 }
 
 impl Stats {
@@ -745,6 +808,8 @@ impl Stats {
             workers_routed,
             gates_admitted,
             epochs_deleted,
+            shed_samples,
+            heaps_freed,
         } = other;
         self.events += events;
         self.requests += requests;
@@ -797,6 +862,8 @@ impl Stats {
         self.workers_routed += workers_routed;
         self.gates_admitted += gates_admitted;
         self.epochs_deleted += epochs_deleted;
+        self.shed_samples += shed_samples;
+        self.heaps_freed += heaps_freed;
     }
 }
 

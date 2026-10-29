@@ -231,7 +231,7 @@ impl Report {
 fn config_summary(config: &SimConfig) -> String {
     format!(
         "nodes={} cells={} ttl={} max_resident={} sticky={} alarms={} alarm_resident_ms={} \
-         wake_tick_ms={} fleet={} faults={:?}",
+         wake_tick_ms={} fleet={} memory={:?} faults={:?}",
         config.nodes,
         config.cells,
         config.ttl_ms,
@@ -241,6 +241,7 @@ fn config_summary(config: &SimConfig) -> String {
         config.alarm_resident_ms,
         config.wake_tick_ms,
         config.fleet,
+        config.memory,
         config.faults
     )
 }

@@ -101,6 +101,10 @@ impl World {
             },
             paced_handoff: hands_off,
             draining: state.draining(),
+            memory: self.config.memory.as_ref().map(|_| {
+                let bytes = self.memory_bytes(id);
+                (state.shedding(), state.memory_headroom(), bytes)
+            }),
         }
     }
 
