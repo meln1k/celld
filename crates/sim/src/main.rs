@@ -1,7 +1,8 @@
-//! `celld-sim [--seed N | --seeds A..B] [--crashes PER_MINUTE | --chaos] [--trace]`
+//! `celld-sim [--seed N | --seeds A..B] [--crashes PER_MINUTE | --chaos | --swarm] [--trace]`
 //!
 //! One seed prints what happened. A range prints one line per failing seed,
-//! with its first violation or panic, then a count.
+//! with its first violation or panic, then a count. `--swarm` draws each
+//! seed's configuration from the seed itself.
 
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
@@ -12,6 +13,7 @@ fn main() {
     let mut seed = 0;
     let mut seeds = None;
     let mut config = SimConfig::calm();
+    let (mut swarm, mut trace) = (false, false);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -21,7 +23,8 @@ fn main() {
                 let (a, b) = range.split_once("..").expect("--seeds A..B");
                 seeds = Some(a.parse::<u64>().unwrap()..b.parse::<u64>().unwrap());
             }
-            "--trace" => config.trace = true,
+            "--trace" => trace = true,
+            "--swarm" => swarm = true,
             "--chaos" => config = SimConfig::chaos(),
             "--crashes" => {
                 let rate = args.next().and_then(|s| s.parse().ok());
@@ -30,13 +33,21 @@ fn main() {
             other => panic!("unknown argument {other}"),
         }
     }
+    let config_for = |seed| SimConfig {
+        trace,
+        ..if swarm {
+            SimConfig::swarm(seed)
+        } else {
+            config.clone()
+        }
+    };
     if let Some(seeds) = seeds {
         // A core panic is caught and reported per seed; the default hook
         // would also print each one to stderr.
         std::panic::set_hook(Box::new(|_| {}));
         let (total, mut failed) = (seeds.end - seeds.start, 0);
         for seed in seeds {
-            let outcome = run(seed, &config);
+            let outcome = run(seed, &config_for(seed));
             let first = outcome.panic.clone().or_else(|| {
                 let v = outcome.violations.first()?;
                 Some(format!("t={} {}: {}", v.at_ms, v.kind, v.detail))
@@ -48,6 +59,10 @@ fn main() {
         }
         println!("{failed} of {total} seeds failed");
         std::process::exit(i32::from(failed > 0));
+    }
+    let config = config_for(seed);
+    if swarm {
+        println!("{config:?}");
     }
     let outcome = run(seed, &config);
     for line in &outcome.trace {

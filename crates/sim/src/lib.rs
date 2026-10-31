@@ -43,6 +43,15 @@ pub struct SimConfig {
     pub request_gap_ms: (u64, u64),
     /// Share of requests whose handler commits a write.
     pub write_probability: f64,
+    /// The core's residency cap: residents plus cells being activated.
+    pub max_resident: usize,
+    /// Cold activations one node runs at once.
+    pub max_activations: usize,
+    /// An evicted cell keeps its ownership record (`Sticky`) instead of
+    /// being released to the fleet.
+    pub sticky_eviction: bool,
+    /// Give back a cell nobody has used for this long.
+    pub idle_evict_ms: Option<u64>,
     /// Keep a human-readable line for every event and effect.
     pub trace: bool,
 }
@@ -93,6 +102,10 @@ impl SimConfig {
             store_latency_ms: (2, 20),
             request_gap_ms: (5, 60),
             write_probability: 0.6,
+            max_resident: 4,
+            max_activations: 4,
+            sticky_eviction: false,
+            idle_evict_ms: None,
             trace: false,
         }
     }
@@ -135,6 +148,63 @@ impl SimConfig {
                 store_spike_ms: 3_000,
             },
             ..Self::crashing(3.0)
+        }
+    }
+
+    /// One configuration drawn from the seed (swarm testing). Each seed
+    /// turns on a different subset of faults at different strengths, and
+    /// sizes the fleet and the core differently, so a sweep reaches
+    /// combinations that one fixed mix would rarely produce: a run with
+    /// only partitions finds what a run full of crashes hides.
+    ///
+    /// The draw uses its own stream, so the run itself replays exactly as
+    /// it would with the same config passed by hand.
+    pub fn swarm(seed: u64) -> Self {
+        let mut rng = Rng::new(seed ^ 0x5357_4152_4d00_0000);
+        let r = &mut rng;
+        // A fault rate, or zero: each fault is on in about half the seeds.
+        let maybe = |r: &mut Rng, lo: u64, hi: u64| {
+            let rate = r.range(lo, hi) as f64;
+            if r.chance(0.5) {
+                rate
+            } else {
+                0.0
+            }
+        };
+        let either = |r: &mut Rng, p: f64| if r.chance(0.5) { p } else { 0.0 };
+        let ttl_ms = *r.pick(&[2_000, 3_000, 5_000, 10_000]).unwrap();
+        let faults = Faults {
+            crashes: maybe(r, 1, 6),
+            wipe_probability: either(r, 0.3),
+            pauses: maybe(r, 1, 8),
+            max_pause_ms: ttl_ms * r.range(1, 3),
+            suspend_probability: either(r, 0.5),
+            partitions: maybe(r, 1, 6),
+            max_partition_ms: ttl_ms * r.range(1, 3),
+            clock_steps: maybe(r, 1, 4),
+            max_clock_step_ms: r.range(100, 3_000),
+            max_skew_ms: *r.pick(&[0, 50, 300]).unwrap(),
+            store_definite: either(r, 0.02),
+            store_lost_request: either(r, 0.02),
+            store_lost_response: either(r, 0.03),
+            store_spike_probability: either(r, 0.02),
+            store_spike_ms: r.range(500, 4_000),
+        };
+        Self {
+            nodes: r.range(2, 5) as usize,
+            cells: r.range(2, 10) as usize,
+            ttl_ms,
+            duration_ms: 45_000,
+            chaos_ms: 20_000,
+            faults,
+            store_latency_ms: (1, *r.pick(&[10, 40, 120]).unwrap()),
+            request_gap_ms: (2, r.range(20, 120)),
+            write_probability: 0.6,
+            max_resident: r.range(2, 8) as usize,
+            max_activations: r.range(1, 4) as usize,
+            sticky_eviction: r.chance(0.5),
+            idle_evict_ms: r.chance(0.3).then(|| r.range(500, 5_000)),
+            trace: false,
         }
     }
 }

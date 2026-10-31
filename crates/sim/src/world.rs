@@ -50,6 +50,11 @@ use shell::{Slot, StoreReq};
 
 type Time = u64;
 
+/// The core's deadline for an operation, and the shell's for its own work.
+const OPERATION_DEADLINE_MS: u64 = 15_000;
+/// How often a process samples its load (`LOAD_SAMPLE_PERIOD`, main.rs).
+const LOAD_SAMPLE_MS: u64 = 1_000;
+
 /// Simulated time zero on the wall clock.
 const WALL_EPOCH_MS: u64 = 1_800_000_000_000;
 const PEER_PROTOCOL: u16 = 1;
@@ -129,6 +134,8 @@ enum Work {
         epoch: Epoch,
         chain: Option<Vec<WriteId>>,
     },
+    /// The process samples its load and tells its core.
+    LoadSample,
     /// A handler commits its write.
     HandlerCommit { request: RequestId },
     /// A handler returns its response.
@@ -164,10 +171,10 @@ struct Node {
 }
 
 impl Node {
-    fn new(index: usize, inc: u64, mono_base: u64) -> Self {
+    fn new(index: usize, inc: u64, mono_base: u64, config: Config) -> Self {
         let name = format!("n{index}");
         Self {
-            state: State::new(name.clone(), core_config()),
+            state: State::new(name.clone(), config),
             name,
             inc,
             up: false,
@@ -190,6 +197,8 @@ pub struct World {
     config: SimConfig,
     t: Time,
     seq: u64,
+    /// The core configuration every process starts with.
+    core: Config,
     agenda: BTreeMap<(Time, u64), Item>,
     store: Store,
     nodes: Vec<Node>,
@@ -229,8 +238,9 @@ impl World {
         let skews = (0..config.nodes)
             .map(|_| fault_rng.range(0, 2 * skew) as i64 - skew as i64)
             .collect();
+        let core = core_config(&config);
         let nodes = (0..config.nodes)
-            .map(|index| Node::new(index, 0, 0))
+            .map(|index| Node::new(index, 0, 0, core))
             .collect();
         let disks = (0..config.nodes).map(|_| Disk::default()).collect();
         let partitions = vec![None; config.nodes];
@@ -239,6 +249,7 @@ impl World {
             config,
             t: 0,
             seq: 0,
+            core,
             agenda: BTreeMap::new(),
             store: Store::default(),
             nodes,
@@ -375,6 +386,7 @@ impl World {
                 epoch,
                 chain,
             } => self.chain_read(node, op, cell, epoch, chain),
+            Work::LoadSample => self.sample_load(node),
             Work::HandlerCommit { request } => self.handler_commit(node, request),
             Work::HandlerEnd { request } => self.handler_end(node, request),
         }
@@ -392,7 +404,7 @@ impl World {
         let mono_base = self.net_rng.range(1_000_000_000, 2_000_000_000);
         self.nodes[node] = Node {
             up: true,
-            ..Node::new(node, inc, mono_base)
+            ..Node::new(node, inc, mono_base, self.core)
         };
         self.note(|| format!("start n{node}#{inc}"));
         let spec = NodeLeaseSpec {
@@ -408,6 +420,28 @@ impl World {
             spec,
         };
         self.drive(node, event);
+        let delay = self.net_rng.range(1, LOAD_SAMPLE_MS);
+        self.work(node, delay, Work::LoadSample);
+    }
+
+    /// Production's periodic sampler. The simulation has no memory to
+    /// measure, so only the cell count varies, and the node never reads as
+    /// pressured; the sample still drives idle eviction.
+    fn sample_load(&mut self, node: usize) {
+        let load = pressure::Load {
+            resident_cells: self.nodes[node].state.occupied(),
+            rss_bytes: 0,
+            in_use_bytes: 0,
+            cgroup_working_set_bytes: None,
+            cgroup_current_bytes: None,
+            container_reserved_bytes: 0,
+        };
+        let event = Event::LoadSampled {
+            load,
+            now_mono_ms: 0,
+        };
+        self.drive(node, event);
+        self.work(node, LOAD_SAMPLE_MS, Work::LoadSample);
     }
 
     /// The process on `node` dies. Its open databases stay on disk as it
@@ -420,7 +454,7 @@ impl World {
         let who = self.who(node);
         self.note(|| format!("crash {who}{}", if wipe { " (disk wiped)" } else { "" }));
         let inc = self.nodes[node].inc;
-        let dead = std::mem::replace(&mut self.nodes[node], Node::new(node, inc, 0));
+        let dead = std::mem::replace(&mut self.nodes[node], Node::new(node, inc, 0, self.core));
         self.close_replicas(node, dead.replicas);
         if wipe {
             self.disks[node] = Disk::default();
@@ -501,21 +535,25 @@ impl World {
     }
 }
 
-fn core_config() -> Config {
+fn core_config(config: &SimConfig) -> Config {
     Config {
-        max_resident: 4,
-        max_activations: 4,
+        max_resident: config.max_resident,
+        max_activations: config.max_activations,
         max_evictions: 2,
         max_releases: 2,
         max_outbound_websockets: 32,
-        ownership_on_evict: OwnershipOnEvict::Release,
+        ownership_on_evict: if config.sticky_eviction {
+            OwnershipOnEvict::Sticky
+        } else {
+            OwnershipOnEvict::Release
+        },
         require_node_lease: true,
         peer_protocol: PEER_PROTOCOL,
-        operation_deadline_ms: Some(15_000),
+        operation_deadline_ms: Some(OPERATION_DEADLINE_MS),
         owner_log_recovery_backoff_ms: 1_000,
         owner_log_recovery_attempts: 240,
         alarm_resident_ms: 3_600_000,
-        idle_evict_ms: None,
+        idle_evict_ms: config.idle_evict_ms,
         pressure: pressure::PressureConfig::from_limits(None, None),
     }
 }

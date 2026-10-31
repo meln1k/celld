@@ -19,7 +19,7 @@
 use celld_logic::routing::{Attempt, Dispatcher};
 use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route};
 
-use super::{core_config, Item, Time, Work, World};
+use super::{Item, Time, Work, World, OPERATION_DEADLINE_MS};
 use crate::WriteId;
 
 /// When clients start sending. Nodes need a few round trips for their
@@ -70,12 +70,11 @@ impl RouteRetry {
     const MAX_WAIT_MS: u64 = 250;
 
     fn new(now: Time) -> Self {
-        let deadline_ms = core_config().operation_deadline_ms.unwrap();
         Self {
             dispatcher: Dispatcher::default(),
             generation: None,
             blocked: false,
-            deadline: now + deadline_ms,
+            deadline: now + OPERATION_DEADLINE_MS,
             next_wait_ms: Self::INITIAL_WAIT_MS,
         }
     }

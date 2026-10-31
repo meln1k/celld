@@ -60,7 +60,7 @@ impl World {
             self.crash(node, true);
         }
         let node = self.nodes.len();
-        self.nodes.push(Node::new(node, 0, 0));
+        self.nodes.push(Node::new(node, 0, 0, self.core));
         self.disks.push(Disk::default());
         self.skews.push(0);
         self.partitions.push(None);

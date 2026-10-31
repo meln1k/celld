@@ -548,7 +548,8 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
         Event::NodeLeaseCasCompleted { now_mono_ms, .. }
         | Event::RequestAt { now_mono_ms, .. }
         | Event::CapacityRequestAt { now_mono_ms, .. }
-        | Event::OutputAt { now_mono_ms, .. } => *now_mono_ms = mono,
+        | Event::OutputAt { now_mono_ms, .. }
+        | Event::LoadSampled { now_mono_ms, .. } => *now_mono_ms = mono,
         Event::OwnerRead { now_ms, .. } | Event::NodeLeaseRead { now_ms, .. } => *now_ms = wall,
         _ => {}
     }

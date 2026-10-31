@@ -96,3 +96,29 @@ fn a_seed_replays_exactly() {
         assert_ne!(run(0, &config).trace_hash, run(1, &config).trace_hash);
     }
 }
+
+#[test]
+fn a_swarm_seed_replays_its_configuration_and_its_run() {
+    // In a swarm the seed also draws the configuration, so one number
+    // still reproduces a failure.
+    for seed in [0, 3, 1_562] {
+        let config = SimConfig::swarm(seed);
+        assert_eq!(
+            format!("{config:?}"),
+            format!("{:?}", SimConfig::swarm(seed))
+        );
+        assert_eq!(run(seed, &config).trace_hash, run(seed, &config).trace_hash);
+    }
+    let shapes: std::collections::BTreeSet<_> = (0..20)
+        .map(|seed| {
+            let config = SimConfig::swarm(seed);
+            (
+                config.nodes,
+                config.cells,
+                config.ttl_ms,
+                config.max_resident,
+            )
+        })
+        .collect();
+    assert!(shapes.len() > 10, "swarm barely varies: {shapes:?}");
+}

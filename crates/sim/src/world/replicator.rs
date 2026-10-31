@@ -16,7 +16,7 @@ use celld_logic::{
 };
 
 use super::shell::StoreReq;
-use super::{core_config, Work, World};
+use super::{Work, World, OPERATION_DEADLINE_MS};
 use crate::WriteId;
 
 /// How long the replicator works on one durability proof before it says it
@@ -130,9 +130,12 @@ impl World {
             if bounded {
                 // After its deadline the stop gives up; the core restarts
                 // the cell on the database it kept open.
-                let deadline = core_config().operation_deadline_ms.unwrap();
                 let (cell, epoch) = key.clone();
-                self.work(node, deadline, Work::ProofDeadline { cell, epoch, op });
+                self.work(
+                    node,
+                    OPERATION_DEADLINE_MS,
+                    Work::ProofDeadline { cell, epoch, op },
+                );
             }
             self.settle_waiters(node, &key.0, epoch);
             return self.upload(node, &key.0, epoch);
