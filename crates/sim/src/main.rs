@@ -1,4 +1,7 @@
-//! `celld-sim [--seed N] [--crashes PER_MINUTE | --chaos] [--trace]`: run one seed and print what happened.
+//! `celld-sim [--seed N | --seeds A..B] [--crashes PER_MINUTE | --chaos] [--trace]`
+//!
+//! One seed prints what happened. A range prints one line per failing seed,
+//! with its first violation or panic, then a count.
 
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
@@ -7,11 +10,17 @@ use celld_sim::{run, SimConfig};
 
 fn main() {
     let mut seed = 0;
+    let mut seeds = None;
     let mut config = SimConfig::calm();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--seed" => seed = args.next().and_then(|s| s.parse().ok()).expect("--seed N"),
+            "--seeds" => {
+                let range = args.next().expect("--seeds A..B");
+                let (a, b) = range.split_once("..").expect("--seeds A..B");
+                seeds = Some(a.parse::<u64>().unwrap()..b.parse::<u64>().unwrap());
+            }
             "--trace" => config.trace = true,
             "--chaos" => config = SimConfig::chaos(),
             "--crashes" => {
@@ -20,6 +29,25 @@ fn main() {
             }
             other => panic!("unknown argument {other}"),
         }
+    }
+    if let Some(seeds) = seeds {
+        // A core panic is caught and reported per seed; the default hook
+        // would also print each one to stderr.
+        std::panic::set_hook(Box::new(|_| {}));
+        let (total, mut failed) = (seeds.end - seeds.start, 0);
+        for seed in seeds {
+            let outcome = run(seed, &config);
+            let first = outcome.panic.clone().or_else(|| {
+                let v = outcome.violations.first()?;
+                Some(format!("t={} {}: {}", v.at_ms, v.kind, v.detail))
+            });
+            if let Some(first) = first {
+                failed += 1;
+                println!("FAIL {seed}: {first}");
+            }
+        }
+        println!("{failed} of {total} seeds failed");
+        std::process::exit(i32::from(failed > 0));
     }
     let outcome = run(seed, &config);
     for line in &outcome.trace {
