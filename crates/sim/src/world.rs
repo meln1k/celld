@@ -84,8 +84,6 @@ enum Item {
     },
     /// A forward came back to the ingress without running.
     Bounced { op: u64, why: Bounce },
-    /// The ingress resolves the request's route again.
-    Redispatch { op: u64 },
     /// The next fault of this kind.
     Fault(Fault),
     /// The supervisor starts a new process on the node.
@@ -140,6 +138,8 @@ enum Work {
     HandlerCommit { request: RequestId },
     /// A handler returns its response.
     HandlerEnd { request: RequestId },
+    /// The ingress resolves a forwarded request's route again.
+    Redispatch { op: u64 },
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -376,7 +376,6 @@ impl World {
             Item::ClientNew => self.client_new(),
             Item::Arrive { node, op, via } => self.arrive(node, op, via),
             Item::Bounced { op, why } => self.bounced(op, why),
-            Item::Redispatch { op } => self.redispatch(op),
             Item::Fault(fault) => self.fault(fault),
             Item::Restart { node } => self.restart(node),
             Item::Resume { node, inc } => self.resume(node, inc),
@@ -405,6 +404,7 @@ impl World {
             Work::LoadSample => self.sample_load(node),
             Work::HandlerCommit { request } => self.handler_commit(node, request),
             Work::HandlerEnd { request } => self.handler_end(node, request),
+            Work::Redispatch { op } => self.redispatch(op),
         }
     }
 
@@ -487,7 +487,11 @@ impl World {
         let mut queue = VecDeque::from([event]);
         while let Some(mut event) = queue.pop_front() {
             match &self.machines[node].proc {
-                Some(proc) if !proc.halting => {}
+                Some(proc) if !proc.halting => {
+                    // Everything for a process comes through `Item::Proc`
+                    // or `arrive`, which both hold it back during a pause.
+                    debug_assert!(proc.paused_until.is_none(), "drove a paused process");
+                }
                 _ => break,
             }
             shell::stamp(&mut event, self.wall(node), self.mono(node));

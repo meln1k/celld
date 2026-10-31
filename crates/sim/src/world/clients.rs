@@ -296,7 +296,7 @@ impl World {
         if retry.observe(&owner, epoch) {
             // Wait for the ingress's view of the owner to change.
             match retry.wait(t) {
-                Some(wait) => self.after(wait, Item::Redispatch { op }),
+                Some(wait) => self.redispatch_after(op, wait),
                 None => self.settle(op, false),
             }
             return;
@@ -356,9 +356,16 @@ impl World {
                 .then_some(0),
         };
         match wait {
-            Some(wait) => self.after(wait, Item::Redispatch { op }),
+            Some(wait) => self.redispatch_after(op, wait),
             None => self.settle(op, false),
         }
+    }
+
+    /// Resolve again after `wait`, on the ingress process: if it dies
+    /// first, the request already failed with it.
+    fn redispatch_after(&mut self, op: u64, wait: u64) {
+        let ingress = self.ops[&op].ingress;
+        self.work(ingress, wait, Work::Redispatch { op });
     }
 
     /// Retire the failed route in the ingress's core and resolve again.
