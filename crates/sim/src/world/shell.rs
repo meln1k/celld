@@ -7,7 +7,11 @@ use celld_logic::{
     CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, Timer,
 };
 
+use super::faults::Partition;
 use super::{Item, Work, World};
+
+/// The bucket client's timeout for one call (`bucket.rs`).
+const STORE_TIMEOUT_MS: u64 = 15_000;
 use crate::store::Load;
 use crate::WriteId;
 
@@ -110,7 +114,7 @@ impl World {
                 let slot = Slot::of(&timer);
                 let ordinal = n.next_ordinal;
                 n.next_ordinal += 1;
-                n.timers.insert(slot.clone(), (ordinal, timer));
+                n.timers.insert(slot.clone(), (ordinal, timer, at_mono_ms));
                 let delay = at_mono_ms.saturating_sub(mono);
                 self.work(node, delay, Work::Timer { slot, ordinal });
             }
@@ -118,7 +122,10 @@ impl World {
                 self.store_call(node, StoreReq::ReadSelfLease { op })
             }
             Effect::CasNodeLease {
-                op, guard, record, ..
+                op,
+                guard,
+                record,
+                authority_expires_ms,
             } => {
                 // The lease body carries the node's load, sampled now.
                 let state = &self.nodes[node].state;
@@ -126,15 +133,22 @@ impl World {
                     // Activating cells hold a slot too, as production reports.
                     resident: state.occupied(),
                     owned: state.owned_cells(),
-                    sampled_ms: self.wall(),
+                    sampled_ms: self.wall(node),
                 };
+                // A renewal must come back while authority remains, so the
+                // shell bounds it to half of what is left, as production
+                // does (`actor/effects.rs`), and a timeout is ambiguous.
+                let timeout = authority_expires_ms.map_or(STORE_TIMEOUT_MS, |expires_ms| {
+                    let remaining = expires_ms.saturating_sub(self.wall(node));
+                    (remaining / 2).clamp(250, 2_500)
+                });
                 let req = StoreReq::CasLease {
                     op,
                     guard,
                     record,
                     load,
                 };
-                self.store_call(node, req)
+                self.store_call_within(node, req, timeout)
             }
             Effect::ReadCapacityPeers { op, .. } => {
                 self.store_call(node, StoreReq::ReadCapacityPeers { op })
@@ -178,10 +192,10 @@ impl World {
                 cell,
                 epoch,
                 cause,
-                ..
+                bounded,
             } => {
                 self.nodes[node].published.remove(&cell);
-                self.stop_runtime(node, op, cell, epoch, cause);
+                self.stop_runtime(node, op, cell, epoch, cause, bounded);
             }
             Effect::StartRuntime { op, cell, epoch } => {
                 let (name, who) = (self.nodes[node].name.clone(), self.who(node));
@@ -248,12 +262,20 @@ impl World {
     }
 
     pub(super) fn timer(&mut self, node: usize, slot: Slot, ordinal: u64) {
+        let mono = self.mono(node);
         let n = &mut self.nodes[node];
-        if n.timers.get(&slot).map(|(armed, _)| *armed) != Some(ordinal) {
+        let Some(&(armed, _, at_mono)) = n.timers.get(&slot) else {
+            return;
+        };
+        if armed != ordinal {
             // A later arm replaced this one.
             return;
         }
-        let (_, timer) = n.timers.remove(&slot).unwrap();
+        if mono < at_mono {
+            // A suspend held the monotonic clock back: not due yet.
+            return self.work(node, at_mono - mono, Work::Timer { slot, ordinal });
+        }
+        let (_, timer, _) = n.timers.remove(&slot).unwrap();
         self.drive(
             node,
             Event::TimerFired {
@@ -271,9 +293,123 @@ impl World {
     /// its answer arrives after another, so other events can happen in
     /// between, on this node and on others.
     pub(super) fn store_call(&mut self, node: usize, req: StoreReq) {
-        let delay = self.latency();
-        let inc = self.nodes[node].inc;
-        self.after(delay, Item::StoreApply { node, inc, req });
+        self.store_call_within(node, req, STORE_TIMEOUT_MS);
+    }
+
+    /// Draw what happens to one call, then send it.
+    ///
+    /// - It may fail definitely: it did not apply, and the caller knows.
+    /// - Its request may be lost: it did not apply, and the caller times out.
+    /// - Its response may be lost: it applied, and the caller times out.
+    /// - It may be slow: if both hops take longer than the timeout, the
+    ///   caller gives up first, and the request still applies, late.
+    /// - A partitioned node's calls hang or are refused, and never apply.
+    ///
+    /// A failed call's answer is scheduled here, before the request moves.
+    /// A late or lost answer to a call that did apply is simply never sent.
+    fn store_call_within(&mut self, node: usize, req: StoreReq, timeout: u64) {
+        let mut request_ms = self.latency();
+        let mut response_ms = self.latency();
+        let mut applies = true;
+        let mut failure = None;
+        if self.t < self.config.chaos_ms {
+            let f = self.config.faults.clone();
+            if self.net_rng.chance(f.store_spike_probability) {
+                request_ms += self.net_rng.range(0, f.store_spike_ms);
+            }
+            if self.net_rng.chance(f.store_spike_probability) {
+                response_ms += self.net_rng.range(0, f.store_spike_ms);
+            }
+            if self.net_rng.chance(f.store_definite) {
+                (applies, failure) = (false, Some(Failure::Definite));
+            } else if self.net_rng.chance(f.store_lost_request) {
+                (applies, failure) = (false, Some(Failure::Ambiguous));
+            } else if self.net_rng.chance(f.store_lost_response) {
+                failure = Some(Failure::Ambiguous);
+            }
+        }
+        match self.partitions[node] {
+            Some((_, Partition::Refuse)) => (applies, failure) = (false, Some(Failure::Definite)),
+            Some((_, Partition::Hang)) => (applies, failure) = (false, Some(Failure::Ambiguous)),
+            None => {}
+        }
+        if failure.is_none() && request_ms + response_ms > timeout {
+            failure = Some(Failure::Ambiguous);
+        }
+        if let Some(failure) = failure {
+            self.stats.store_failures += 1;
+            let at = match failure {
+                Failure::Definite => request_ms.min(timeout),
+                Failure::Ambiguous => timeout,
+            };
+            let work = self.store_failed(node, &req, failure);
+            self.work(node, at.max(1), work);
+        }
+        if applies {
+            let inc = self.nodes[node].inc;
+            let answer_ms = failure.is_none().then_some(response_ms);
+            let item = Item::StoreApply {
+                node,
+                inc,
+                req,
+                answer_ms,
+            };
+            self.after(request_ms, item);
+        }
+    }
+
+    /// What the caller hears when a call fails.
+    fn store_failed(&self, node: usize, req: &StoreReq, failure: Failure) -> Work {
+        let core = Work::Deliver;
+        match req {
+            StoreReq::ReadSelfLease { op } => core(Event::SelfNodeLeaseRead {
+                op: *op,
+                now_ms: 0,
+                now_mono_ms: 0,
+                result: Err(failure),
+            }),
+            StoreReq::CasLease { op, .. } => core(Event::NodeLeaseCasCompleted {
+                op: *op,
+                now_mono_ms: 0,
+                result: Err(failure),
+                stamped_log_state: None,
+            }),
+            StoreReq::ReadCapacityPeers { op } => core(Event::CapacityPeersRead {
+                op: *op,
+                now_ms: self.wall(node),
+                result: Err(failure),
+            }),
+            StoreReq::ReadOwner { op, .. } => core(Event::OwnerRead {
+                op: *op,
+                now_ms: 0,
+                result: Err(failure),
+            }),
+            StoreReq::ReadLease { op, .. } => core(Event::NodeLeaseRead {
+                op: *op,
+                now_ms: 0,
+                result: Err(failure),
+            }),
+            StoreReq::CasOwner { op, .. } => core(Event::OwnerCasCompleted {
+                op: *op,
+                result: Err(failure),
+            }),
+            StoreReq::ReleaseOwner { op, .. } => core(Event::OwnerReleased {
+                op: *op,
+                result: Err(failure),
+            }),
+            StoreReq::Verify { op, .. } => core(Event::OwnershipVerified {
+                op: *op,
+                result: Err(failure),
+            }),
+            StoreReq::Upload { cell, epoch, .. } => Work::UploadFailed {
+                cell: cell.clone(),
+                epoch: *epoch,
+            },
+            StoreReq::ReadChain { op, .. } => core(Event::RestoreCompleted {
+                op: *op,
+                result: Err(failure),
+            }),
+        }
     }
 
     fn latency(&mut self) -> u64 {
@@ -282,9 +418,14 @@ impl World {
     }
 
     /// The request reaches the bucket: apply it now, at this one instant,
-    /// and send the answer back. A lost response will be an answer that is
-    /// never scheduled; the write it answers has still happened.
-    pub(super) fn store_apply(&mut self, node: usize, inc: u64, req: StoreReq) {
+    /// and send the answer back.
+    pub(super) fn store_apply(
+        &mut self,
+        node: usize,
+        inc: u64,
+        req: StoreReq,
+        answer_ms: Option<u64>,
+    ) {
         let name = self.nodes[node].name.clone();
         let sender = format!("{name}#{inc}");
         let core = Work::Deliver;
@@ -315,7 +456,7 @@ impl World {
             StoreReq::ReadCapacityPeers { op } => core(Event::CapacityPeersRead {
                 op,
                 // The core judges the sample at the instant it was taken.
-                now_ms: self.wall(),
+                now_ms: self.wall(node),
                 result: Ok(self.store.capacity_peers()),
             }),
             StoreReq::ReadLease { op, node: owner } => core(Event::NodeLeaseRead {
@@ -373,16 +514,12 @@ impl World {
             },
         };
         // The answer goes back to the process that asked. If it has died
-        // since, nobody hears it, but what it answers has still happened.
-        let delay = self.latency();
-        self.after(
-            delay,
-            Item::Proc {
-                node,
-                inc,
-                work: reply,
-            },
-        );
+        // since, or the answer is lost, nobody hears it, but what it answers
+        // has still happened.
+        if let Some(delay) = answer_ms {
+            let work = reply;
+            self.after(delay, Item::Proc { node, inc, work });
+        }
     }
 }
 

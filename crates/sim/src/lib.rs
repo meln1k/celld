@@ -47,13 +47,38 @@ pub struct SimConfig {
     pub trace: bool,
 }
 
-/// What goes wrong, and how often.
+/// What goes wrong, and how often. Rates are per simulated minute across
+/// the whole fleet; zero turns a fault off.
 #[derive(Clone, Debug, Default)]
 pub struct Faults {
-    /// Process crashes per simulated minute, across the fleet.
     pub crashes: f64,
     /// Chance that a crash also loses the node's disk.
     pub wipe_probability: f64,
+    /// A process stops running for a while, then carries on.
+    pub pauses: f64,
+    /// Longest pause. Longer than a TTL lets a peer take cells over while
+    /// the paused owner still believes it holds them.
+    pub max_pause_ms: u64,
+    /// Chance that a pause is a VM suspend, during which the process's
+    /// monotonic clock stops too.
+    pub suspend_probability: f64,
+    /// A node loses the network: the bucket and its peers.
+    pub partitions: f64,
+    pub max_partition_ms: u64,
+    /// A process's wall clock jumps, either way, by up to the maximum.
+    pub clock_steps: f64,
+    pub max_clock_step_ms: u64,
+    /// Each node's wall clock is off by a fixed amount, up to this either
+    /// way.
+    pub max_skew_ms: u64,
+    /// Chance per bucket call: it fails and did not apply; its request was
+    /// lost; or it applied and its response was lost.
+    pub store_definite: f64,
+    pub store_lost_request: f64,
+    pub store_lost_response: f64,
+    /// Chance per hop of a latency spike of up to `store_spike_ms`.
+    pub store_spike_probability: f64,
+    pub store_spike_ms: u64,
 }
 
 impl SimConfig {
@@ -82,8 +107,34 @@ impl SimConfig {
             faults: Faults {
                 crashes: per_minute,
                 wipe_probability: 0.3,
+                ..Faults::default()
             },
             ..Self::calm()
+        }
+    }
+
+    /// Every fault at once for the first 20 s.
+    pub fn chaos() -> Self {
+        let ttl_ms = Self::calm().ttl_ms;
+        Self {
+            faults: Faults {
+                crashes: 3.0,
+                wipe_probability: 0.3,
+                pauses: 4.0,
+                max_pause_ms: 2 * ttl_ms,
+                suspend_probability: 0.3,
+                partitions: 3.0,
+                max_partition_ms: 2 * ttl_ms,
+                clock_steps: 2.0,
+                max_clock_step_ms: 1_000,
+                max_skew_ms: 300,
+                store_definite: 0.01,
+                store_lost_request: 0.01,
+                store_lost_response: 0.01,
+                store_spike_probability: 0.02,
+                store_spike_ms: 3_000,
+            },
+            ..Self::crashing(3.0)
         }
     }
 }
@@ -105,6 +156,10 @@ pub struct Stats {
     /// Forwards that came back without running: stale, full, unreachable.
     pub bounced: u64,
     pub crashes: u64,
+    pub pauses: u64,
+    pub partitions: u64,
+    /// Bucket calls that failed, timed out or lost their answer.
+    pub store_failures: u64,
     /// Databases restored from the bucket: each one is checked for lost
     /// writes.
     pub restored: u64,

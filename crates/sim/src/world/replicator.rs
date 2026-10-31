@@ -16,8 +16,12 @@ use celld_logic::{
 };
 
 use super::shell::StoreReq;
-use super::World;
+use super::{core_config, Work, World};
 use crate::WriteId;
+
+/// How long the replicator works on one durability proof before it says it
+/// could not give it.
+const PROOF_DEADLINE_MS: u64 = 10_000;
 
 /// A node's disk: the database files no process has open.
 #[derive(Default)]
@@ -50,6 +54,12 @@ enum Waiter {
 }
 
 impl Waiter {
+    fn op(&self) -> OpId {
+        match self {
+            Waiter::Gate { op, .. } | Waiter::Evict { op, .. } => *op,
+        }
+    }
+
     fn position(&self) -> u64 {
         match self {
             Waiter::Gate { position, .. } | Waiter::Evict { position, .. } => *position,
@@ -105,6 +115,7 @@ impl World {
         cell: String,
         epoch: Epoch,
         cause: StopCause,
+        bounded: bool,
     ) {
         let key = (cell, epoch);
         if let StopCause::Evict { .. } | StopCause::Cleanup = cause {
@@ -116,6 +127,13 @@ impl World {
                 return self.deliver(node, 1, Event::RuntimeStopped { op });
             };
             replica.stop = Some(op);
+            if bounded {
+                // After its deadline the stop gives up; the core restarts
+                // the cell on the database it kept open.
+                let deadline = core_config().operation_deadline_ms.unwrap();
+                let (cell, epoch) = key.clone();
+                self.work(node, deadline, Work::ProofDeadline { cell, epoch, op });
+            }
             self.settle_waiters(node, &key.0, epoch);
             return self.upload(node, &key.0, epoch);
         }
@@ -263,14 +281,37 @@ impl World {
             let event = waiter.answer(Err(Failure::Ambiguous));
             return self.deliver(node, 1, event);
         };
+        let op = waiter.op();
         replica.waiters.push(waiter);
+        let deadline = Work::ProofDeadline {
+            cell: cell.to_string(),
+            epoch,
+            op,
+        };
+        self.work(node, PROOF_DEADLINE_MS, deadline);
         self.settle_waiters(node, cell, epoch);
         self.upload(node, cell, epoch);
     }
 
+    /// A proof, or a stop's final upload, ran out of time.
+    pub(super) fn proof_deadline(&mut self, node: usize, cell: String, epoch: Epoch, op: OpId) {
+        let Some(replica) = self.nodes[node].replicas.get_mut(&(cell, epoch)) else {
+            return;
+        };
+        let event = if replica.stop == Some(op) {
+            replica.stop = None;
+            Event::RuntimeStopFailed { op }
+        } else if let Some(i) = replica.waiters.iter().position(|w| w.op() == op) {
+            replica.waiters.remove(i).answer(Err(Failure::Ambiguous))
+        } else {
+            return;
+        };
+        self.drive(node, event);
+    }
+
     /// Upload the epoch's database if the bucket is behind it and no upload
     /// is in flight. One upload at a time; its answer starts the next.
-    fn upload(&mut self, node: usize, cell: &str, epoch: Epoch) {
+    pub(super) fn upload(&mut self, node: usize, cell: &str, epoch: Epoch) {
         let Some(replica) = self.nodes[node]
             .replicas
             .get_mut(&(cell.to_string(), epoch))
@@ -287,6 +328,16 @@ impl World {
             content: replica.content.clone(),
         };
         self.store_call(node, req);
+    }
+
+    /// An upload failed, or nobody knows whether it applied. Upload again
+    /// after a backoff: an upload is idempotent.
+    pub(super) fn upload_failed(&mut self, node: usize, cell: String, epoch: Epoch) {
+        if let Some(replica) = self.nodes[node].replicas.get_mut(&(cell.clone(), epoch)) {
+            replica.uploading = false;
+            let delay = self.net_rng.range(50, 300);
+            self.work(node, delay, Work::Upload { cell, epoch });
+        }
     }
 
     /// The bucket confirmed an upload of `len` writes.

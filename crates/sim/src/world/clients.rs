@@ -179,6 +179,17 @@ impl World {
         if self.ops[&op].done {
             return;
         }
+        if let Some(until) = self.nodes[node].paused_until {
+            // The connection is accepted, but nothing reads it yet.
+            return self.after(until - self.t, Item::Arrive { node, op, via });
+        }
+        // A forward needs the network on both ends; a client reaches its
+        // ingress through the load balancer either way.
+        let ingress = self.ops[&op].ingress;
+        let cut_off = self.partitions[node].is_some() || self.partitions[ingress].is_some();
+        if via.is_some() && cut_off {
+            return self.bounce(op, Bounce::Unreachable);
+        }
         if !self.nodes[node].up {
             match via {
                 // The client's own connection is refused.

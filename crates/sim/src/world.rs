@@ -41,6 +41,7 @@ use crate::store::Store;
 use crate::{Outcome, Rng, SimConfig, Stats, WriteId};
 
 use clients::{Bounce, Op, Req};
+use faults::{Fault, Partition};
 use replicator::{Disk, Replica};
 use shell::{Slot, StoreReq};
 
@@ -55,11 +56,13 @@ enum Item {
     /// Work for one process. Dropped if that process has died since.
     Proc { node: usize, inc: u64, work: Work },
     /// A bucket request arrives at the bucket and is applied. It applies
-    /// even if its sender has died since: it was already on the wire.
+    /// even if its sender has died since: it was already on the wire. Its
+    /// answer returns after `answer_ms`, or never when the response is lost.
     StoreApply {
         node: usize,
         inc: u64,
         req: StoreReq,
+        answer_ms: Option<u64>,
     },
     /// A client sends its next request.
     ClientNew,
@@ -75,10 +78,14 @@ enum Item {
     Bounced { op: u64, why: Bounce },
     /// The ingress resolves the request's route again.
     Redispatch { op: u64 },
-    /// The next fault of the run.
-    Fault,
+    /// The next fault of this kind.
+    Fault(Fault),
     /// The supervisor starts a new process on the node.
     Restart { node: usize },
+    /// A paused process runs again.
+    Resume { node: usize, inc: u64 },
+    /// A node's network comes back.
+    Heal { node: usize, partition: u64 },
 }
 
 /// What a process does later.
@@ -93,6 +100,16 @@ enum Work {
         cell: String,
         epoch: Epoch,
         len: usize,
+    },
+    /// An upload failed, or its answer was lost.
+    UploadFailed { cell: String, epoch: Epoch },
+    /// Upload whatever the bucket does not have yet.
+    Upload { cell: String, epoch: Epoch },
+    /// The replicator gives up on a proof, or on a stop's final upload.
+    ProofDeadline {
+        cell: String,
+        epoch: Epoch,
+        op: OpId,
     },
     /// The bucket answered a restore's chain read.
     ChainRead {
@@ -116,11 +133,18 @@ struct Node {
     up: bool,
     /// The core asked to halt; the process exits after this step.
     halting: bool,
+    /// While paused, the process runs nothing: its work waits until here.
+    paused_until: Option<Time>,
+    /// When a VM suspend began: the monotonic clock stops with it.
+    suspended_at: Option<Time>,
+    /// How far this process's wall clock was stepped.
+    wall_step_ms: i64,
     state: State,
     /// Where this process's monotonic clock starts. Processes start at
     /// different moments, so their monotonic clocks disagree.
     mono_base: u64,
-    timers: BTreeMap<Slot, (u64, Timer)>,
+    /// Armed timers: the arm's ordinal, the timer, and its monotonic due time.
+    timers: BTreeMap<Slot, (u64, Timer, u64)>,
     next_ordinal: u64,
     replicas: BTreeMap<(String, Epoch), Replica>,
     /// The runtime registry: cells this process serves, at which epoch.
@@ -137,6 +161,9 @@ impl Node {
             inc,
             up: false,
             halting: false,
+            paused_until: None,
+            suspended_at: None,
+            wall_step_ms: 0,
             mono_base,
             timers: BTreeMap::new(),
             next_ordinal: 0,
@@ -156,6 +183,11 @@ pub struct World {
     store: Store,
     nodes: Vec<Node>,
     disks: Vec<Disk>,
+    /// Each node's fixed wall clock offset.
+    skews: Vec<i64>,
+    /// Each node's network partition, while it lasts.
+    partitions: Vec<Option<(u64, Partition)>>,
+    next_partition: u64,
     ops: BTreeMap<u64, Op>,
     next_op: u64,
     next_request: RequestId,
@@ -178,11 +210,16 @@ impl World {
         // shift every decision of the other.
         let net_rng = master.fork();
         let work_rng = master.fork();
-        let fault_rng = master.fork();
+        let mut fault_rng = master.fork();
+        let skew = config.faults.max_skew_ms;
+        let skews = (0..config.nodes)
+            .map(|_| fault_rng.range(0, 2 * skew) as i64 - skew as i64)
+            .collect();
         let nodes = (0..config.nodes)
             .map(|index| Node::new(index, 0, 0))
             .collect();
         let disks = (0..config.nodes).map(|_| Disk::default()).collect();
+        let partitions = vec![None; config.nodes];
         Self {
             seed,
             config,
@@ -192,6 +229,9 @@ impl World {
             store: Store::default(),
             nodes,
             disks,
+            skews,
+            partitions,
+            next_partition: 1,
             ops: BTreeMap::new(),
             next_op: 1,
             next_request: 1,
@@ -228,8 +268,11 @@ impl World {
         format!("{}#{}", self.nodes[node].name, self.nodes[node].inc)
     }
 
-    fn wall(&self) -> u64 {
-        WALL_EPOCH_MS + self.t
+    /// The node's wall clock: true time, plus the machine's skew, plus
+    /// whatever its process's clock was stepped by.
+    fn wall(&self, node: usize) -> u64 {
+        let skew = self.skews[node] + self.nodes[node].wall_step_ms;
+        (WALL_EPOCH_MS as i64 + self.t as i64 + skew) as u64
     }
 
     fn mono(&self, node: usize) -> u64 {
@@ -271,17 +314,29 @@ impl World {
         match item {
             Item::Proc { node, inc, work } => {
                 let n = &self.nodes[node];
-                if n.up && n.inc == inc {
-                    self.proc_work(node, work);
+                if !n.up || n.inc != inc {
+                    return;
+                }
+                match n.paused_until {
+                    // A paused process runs this when it resumes, in order.
+                    Some(until) => self.after(until - self.t, Item::Proc { node, inc, work }),
+                    None => self.proc_work(node, work),
                 }
             }
-            Item::StoreApply { node, inc, req } => self.store_apply(node, inc, req),
+            Item::StoreApply {
+                node,
+                inc,
+                req,
+                answer_ms,
+            } => self.store_apply(node, inc, req, answer_ms),
             Item::ClientNew => self.client_new(),
             Item::Arrive { node, op, via } => self.arrive(node, op, via),
             Item::Bounced { op, why } => self.bounced(op, why),
             Item::Redispatch { op } => self.redispatch(op),
-            Item::Fault => self.fault(),
+            Item::Fault(fault) => self.fault(fault),
             Item::Restart { node } => self.restart(node),
+            Item::Resume { node, inc } => self.resume(node, inc),
+            Item::Heal { node, partition } => self.heal(node, partition),
         }
     }
 
@@ -290,6 +345,9 @@ impl World {
             Work::Deliver(event) => self.drive(node, event),
             Work::Timer { slot, ordinal } => self.timer(node, slot, ordinal),
             Work::Uploaded { cell, epoch, len } => self.uploaded(node, cell, epoch, len),
+            Work::UploadFailed { cell, epoch } => self.upload_failed(node, cell, epoch),
+            Work::Upload { cell, epoch } => self.upload(node, &cell, epoch),
+            Work::ProofDeadline { cell, epoch, op } => self.proof_deadline(node, cell, epoch, op),
             Work::ChainRead {
                 op,
                 cell,
@@ -305,7 +363,9 @@ impl World {
     /// node lease.
     fn restart(&mut self, node: usize) {
         let inc = self.nodes[node].inc + 1;
-        let mono_base = self.net_rng.range(1_000, 1_000_000);
+        // Large enough that a suspend can hold the clock back without it
+        // ever reaching zero.
+        let mono_base = self.net_rng.range(1_000_000_000, 2_000_000_000);
         self.nodes[node] = Node {
             up: true,
             ..Node::new(node, inc, mono_base)
@@ -353,7 +413,7 @@ impl World {
             if !self.nodes[node].up || self.nodes[node].halting {
                 break;
             }
-            shell::stamp(&mut event, self.wall(), self.mono(node));
+            shell::stamp(&mut event, self.wall(node), self.mono(node));
             self.record(node, "<-", &event);
             self.stats.events += 1;
             let effects = on_event(&mut self.nodes[node].state, event);
