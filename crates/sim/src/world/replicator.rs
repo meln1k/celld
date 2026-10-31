@@ -249,7 +249,7 @@ impl World {
         epoch: Epoch,
         position: u64,
     ) {
-        if self.config.mutation == Mutation::AckBeforeUpload {
+        if self.config.mutation == Some(Mutation::AckBeforeUpload) {
             let event = Waiter::Gate { op, position }.answer(Ok(position));
             return self.deliver(node, 1, event);
         }

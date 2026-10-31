@@ -3,9 +3,7 @@
 
 use std::collections::VecDeque;
 
-use celld_logic::{
-    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, Timer,
-};
+use celld_logic::{CasGuard, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, Timer};
 
 use super::faults::Partition;
 use super::{Item, Work, World};
@@ -218,7 +216,7 @@ impl World {
             }
             Effect::Publish { op, cell, epoch } => {
                 // Production inserts into its registry inside the same step.
-                if self.config.mutation != Mutation::SkipPublish {
+                if self.config.mutation != Some(Mutation::SkipPublish) {
                     self.nodes[node].published.insert(cell, epoch);
                 }
                 immediate.push_back(Event::Published { op, result: Ok(()) });
@@ -472,22 +470,10 @@ impl World {
                 guard,
                 epoch,
             } => {
-                let guard = match self.config.mutation {
-                    // Write against whatever is there, as if it had matched.
-                    Mutation::IgnoreCasGuard => match self.store.read_owner(&cell) {
-                        Some(record) => CasGuard::Match(record.etag),
-                        None => CasGuard::Absent,
-                    },
-                    _ => guard,
-                };
-                let outcome = match self.config.mutation {
-                    // Answered without touching the bucket.
-                    Mutation::PhantomClaim => CasOutcome::Applied,
-                    Mutation::RejectClaims => CasOutcome::Rejected,
-                    _ => self.store.cas_owner(&cell, &guard, epoch, &name),
-                };
-                if outcome == CasOutcome::Applied && self.config.mutation != Mutation::PhantomClaim
-                {
+                let outcome = self.store.cas_owner(&cell, &guard, epoch, &name);
+                // The oracle believes the bucket, not the answer: a claim
+                // counts only if the record now names this node and epoch.
+                if self.store.owner(&cell) == Some((Some(name.as_str()), epoch)) {
                     self.checker.claim_applied(&cell, epoch, &name);
                 }
                 core(Event::OwnerCasCompleted {
@@ -524,11 +510,7 @@ impl World {
             }
             StoreReq::ReadChain { op, cell, epoch } => Work::ChainRead {
                 op,
-                chain: match self.config.mutation {
-                    // Skip the previous epoch's prefix, the usual source.
-                    Mutation::StaleRestore => self.store.read_chain(&cell, epoch.saturating_sub(1)),
-                    _ => self.store.read_chain(&cell, epoch),
-                },
+                chain: self.store.read_chain(&cell, epoch),
                 cell,
                 epoch,
             },

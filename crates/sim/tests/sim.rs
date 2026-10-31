@@ -131,7 +131,6 @@ fn every_planted_bug_is_caught_by_its_check() {
     // fleet that `crashes_lose_no_acknowledged_write` shows clean.
     for mutation in Mutation::ALL {
         let expected: &[&str] = match mutation {
-            Mutation::None => unreachable!(),
             Mutation::IgnoreCasGuard => &["two-writers"],
             Mutation::PhantomClaim => &["unclaimed-runtime"],
             Mutation::SkipPublish => &["local-without-runtime"],
@@ -140,7 +139,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::RejectClaims => &["liveness"],
         };
         let config = SimConfig {
-            mutation,
+            mutation: Some(mutation),
             ..SimConfig::crashing(6.0)
         };
         let caught = (0..20).find(|&seed| {

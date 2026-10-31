@@ -244,6 +244,7 @@ impl World {
             .collect();
         let disks = (0..config.nodes).map(|_| Disk::default()).collect();
         let partitions = vec![None; config.nodes];
+        let store = Store::new(config.mutation);
         Self {
             seed,
             config,
@@ -251,7 +252,7 @@ impl World {
             seq: 0,
             core,
             agenda: BTreeMap::new(),
-            store: Store::default(),
+            store,
             nodes,
             disks,
             skews,

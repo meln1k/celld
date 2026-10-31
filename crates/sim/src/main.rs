@@ -16,7 +16,7 @@ fn main() {
     let mut seeds = None;
     let mut config = SimConfig::calm();
     let (mut swarm, mut trace) = (false, false);
-    let mut mutation = Mutation::None;
+    let mut mutation = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -28,10 +28,12 @@ fn main() {
             }
             "--mutation" => {
                 let name = args.next().expect("--mutation NAME");
-                mutation = *Mutation::ALL
+                let found = Mutation::ALL
                     .iter()
                     .find(|m| format!("{m:?}") == name)
+                    .copied()
                     .unwrap_or_else(|| panic!("no mutation {name}: {:?}", Mutation::ALL));
+                mutation = Some(found);
             }
             "--trace" => trace = true,
             "--swarm" => swarm = true,

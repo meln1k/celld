@@ -18,7 +18,7 @@ use celld_logic::{
     NodeLeaseRecord, OwnerRecord,
 };
 
-use crate::WriteId;
+use crate::{Mutation, WriteId};
 
 /// The load a node reports in its lease body, sampled when it writes it.
 /// Peers read it to choose where an unowned cell should land.
@@ -31,6 +31,8 @@ pub struct Load {
 
 #[derive(Default)]
 pub struct Store {
+    /// A planted bug in the bucket itself, if any.
+    mutation: Option<Mutation>,
     next_etag: u64,
     leases: BTreeMap<String, (NodeLeaseRecord, u64, Load)>,
     /// Cell → (owner node, epoch, etag).
@@ -44,6 +46,13 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn new(mutation: Option<Mutation>) -> Self {
+        Self {
+            mutation,
+            ..Self::default()
+        }
+    }
+
     fn etag(&mut self) -> u64 {
         self.next_etag += 1;
         self.next_etag
@@ -124,8 +133,13 @@ impl Store {
         node: &str,
     ) -> CasOutcome {
         let current = self.owners.get(cell).map(|(_, _, etag)| *etag);
-        if !guard_matches(guard, current) {
-            return CasOutcome::Rejected;
+        match self.mutation {
+            Some(Mutation::IgnoreCasGuard) => {}
+            // Answered as if it applied, but nothing is written.
+            Some(Mutation::PhantomClaim) => return CasOutcome::Applied,
+            Some(Mutation::RejectClaims) => return CasOutcome::Rejected,
+            _ if !guard_matches(guard, current) => return CasOutcome::Rejected,
+            _ => {}
         }
         let etag = self.etag();
         self.owners
@@ -162,11 +176,22 @@ impl Store {
     /// holds data. Every upload carries the whole database, so that one
     /// prefix is the whole chain.
     pub fn read_chain(&self, cell: &str, epoch: Epoch) -> Option<Vec<WriteId>> {
+        // The planted bug skips the previous epoch's prefix, the usual source.
+        let epoch = match self.mutation {
+            Some(Mutation::StaleRestore) => epoch.saturating_sub(1),
+            _ => epoch,
+        };
+        self.chain_below(cell, epoch).map(<[WriteId]>::to_vec)
+    }
+
+    /// The newest non-empty prefix below `epoch`, as the bucket truly holds
+    /// it. The oracle reads this, so a planted bug never bends its view.
+    fn chain_below(&self, cell: &str, epoch: Epoch) -> Option<&[WriteId]> {
         self.prefixes
             .range((cell.to_string(), 0)..(cell.to_string(), epoch))
             .rev()
             .find(|(_, writes)| !writes.is_empty())
-            .map(|(_, writes)| writes.clone())
+            .map(|(_, writes)| writes.as_slice())
     }
 
     /// How much of epoch `epoch`'s database the bucket holds: its own prefix
@@ -174,9 +199,16 @@ impl Store {
     /// restored from, which lives below it.
     pub fn durable_len(&self, cell: &str, epoch: Epoch) -> usize {
         match self.prefix(cell, epoch) {
-            [] => self.read_chain(cell, epoch).map_or(0, |chain| chain.len()),
+            [] => self.chain_below(cell, epoch).map_or(0, <[WriteId]>::len),
             prefix => prefix.len(),
         }
+    }
+
+    /// Who the bucket's owner record names for `cell`, and at which epoch.
+    pub fn owner(&self, cell: &str) -> Option<(Option<&str>, Epoch)> {
+        self.owners
+            .get(cell)
+            .map(|(node, epoch, _)| (node.as_deref(), *epoch))
     }
 
     pub fn prefix(&self, cell: &str, epoch: Epoch) -> &[WriteId] {
