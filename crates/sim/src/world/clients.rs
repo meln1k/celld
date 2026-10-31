@@ -37,6 +37,8 @@ pub(super) struct Op {
     /// The node the client sent it to.
     ingress: usize,
     retry: RouteRetry,
+    /// The liveness goal this request is an attempt at.
+    goal: Option<usize>,
     done: bool,
 }
 
@@ -128,18 +130,44 @@ impl World {
     }
 
     /// A client sends a request for a random cell to a random node.
-    /// The load balancer in front of the fleet only picks nodes whose
-    /// process is up; with none up, the request fails at once.
+    /// A client sends a request for a random cell to a random node.
     pub(super) fn client_new(&mut self) {
         let cell = format!("c{}", self.work_rng.below(self.config.cells as u64));
+        let ingress = self.pick_ingress();
+        let write = self.work_rng.chance(self.config.write_probability);
+        self.send(cell, write, ingress, None);
+
+        let (lo, hi) = self.config.request_gap_ms;
+        let gap = self.work_rng.range(lo, hi);
+        if self.t + gap + CLIENTS_STOP_BEFORE_END_MS < self.config.duration_ms {
+            self.after(gap, Item::ClientNew);
+        }
+    }
+
+    /// The load balancer in front of the fleet only picks nodes whose
+    /// process is up.
+    pub(super) fn pick_ingress(&mut self) -> Option<usize> {
         let up: Vec<usize> = (0..self.nodes.len())
             .filter(|&node| self.nodes[node].up)
             .collect();
-        let ingress = self.work_rng.pick(&up).copied();
-        let write = self.work_rng.chance(self.config.write_probability);
+        self.work_rng.pick(&up).copied()
+    }
+
+    /// Send one request to `ingress`. With no ingress it fails at once. A
+    /// request for a liveness goal reports to that goal instead of to the
+    /// workload's counts.
+    pub(super) fn send(
+        &mut self,
+        cell: String,
+        write: bool,
+        ingress: Option<usize>,
+        goal: Option<usize>,
+    ) {
         let op = self.next_op;
         self.next_op += 1;
-        self.stats.requests += 1;
+        if goal.is_none() {
+            self.stats.requests += 1;
+        }
         self.ops.insert(
             op,
             Op {
@@ -147,6 +175,7 @@ impl World {
                 write,
                 ingress: ingress.unwrap_or(0),
                 retry: RouteRetry::new(self.t),
+                goal,
                 done: false,
             },
         );
@@ -163,12 +192,6 @@ impl World {
                 );
             }
             None => self.settle(op, false),
-        }
-
-        let (lo, hi) = self.config.request_gap_ms;
-        let gap = self.work_rng.range(lo, hi);
-        if self.t + gap + CLIENTS_STOP_BEFORE_END_MS < self.config.duration_ms {
-            self.after(gap, Item::ClientNew);
         }
     }
 
@@ -488,10 +511,10 @@ impl World {
             return;
         }
         entry.done = true;
-        if answered {
-            self.stats.answered += 1;
-        } else {
-            self.stats.failed += 1;
+        match entry.goal {
+            Some(goal) => self.goal_settled(goal, answered),
+            None if answered => self.stats.answered += 1,
+            None => self.stats.failed += 1,
         }
     }
 }

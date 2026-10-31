@@ -15,6 +15,7 @@
 //!   the durability proofs, as `ltx_repl.rs` does.
 //! - `clients`: the workload and the scripted handler that serves it.
 //! - `faults`: what goes wrong, and the supervisor that restarts a node.
+//! - `liveness`: the probe and the audit that end every run.
 //!
 //! A node is a machine with a disk. The process on it can die and be
 //! restarted. Each start is a new *incarnation* with a fresh core, fresh
@@ -24,6 +25,7 @@
 
 mod clients;
 mod faults;
+mod liveness;
 mod replicator;
 mod shell;
 
@@ -42,6 +44,7 @@ use crate::{Outcome, Rng, SimConfig, Stats, WriteId};
 
 use clients::{Bounce, Op, Req};
 use faults::{Fault, Partition};
+use liveness::Goal;
 use replicator::{Disk, Replica};
 use shell::{Slot, StoreReq};
 
@@ -86,6 +89,14 @@ enum Item {
     Resume { node: usize, inc: u64 },
     /// A node's network comes back.
     Heal { node: usize, partition: u64 },
+    /// Liveness: every cell must now take a write.
+    Probe,
+    /// Liveness: the fleet dies and a fresh node must restore every cell.
+    Audit,
+    /// One attempt at a liveness goal.
+    GoalSend { goal: usize },
+    /// The run is over.
+    End,
 }
 
 /// What a process does later.
@@ -200,6 +211,9 @@ pub struct World {
     hash: Fnv,
     trace: Vec<String>,
     halts: Vec<String>,
+    goals: Vec<Goal>,
+    /// The audit has begun: dead processes stay dead.
+    auditing: bool,
     panic: Option<String>,
 }
 
@@ -244,6 +258,8 @@ impl World {
             hash: Fnv(0xcbf2_9ce4_8422_2325),
             trace: Vec::new(),
             halts: Vec::new(),
+            goals: Vec::new(),
+            auditing: false,
             panic: None,
         }
     }
@@ -286,8 +302,9 @@ impl World {
         }
         self.start_clients();
         self.start_faults();
+        self.start_liveness();
         while let Some(((t, _), item)) = self.agenda.pop_first() {
-            if t > self.config.duration_ms {
+            if matches!(item, Item::End) {
                 break;
             }
             self.t = t;
@@ -337,6 +354,10 @@ impl World {
             Item::Restart { node } => self.restart(node),
             Item::Resume { node, inc } => self.resume(node, inc),
             Item::Heal { node, partition } => self.heal(node, partition),
+            Item::Probe => self.probe(),
+            Item::Audit => self.audit(),
+            Item::GoalSend { goal } => self.goal_send(goal),
+            Item::End => {}
         }
     }
 
@@ -362,6 +383,9 @@ impl World {
     /// Start a new process on `node`: a fresh core that first acquires its
     /// node lease.
     fn restart(&mut self, node: usize) {
+        if self.nodes[node].up || (self.auditing && node < self.config.nodes) {
+            return;
+        }
         let inc = self.nodes[node].inc + 1;
         // Large enough that a suspend can hold the clock back without it
         // ever reaching zero.
@@ -402,7 +426,9 @@ impl World {
             self.disks[node] = Disk::default();
         }
         self.fail_requests(node, dead.requests);
-        self.schedule_restart(node);
+        if !self.auditing {
+            self.schedule_restart(node);
+        }
     }
     /// Run one event through a node's core and carry out its effects. Some
     /// effects complete inside the same step, as they do in `Actor::drive`;
@@ -450,7 +476,11 @@ impl World {
         }
     }
 
-    fn finish(self) -> Outcome {
+    fn finish(mut self) -> Outcome {
+        // A run that panicked stopped early: its goals prove nothing.
+        if self.panic.is_none() {
+            self.judge_goals();
+        }
         let names = |keep: &dyn Fn(&Node) -> bool| {
             self.nodes
                 .iter()

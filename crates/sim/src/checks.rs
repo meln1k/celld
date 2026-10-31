@@ -98,6 +98,16 @@ impl Checker {
         }
     }
 
+    /// **Liveness.** Once faults have healed, the fleet must serve every
+    /// cell before the deadline.
+    pub fn unserved(&mut self, t: u64, phase: &str, cell: &str) {
+        self.violation(
+            t,
+            "liveness",
+            format!("{phase}: {cell} was not served before its deadline"),
+        );
+    }
+
     /// **No local route without a runtime.** When the core tells a request
     /// to run here, a runtime for the cell must be published here.
     pub fn routed_local(&mut self, t: u64, node: &str, cell: &str, published: bool) {

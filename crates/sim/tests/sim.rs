@@ -6,7 +6,14 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
         let outcome = run(seed, &SimConfig::calm());
         assert!(outcome.passed(), "seed {seed}: {outcome:?}");
         assert!(outcome.halts.is_empty(), "seed {seed}");
-        assert_eq!(outcome.authoritative, ["n0", "n1", "n2"], "seed {seed}");
+        // The audit killed the fleet; only the fresh node is left, and it
+        // restored every cell from the bucket.
+        assert_eq!(outcome.authoritative, ["n3"], "seed {seed}");
+        assert!(
+            outcome.stats.restored >= 6,
+            "seed {seed}: {:?}",
+            outcome.stats
+        );
         // With no faults every request is answered, and the run did real
         // work: if nothing was acknowledged, the checks had nothing to see.
         assert_eq!(
@@ -55,12 +62,17 @@ fn a_bucket_slower_than_the_lease_never_grants_authority() {
     // The core must notice and keep retrying, never believing it holds a
     // lease that peers already consider dead. With nothing held, there is
     // nothing to fence, so no node halts either, and nothing is served.
+    // That breaks no safety property, but the liveness checks must say so:
+    // a fleet that serves nothing is not working.
     let config = SimConfig {
         store_latency_ms: (1_600, 1_600),
         ..SimConfig::calm()
     };
     let outcome = run(7, &config);
-    assert!(outcome.passed(), "{outcome:?}");
+    assert_eq!(outcome.panic, None);
+    let kinds: Vec<_> = outcome.violations.iter().map(|v| v.kind).collect();
+    // Every cell, once in the probe and once in the audit.
+    assert_eq!(kinds, ["liveness"; 12], "{:?}", outcome.violations);
     assert!(outcome.authoritative.is_empty());
     assert!(outcome.halts.is_empty());
     assert_eq!(outcome.stats.answered, 0);
