@@ -34,6 +34,9 @@ pub struct SimConfig {
     pub ttl_ms: u64,
     /// Simulated time the run lasts.
     pub duration_ms: u64,
+    /// Faults happen only before this instant.
+    pub chaos_ms: u64,
+    pub faults: Faults,
     /// One-way latency to the bucket, drawn per request and per response.
     pub store_latency_ms: (u64, u64),
     /// Gap between client requests across the whole fleet.
@@ -44,6 +47,15 @@ pub struct SimConfig {
     pub trace: bool,
 }
 
+/// What goes wrong, and how often.
+#[derive(Clone, Debug, Default)]
+pub struct Faults {
+    /// Process crashes per simulated minute, across the fleet.
+    pub crashes: f64,
+    /// Chance that a crash also loses the node's disk.
+    pub wipe_probability: f64,
+}
+
 impl SimConfig {
     pub fn calm() -> Self {
         Self {
@@ -51,10 +63,27 @@ impl SimConfig {
             cells: 6,
             ttl_ms: 3_000,
             duration_ms: 30_000,
+            chaos_ms: 0,
+            faults: Faults::default(),
             store_latency_ms: (2, 20),
             request_gap_ms: (5, 60),
             write_probability: 0.6,
             trace: false,
+        }
+    }
+
+    /// Processes crash `per_minute` times a minute for the first 20 s, a
+    /// third of them losing their disk. The run then goes on undisturbed
+    /// long enough for every restart and takeover to finish.
+    pub fn crashing(per_minute: f64) -> Self {
+        Self {
+            duration_ms: 45_000,
+            chaos_ms: 20_000,
+            faults: Faults {
+                crashes: per_minute,
+                wipe_probability: 0.3,
+            },
+            ..Self::calm()
         }
     }
 }
@@ -73,6 +102,12 @@ pub struct Stats {
     pub acked_writes: u64,
     /// Requests an ingress forwarded to another node.
     pub forwarded: u64,
+    /// Forwards that came back without running: stale, full, unreachable.
+    pub bounced: u64,
+    pub crashes: u64,
+    /// Databases restored from the bucket: each one is checked for lost
+    /// writes.
+    pub restored: u64,
 }
 
 /// What a run produced.
@@ -83,7 +118,8 @@ pub struct Outcome {
     /// of one seed must produce the same hash.
     pub trace_hash: u64,
     pub trace: Vec<String>,
-    /// Nodes that halted (self-fenced). A calm run has none.
+    /// Processes that halted (self-fenced), as `node#incarnation`. A calm
+    /// run has none.
     pub halts: Vec<String>,
     /// Nodes that held a live node lease when the run ended.
     pub authoritative: Vec<String>,

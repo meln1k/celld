@@ -133,6 +133,23 @@ impl Store {
         CasOutcome::Applied
     }
 
+    /// `release_owner` in `ownership_store.rs`: if `node` still owns the
+    /// cell at `epoch`, publish it as unowned at the same epoch. Production
+    /// reads, then writes conditionally on what it read; one atomic step
+    /// gives the same outcomes.
+    pub fn release_owner(&mut self, cell: &str, epoch: Epoch, node: &str) -> CasOutcome {
+        let ours = self
+            .owners
+            .get(cell)
+            .is_some_and(|(owner, e, _)| owner.as_deref() == Some(node) && *e == epoch);
+        if !ours {
+            return CasOutcome::Rejected;
+        }
+        let etag = self.etag();
+        self.owners.insert(cell.to_string(), (None, epoch, etag));
+        CasOutcome::Applied
+    }
+
     /// Upload the whole database of one epoch into its prefix.
     pub fn put(&mut self, cell: &str, epoch: Epoch, content: &[WriteId]) {
         let prefix = self.prefixes.entry((cell.to_string(), epoch)).or_default();

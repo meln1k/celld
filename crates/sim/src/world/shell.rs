@@ -4,10 +4,10 @@
 use std::collections::VecDeque;
 
 use celld_logic::{
-    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, ProofSource, Timer,
+    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, Timer,
 };
 
-use super::{Item, World};
+use super::{Item, Work, World};
 use crate::store::Load;
 use crate::WriteId;
 
@@ -71,6 +71,13 @@ pub(super) enum StoreReq {
         guard: CasGuard,
         epoch: Epoch,
     },
+    /// Publish the cell as unowned, keeping its epoch, if this node still
+    /// owns it at `epoch`.
+    ReleaseOwner {
+        op: OpId,
+        cell: String,
+        epoch: Epoch,
+    },
     /// `VerifyOwnership`: read the owner record and compare it.
     Verify {
         op: OpId,
@@ -104,14 +111,8 @@ impl World {
                 let ordinal = n.next_ordinal;
                 n.next_ordinal += 1;
                 n.timers.insert(slot.clone(), (ordinal, timer));
-                self.after(
-                    at_mono_ms.saturating_sub(mono),
-                    Item::Timer {
-                        node,
-                        slot,
-                        ordinal,
-                    },
-                );
+                let delay = at_mono_ms.saturating_sub(mono);
+                self.work(node, delay, Work::Timer { slot, ordinal });
             }
             Effect::ReadSelfNodeLease { op } => {
                 self.store_call(node, StoreReq::ReadSelfLease { op })
@@ -139,10 +140,16 @@ impl World {
                 self.store_call(node, StoreReq::ReadCapacityPeers { op })
             }
             Effect::ReadLocalCells => {
-                // No disk yet, so no local cells. Production scans on a
-                // blocking task, so the answer arrives a little later.
+                // Production scans the disk on a blocking task, so the
+                // answer arrives a little later.
+                let cells = self.local_cells(node);
                 let delay = self.net_rng.range(1, 5);
-                self.deliver(node, delay, Event::LocalCellsRead { result: Ok(vec![]) });
+                self.deliver(node, delay, Event::LocalCellsRead { result: Ok(cells) });
+            }
+            Effect::RecoverNodeLog { op, .. } => {
+                // No fleet log in this model: a lease never carries log
+                // state, so a dead owner never leaves a tail to recover.
+                immediate.push_back(Event::NodeLogRecovered { op, result: Ok(()) });
             }
             Effect::ReadOwner { op, cell } => {
                 self.store_call(node, StoreReq::ReadOwner { op, cell })
@@ -166,9 +173,20 @@ impl World {
                 },
             ),
             Effect::Restore { op, cell, spec } => self.restore(node, op, cell, spec),
+            Effect::StopRuntime {
+                op,
+                cell,
+                epoch,
+                cause,
+                ..
+            } => {
+                self.nodes[node].published.remove(&cell);
+                self.stop_runtime(node, op, cell, epoch, cause);
+            }
             Effect::StartRuntime { op, cell, epoch } => {
-                let name = self.nodes[node].name.clone();
-                self.checker.runtime_started(self.t, &name, &cell, epoch);
+                let (name, who) = (self.nodes[node].name.clone(), self.who(node));
+                self.checker
+                    .runtime_started(self.t, &name, &who, &cell, epoch);
                 let result = if self.nodes[node].replicas.contains_key(&(cell, epoch)) {
                     Ok(())
                 } else {
@@ -195,7 +213,24 @@ impl World {
                 cell,
                 epoch,
                 position,
-            } => self.await_durable(node, op, cell, epoch, position),
+            } => self.await_durable(node, op, &cell, epoch, position),
+            Effect::EnsureDurable {
+                op, cell, epoch, ..
+            } => self.ensure_durable(node, op, &cell, epoch),
+            Effect::AbandonEvictionStop { op, .. } => self.abandon_stop(node, op),
+            Effect::ReleaseOwner { op, cell, epoch } => {
+                self.store_call(node, StoreReq::ReleaseOwner { op, cell, epoch })
+            }
+            Effect::AdoptReleased { op, .. } => {
+                // Peer adoption is not modeled: no successor acknowledges,
+                // so a released cell waits for its next request to claim it.
+                immediate.push_back(Event::SuccessorAdopted {
+                    op,
+                    result: Err(Failure::Definite),
+                });
+            }
+            // An explicit eviction's caller; the simulation has none.
+            Effect::EvictionAdmission { .. } | Effect::EvictionFinished { .. } => {}
             Effect::VerifyOwnership { op, cell, epoch } => {
                 self.store_call(node, StoreReq::Verify { op, cell, epoch })
             }
@@ -206,7 +241,7 @@ impl World {
             } => self.release(node, request, channel, result),
             Effect::Halt { reason, .. } => {
                 self.note(|| format!("n{node} halts: {reason:?}"));
-                self.nodes[node].halted = true;
+                self.nodes[node].halting = true;
             }
             other => unimplemented!("the simulated shell does not carry out {other:?} yet"),
         }
@@ -237,7 +272,8 @@ impl World {
     /// between, on this node and on others.
     pub(super) fn store_call(&mut self, node: usize, req: StoreReq) {
         let delay = self.latency();
-        self.after(delay, Item::StoreApply { node, req });
+        let inc = self.nodes[node].inc;
+        self.after(delay, Item::StoreApply { node, inc, req });
     }
 
     fn latency(&mut self) -> u64 {
@@ -248,10 +284,10 @@ impl World {
     /// The request reaches the bucket: apply it now, at this one instant,
     /// and send the answer back. A lost response will be an answer that is
     /// never scheduled; the write it answers has still happened.
-    pub(super) fn store_apply(&mut self, node: usize, req: StoreReq) {
+    pub(super) fn store_apply(&mut self, node: usize, inc: u64, req: StoreReq) {
         let name = self.nodes[node].name.clone();
-        // Every answer to the core arrives as an event on the agenda.
-        let core = move |event| Item::Deliver { node, event };
+        let sender = format!("{name}#{inc}");
+        let core = Work::Deliver;
         let reply = match req {
             StoreReq::ReadSelfLease { op } => core(Event::SelfNodeLeaseRead {
                 op,
@@ -302,6 +338,10 @@ impl World {
                     result: Ok(outcome),
                 })
             }
+            StoreReq::ReleaseOwner { op, cell, epoch } => core(Event::OwnerReleased {
+                op,
+                result: Ok(self.store.release_owner(&cell, epoch, &name)),
+            }),
             StoreReq::Verify { op, cell, epoch } => {
                 let ours = self
                     .store
@@ -317,38 +357,32 @@ impl World {
                 epoch,
                 content,
             } => {
-                self.checker.upload_applied(self.t, &name, &cell, epoch);
+                self.checker.upload_applied(self.t, &sender, &cell, epoch);
                 self.store.put(&cell, epoch, &content);
-                Item::Uploaded {
-                    node,
+                Work::Uploaded {
                     cell,
                     epoch,
                     len: content.len(),
                 }
             }
-            StoreReq::ReadChain { op, cell, epoch } => Item::ChainRead {
-                node,
+            StoreReq::ReadChain { op, cell, epoch } => Work::ChainRead {
                 op,
                 chain: self.store.read_chain(&cell, epoch),
                 cell,
                 epoch,
             },
         };
+        // The answer goes back to the process that asked. If it has died
+        // since, nobody hears it, but what it answers has still happened.
         let delay = self.latency();
-        self.after(delay, reply);
-    }
-
-    /// Ask the replicator to prove `position` durable. With no open
-    /// database there is nothing to prove, and the proof fails.
-    fn await_durable(&mut self, node: usize, op: OpId, cell: String, epoch: Epoch, position: u64) {
-        if !self.wait_for_upload(node, &cell, epoch, op, position) {
-            let event = Event::DurableReached {
-                op,
-                result: Err(Failure::Ambiguous),
-                source: ProofSource::Bucket,
-            };
-            self.deliver(node, 1, event);
-        }
+        self.after(
+            delay,
+            Item::Proc {
+                node,
+                inc,
+                work: reply,
+            },
+        );
     }
 }
 

@@ -27,8 +27,10 @@ pub struct Checker {
     /// claim stays here after a later epoch supersedes it; the record says
     /// a node once won this epoch, not that it still owns the cell.
     claims: BTreeSet<(String, Epoch, String)>,
-    /// The one node that ran each cell epoch, and the one that uploaded
-    /// into its prefix.
+    /// The one process (`node#incarnation`) that ran each cell epoch, and
+    /// the one that uploaded into its prefix. A process, not a node: a
+    /// restarted process is a different writer from the one that died, and
+    /// the dead one can still have an upload on the wire.
     runtimes: BTreeMap<(String, Epoch), String>,
     uploaders: BTreeMap<(String, Epoch), String>,
     /// What each cell epoch's database held when a node opened it. The
@@ -64,12 +66,12 @@ impl Checker {
     /// runs a cell epoch, and only one ever uploads into its prefix. Two
     /// would be two histories of the cell under one name, and a restore
     /// would read whichever it found.
-    pub fn runtime_started(&mut self, t: u64, node: &str, cell: &str, epoch: Epoch) {
-        if let Some(first) = first_writer(&mut self.runtimes, node, cell, epoch) {
+    pub fn runtime_started(&mut self, t: u64, node: &str, who: &str, cell: &str, epoch: Epoch) {
+        if let Some(first) = first_writer(&mut self.runtimes, who, cell, epoch) {
             self.violation(
                 t,
                 "two-writers",
-                format!("{node} ran {cell} epoch {epoch}, which {first} already ran"),
+                format!("{who} ran {cell} epoch {epoch}, which {first} already ran"),
             );
         }
         let key = (cell.to_string(), epoch, node.to_string());
@@ -86,12 +88,12 @@ impl Checker {
     /// half of **one writer per epoch**. Checked when the upload lands, not
     /// when it is sent, because a node that lost the cell can still have an
     /// upload on the wire.
-    pub fn upload_applied(&mut self, t: u64, node: &str, cell: &str, epoch: Epoch) {
-        if let Some(first) = first_writer(&mut self.uploaders, node, cell, epoch) {
+    pub fn upload_applied(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch) {
+        if let Some(first) = first_writer(&mut self.uploaders, who, cell, epoch) {
             self.violation(
                 t,
                 "two-writers",
-                format!("{node} uploaded into {cell} epoch {epoch}, which {first} already wrote"),
+                format!("{who} uploaded into {cell} epoch {epoch}, which {first} already wrote"),
             );
         }
     }

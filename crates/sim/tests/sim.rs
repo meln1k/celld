@@ -25,6 +25,31 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
 }
 
 #[test]
+fn crashes_lose_no_acknowledged_write() {
+    // Processes die, some with their disks, and other nodes take their
+    // cells over and restore them from the bucket. Every restore must hold
+    // every write a client was told succeeded.
+    let mut restored = 0;
+    for seed in 0..20 {
+        let outcome = run(seed, &SimConfig::crashing(6.0));
+        assert!(outcome.passed(), "seed {seed}: {outcome:?}");
+        assert!(
+            outcome.stats.crashes > 0,
+            "seed {seed}: {:?}",
+            outcome.stats
+        );
+        assert!(
+            outcome.stats.acked_writes > 100,
+            "seed {seed}: {:?}",
+            outcome.stats
+        );
+        restored += outcome.stats.restored;
+    }
+    // Takeovers happened, so the lost-write check had restores to judge.
+    assert!(restored > 100, "only {restored} restores from the bucket");
+}
+
+#[test]
 fn a_bucket_slower_than_the_lease_never_grants_authority() {
     // A lease write that takes longer than the TTL lands already expired.
     // The core must notice and keep retrying, never believing it holds a
@@ -44,19 +69,18 @@ fn a_bucket_slower_than_the_lease_never_grants_authority() {
 
 #[test]
 fn a_seed_replays_exactly() {
-    let traced = SimConfig {
-        trace: true,
-        ..SimConfig::calm()
-    };
-    for seed in [0, 1, 17, 12_345] {
-        let first = run(seed, &SimConfig::calm());
-        assert_eq!(first.trace_hash, run(seed, &SimConfig::calm()).trace_hash);
-        // Tracing only records; it must not change the schedule.
-        assert_eq!(first.trace_hash, run(seed, &traced).trace_hash);
+    for config in [SimConfig::calm(), SimConfig::crashing(6.0)] {
+        let traced = SimConfig {
+            trace: true,
+            ..config.clone()
+        };
+        for seed in [0, 1, 17, 12_345] {
+            let first = run(seed, &config);
+            assert_eq!(first.trace_hash, run(seed, &config).trace_hash);
+            // Tracing only records; it must not change the schedule.
+            assert_eq!(first.trace_hash, run(seed, &traced).trace_hash);
+        }
+        // And the seed matters: a different seed draws a different run.
+        assert_ne!(run(0, &config).trace_hash, run(1, &config).trace_hash);
     }
-    // And the seed matters: a different seed draws a different run.
-    assert_ne!(
-        run(0, &SimConfig::calm()).trace_hash,
-        run(1, &SimConfig::calm()).trace_hash
-    );
 }

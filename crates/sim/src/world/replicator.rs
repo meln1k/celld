@@ -4,12 +4,26 @@
 //!
 //! A cell's database is a list of write ids. An upload carries the whole
 //! list into the epoch's prefix, and one upload runs at a time per epoch.
+//!
+//! An open database lives in its process; the files under it live on the
+//! node's disk. A process that dies leaves its databases on the disk just
+//! as they were, with whatever it committed and never uploaded.
 
-use celld_logic::{Epoch, Event, OpId, ProofSource, RestoreOutcome, RestoreSpec};
+use std::collections::BTreeMap;
+
+use celld_logic::{
+    Epoch, Event, Failure, LocalCell, OpId, ProofSource, RestoreOutcome, RestoreSpec, StopCause,
+};
 
 use super::shell::StoreReq;
 use super::World;
 use crate::WriteId;
+
+/// A node's disk: the database files no process has open.
+#[derive(Default)]
+pub(super) struct Disk {
+    live: BTreeMap<(String, Epoch), Vec<WriteId>>,
+}
 
 /// A cell's open database on one node, at one epoch.
 pub(super) struct Replica {
@@ -19,20 +33,126 @@ pub(super) struct Replica {
     /// Length the bucket is known to hold for this epoch.
     uploaded: usize,
     uploading: bool,
-    /// Gate proofs waiting for `uploaded` to reach a position.
-    waiters: Vec<(OpId, u64)>,
+    /// Proofs waiting for `uploaded` to reach a position.
+    waiters: Vec<Waiter>,
+    /// An eviction stop waiting for its final upload: the operation that
+    /// asked for it.
+    stop: Option<OpId>,
+}
+
+/// A durability proof someone is waiting on.
+enum Waiter {
+    /// The output gate's proof for one response (`AwaitDurable`).
+    Gate { op: OpId, position: u64 },
+    /// An eviction's proof that everything so far is durable
+    /// (`EnsureDurable`).
+    Evict { op: OpId, position: u64 },
+}
+
+impl Waiter {
+    fn position(&self) -> u64 {
+        match self {
+            Waiter::Gate { position, .. } | Waiter::Evict { position, .. } => *position,
+        }
+    }
+
+    /// The event that answers this proof.
+    fn answer(&self, result: Result<u64, Failure>) -> Event {
+        match *self {
+            Waiter::Gate { op, .. } => Event::DurableReached {
+                op,
+                result,
+                source: ProofSource::Bucket,
+            },
+            Waiter::Evict { op, .. } => Event::DurabilityChecked {
+                op,
+                result: result.map(|_| ()),
+            },
+        }
+    }
 }
 
 impl World {
+    /// The databases on the node's disk, as the startup scan reports them.
+    pub(super) fn local_cells(&self, node: usize) -> Vec<LocalCell> {
+        self.disks[node]
+            .live
+            .keys()
+            .map(|(cell, epoch)| LocalCell {
+                id: cell.clone(),
+                epoch: *epoch,
+                live: true,
+            })
+            .collect()
+    }
+
+    /// A dead process's open databases go back to the disk as they were.
+    pub(super) fn close_replicas(
+        &mut self,
+        node: usize,
+        replicas: BTreeMap<(String, Epoch), Replica>,
+    ) {
+        for (key, replica) in replicas {
+            self.disks[node].live.insert(key, replica.content);
+        }
+    }
+
+    /// Stop a cell's runtime and close its database, as `cause` says.
+    pub(super) fn stop_runtime(
+        &mut self,
+        node: usize,
+        op: OpId,
+        cell: String,
+        epoch: Epoch,
+        cause: StopCause,
+    ) {
+        let key = (cell, epoch);
+        if let StopCause::Evict { .. } | StopCause::Cleanup = cause {
+            // A clean stop uploads everything first, then closes. The
+            // eviction snapshot production keeps on disk serves only sticky
+            // ownership, which is not modeled: a released cell is restored
+            // from the bucket by whoever takes it next.
+            let Some(replica) = self.nodes[node].replicas.get_mut(&key) else {
+                return self.deliver(node, 1, Event::RuntimeStopped { op });
+            };
+            replica.stop = Some(op);
+            self.settle_waiters(node, &key.0, epoch);
+            return self.upload(node, &key.0, epoch);
+        }
+        if let Some(replica) = self.nodes[node].replicas.remove(&key) {
+            // Its proofs can no longer be given here.
+            for waiter in &replica.waiters {
+                let event = waiter.answer(Err(Failure::Ambiguous));
+                self.deliver(node, 0, event);
+            }
+            match cause {
+                // The node lost its authority: close in place, with no
+                // final upload. The file stays on disk.
+                StopCause::Fence => {
+                    self.disks[node].live.insert(key, replica.content);
+                }
+                // A durability proof failed, so this database may hold
+                // writes the bucket never got and the client was told
+                // failed. Keep nothing; the next activation restores.
+                StopCause::Reset => {}
+                StopCause::Swap => unimplemented!("generations are not modeled"),
+                StopCause::Evict { .. } | StopCause::Cleanup => unreachable!(),
+            }
+        }
+        let delay = self.net_rng.range(1, 5);
+        self.deliver(node, delay, Event::RuntimeStopped { op });
+    }
+
     pub(super) fn restore(&mut self, node: usize, op: OpId, cell: String, spec: RestoreSpec) {
+        assert!(!spec.resume_local, "no clean reload is modeled: {spec:?}");
         if spec.fresh {
             // Epoch one of a new cell: there is nothing to restore.
             self.open_replica(node, cell, spec.epoch, Vec::new());
             let delay = self.net_rng.range(1, 5);
             self.deliver(node, delay, restore_completed(op, false));
         } else {
-            // No disk yet, so no local snapshot to reuse: always read the
-            // chain from the bucket.
+            // No eviction snapshots yet, so nothing on disk is ever a safe
+            // source: always read the chain from the bucket.
             let epoch = spec.epoch;
             self.store_call(node, StoreReq::ReadChain { op, cell, epoch });
         }
@@ -48,11 +168,14 @@ impl World {
         chain: Option<Vec<WriteId>>,
     ) {
         let restored = chain.is_some();
+        self.stats.restored += 1;
         self.open_replica(node, cell, epoch, chain.unwrap_or_default());
         self.drive(node, restore_completed(op, restored));
     }
 
     fn open_replica(&mut self, node: usize, cell: String, epoch: Epoch, content: Vec<WriteId>) {
+        // Opening an epoch replaces any file a dead process left for it.
+        self.disks[node].live.remove(&(cell.clone(), epoch));
         let name = self.nodes[node].name.clone();
         self.checker
             .replica_opened(self.t, &name, &cell, epoch, &content);
@@ -64,6 +187,7 @@ impl World {
             uploaded: len,
             uploading: false,
             waiters: Vec::new(),
+            stop: None,
         };
         self.nodes[node].replicas.insert((cell, epoch), replica);
     }
@@ -89,31 +213,59 @@ impl World {
 
     /// The epoch's database length when it opened, and now: what a handler
     /// answering now has seen.
-    pub(super) fn positions(&self, node: usize, cell: &str, epoch: Epoch) -> (u64, u64) {
-        let replica = &self.nodes[node].replicas[&(cell.to_string(), epoch)];
-        (replica.start_len as u64, replica.content.len() as u64)
+    /// `None` when the runtime was stopped and the database closed.
+    pub(super) fn positions(&self, node: usize, cell: &str, epoch: Epoch) -> Option<(u64, u64)> {
+        let replica = self.nodes[node].replicas.get(&(cell.to_string(), epoch))?;
+        Some((replica.start_len as u64, replica.content.len() as u64))
     }
 
-    /// Wait for the bucket to hold `position`. Returns false when the epoch
-    /// has no open database here.
-    pub(super) fn wait_for_upload(
+    /// The output gate's proof: answer once the bucket holds `position`.
+    pub(super) fn await_durable(
         &mut self,
         node: usize,
+        op: OpId,
         cell: &str,
         epoch: Epoch,
-        op: OpId,
         position: u64,
-    ) -> bool {
+    ) {
+        self.wait_for_upload(node, cell, epoch, Waiter::Gate { op, position });
+    }
+
+    /// An eviction's proof: answer once the bucket holds every write
+    /// committed so far.
+    pub(super) fn ensure_durable(&mut self, node: usize, op: OpId, cell: &str, epoch: Epoch) {
+        let position = self.nodes[node]
+            .replicas
+            .get(&(cell.to_string(), epoch))
+            .map_or(0, |replica| replica.content.len() as u64);
+        self.wait_for_upload(node, cell, epoch, Waiter::Evict { op, position });
+    }
+
+    /// Give a stop that has not finished its final upload back to the
+    /// core, which restarts the cell on its open database.
+    pub(super) fn abandon_stop(&mut self, node: usize, op: OpId) {
+        let pending = self.nodes[node]
+            .replicas
+            .values_mut()
+            .find(|replica| replica.stop == Some(op));
+        if let Some(replica) = pending {
+            replica.stop = None;
+            self.deliver(node, 1, Event::RuntimeStopCancelled { op });
+        }
+    }
+
+    fn wait_for_upload(&mut self, node: usize, cell: &str, epoch: Epoch, waiter: Waiter) {
         let Some(replica) = self.nodes[node]
             .replicas
             .get_mut(&(cell.to_string(), epoch))
         else {
-            return false;
+            // No open database here: there is nothing to prove from.
+            let event = waiter.answer(Err(Failure::Ambiguous));
+            return self.deliver(node, 1, event);
         };
-        replica.waiters.push((op, position));
+        replica.waiters.push(waiter);
         self.settle_waiters(node, cell, epoch);
         self.upload(node, cell, epoch);
-        true
     }
 
     /// Upload the epoch's database if the bucket is behind it and no upload
@@ -147,30 +299,34 @@ impl World {
         }
     }
 
-    /// Answer every gate proof the bucket now covers. The answer is
-    /// scheduled, not driven, because this can run inside `execute`.
+    /// Answer every proof the bucket now covers, and finish a stop whose
+    /// final upload landed. Answers are scheduled, not driven, because this
+    /// can run inside `execute`.
     fn settle_waiters(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        let Some(replica) = self.nodes[node]
-            .replicas
-            .get_mut(&(cell.to_string(), epoch))
-        else {
+        let key = (cell.to_string(), epoch);
+        let Some(replica) = self.nodes[node].replicas.get_mut(&key) else {
             return;
         };
         let uploaded = replica.uploaded as u64;
-        let mut proven = Vec::new();
-        replica.waiters.retain(|&(op, position)| {
-            let covered = position <= uploaded;
+        let mut answers = Vec::new();
+        replica.waiters.retain(|waiter| {
+            let covered = waiter.position() <= uploaded;
             if covered {
-                proven.push(op);
+                answers.push(waiter.answer(Ok(uploaded)));
             }
             !covered
         });
-        for op in proven {
-            let event = Event::DurableReached {
-                op,
-                result: Ok(uploaded),
-                source: ProofSource::Bucket,
-            };
+        if let Some(op) = replica
+            .stop
+            .filter(|_| uploaded >= replica.content.len() as u64)
+        {
+            let replica = self.nodes[node].replicas.remove(&key).unwrap();
+            for waiter in &replica.waiters {
+                answers.push(waiter.answer(Err(Failure::Ambiguous)));
+            }
+            answers.push(Event::RuntimeStopped { op });
+        }
+        for event in answers {
             self.deliver(node, 0, event);
         }
     }

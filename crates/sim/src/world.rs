@@ -11,11 +11,19 @@
 //!
 //! - `shell`: carries out each effect, as `Actor::execute` does, including
 //!   the round trips to the bucket.
-//! - `replicator`: each node's open databases, their uploads and the
-//!   durability proofs, as `ltx_repl.rs` does.
+//! - `replicator`: each node's disk and open databases, their uploads and
+//!   the durability proofs, as `ltx_repl.rs` does.
 //! - `clients`: the workload and the scripted handler that serves it.
+//! - `faults`: what goes wrong, and the supervisor that restarts a node.
+//!
+//! A node is a machine with a disk. The process on it can die and be
+//! restarted. Each start is a new *incarnation* with a fresh core, fresh
+//! clocks and no memory. Work addressed to a process carries its
+//! incarnation and is dropped if that process has died since: a dead
+//! process's timers never fire and its bucket answers reach nobody.
 
 mod clients;
+mod faults;
 mod replicator;
 mod shell;
 
@@ -32,8 +40,8 @@ use crate::checks::Checker;
 use crate::store::Store;
 use crate::{Outcome, Rng, SimConfig, Stats, WriteId};
 
-use clients::{Op, Req};
-use replicator::Replica;
+use clients::{Bounce, Op, Req};
+use replicator::{Disk, Replica};
 use shell::{Slot, StoreReq};
 
 type Time = u64;
@@ -44,60 +52,99 @@ const PEER_PROTOCOL: u16 = 1;
 
 /// Something due at a simulated instant.
 enum Item {
+    /// Work for one process. Dropped if that process has died since.
+    Proc { node: usize, inc: u64, work: Work },
+    /// A bucket request arrives at the bucket and is applied. It applies
+    /// even if its sender has died since: it was already on the wire.
+    StoreApply {
+        node: usize,
+        inc: u64,
+        req: StoreReq,
+    },
+    /// A client sends its next request.
+    ClientNew,
+    /// A request reaches a node: from its client, or forwarded by the
+    /// ingress on route `via`. Not tied to a process: it reaches whichever
+    /// process runs on the node by then, or none.
+    Arrive {
+        node: usize,
+        op: u64,
+        via: Option<Epoch>,
+    },
+    /// A forward came back to the ingress without running.
+    Bounced { op: u64, why: Bounce },
+    /// The ingress resolves the request's route again.
+    Redispatch { op: u64 },
+    /// The next fault of the run.
+    Fault,
+    /// The supervisor starts a new process on the node.
+    Restart { node: usize },
+}
+
+/// What a process does later.
+enum Work {
     /// A completion the shell reports some time after the effect started.
-    Deliver { node: usize, event: Event },
+    Deliver(Event),
     /// A timer the core armed. `ordinal` tells a live arm from one that a
     /// later `ScheduleTimer` for the same slot replaced.
-    Timer {
-        node: usize,
-        slot: Slot,
-        ordinal: u64,
-    },
-    /// A bucket request arrives at the bucket and is applied.
-    StoreApply { node: usize, req: StoreReq },
+    Timer { slot: Slot, ordinal: u64 },
     /// The bucket confirmed an upload of `len` writes.
     Uploaded {
-        node: usize,
         cell: String,
         epoch: Epoch,
         len: usize,
     },
     /// The bucket answered a restore's chain read.
     ChainRead {
-        node: usize,
         op: OpId,
         cell: String,
         epoch: Epoch,
         chain: Option<Vec<WriteId>>,
     },
-    /// A client sends its next request.
-    ClientNew,
-    /// A request reaches a node: from its client, or forwarded by the
-    /// ingress on route `via`.
-    Arrive {
-        node: usize,
-        op: u64,
-        via: Option<Epoch>,
-    },
     /// A handler commits its write.
-    HandlerCommit { node: usize, request: RequestId },
+    HandlerCommit { request: RequestId },
     /// A handler returns its response.
-    HandlerEnd { node: usize, request: RequestId },
+    HandlerEnd { request: RequestId },
 }
 
+/// The process running on a node, or the gap between two of them. A crash
+/// replaces the whole value, so nothing of the old process survives in it.
 struct Node {
     name: String,
+    /// Which start of this node's process this is.
+    inc: u64,
+    up: bool,
+    /// The core asked to halt; the process exits after this step.
+    halting: bool,
     state: State,
-    /// Where this node's monotonic clock starts. Nodes boot at different
-    /// moments, so their monotonic clocks disagree.
+    /// Where this process's monotonic clock starts. Processes start at
+    /// different moments, so their monotonic clocks disagree.
     mono_base: u64,
     timers: BTreeMap<Slot, (u64, Timer)>,
     next_ordinal: u64,
-    halted: bool,
     replicas: BTreeMap<(String, Epoch), Replica>,
-    /// The runtime registry: cells this node serves, at which epoch.
+    /// The runtime registry: cells this process serves, at which epoch.
     published: BTreeMap<String, Epoch>,
     requests: BTreeMap<RequestId, Req>,
+}
+
+impl Node {
+    fn new(index: usize, inc: u64, mono_base: u64) -> Self {
+        let name = format!("n{index}");
+        Self {
+            state: State::new(name.clone(), core_config()),
+            name,
+            inc,
+            up: false,
+            halting: false,
+            mono_base,
+            timers: BTreeMap::new(),
+            next_ordinal: 0,
+            replicas: BTreeMap::new(),
+            published: BTreeMap::new(),
+            requests: BTreeMap::new(),
+        }
+    }
 }
 
 pub struct World {
@@ -108,16 +155,19 @@ pub struct World {
     agenda: BTreeMap<(Time, u64), Item>,
     store: Store,
     nodes: Vec<Node>,
+    disks: Vec<Disk>,
     ops: BTreeMap<u64, Op>,
     next_op: u64,
     next_request: RequestId,
     next_write: WriteId,
     net_rng: Rng,
     work_rng: Rng,
+    fault_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
     trace: Vec<String>,
+    halts: Vec<String>,
     panic: Option<String>,
 }
 
@@ -126,22 +176,13 @@ impl World {
         let mut master = Rng::new(seed);
         // One stream per concern, so that drawing more for one does not
         // shift every decision of the other.
-        let mut net_rng = master.fork();
+        let net_rng = master.fork();
         let work_rng = master.fork();
-        let core_config = core_config();
+        let fault_rng = master.fork();
         let nodes = (0..config.nodes)
-            .map(|index| Node {
-                name: format!("n{index}"),
-                state: State::new(format!("n{index}"), core_config),
-                mono_base: net_rng.range(1_000, 1_000_000),
-                timers: BTreeMap::new(),
-                next_ordinal: 0,
-                halted: false,
-                replicas: BTreeMap::new(),
-                published: BTreeMap::new(),
-                requests: BTreeMap::new(),
-            })
+            .map(|index| Node::new(index, 0, 0))
             .collect();
+        let disks = (0..config.nodes).map(|_| Disk::default()).collect();
         Self {
             seed,
             config,
@@ -150,16 +191,19 @@ impl World {
             agenda: BTreeMap::new(),
             store: Store::default(),
             nodes,
+            disks,
             ops: BTreeMap::new(),
             next_op: 1,
             next_request: 1,
             next_write: 1,
             net_rng,
             work_rng,
+            fault_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             hash: Fnv(0xcbf2_9ce4_8422_2325),
             trace: Vec::new(),
+            halts: Vec::new(),
             panic: None,
         }
     }
@@ -169,8 +213,19 @@ impl World {
         self.agenda.insert((self.t + delay, self.seq), item);
     }
 
+    /// Schedule work for the process now running on `node`.
+    fn work(&mut self, node: usize, delay: u64, work: Work) {
+        let inc = self.nodes[node].inc;
+        self.after(delay, Item::Proc { node, inc, work });
+    }
+
     fn deliver(&mut self, node: usize, delay: u64, event: Event) {
-        self.after(delay, Item::Deliver { node, event });
+        self.work(node, delay, Work::Deliver(event));
+    }
+
+    /// The process on `node`, by name and incarnation: `n0#2`.
+    fn who(&self, node: usize) -> String {
+        format!("{}#{}", self.nodes[node].name, self.nodes[node].inc)
     }
 
     fn wall(&self) -> u64 {
@@ -183,21 +238,11 @@ impl World {
 
     pub fn run(mut self) -> Outcome {
         for node in 0..self.nodes.len() {
-            let spec = NodeLeaseSpec {
-                addr: self.nodes[node].name.clone(),
-                peer_protocol: PEER_PROTOCOL,
-                generation: format!("g{node}"),
-                resume_generation: None,
-                ttl_ms: self.config.ttl_ms,
-            };
-            let event = Event::StartNodeLease {
-                now_ms: 0,
-                now_mono_ms: 0,
-                spec,
-            };
-            self.deliver(node, 0, event);
+            let delay = self.net_rng.range(0, 50);
+            self.after(delay, Item::Restart { node });
         }
         self.start_clients();
+        self.start_faults();
         while let Some(((t, _), item)) = self.agenda.pop_first() {
             if t > self.config.duration_ms {
                 break;
@@ -224,41 +269,89 @@ impl World {
 
     fn handle(&mut self, item: Item) {
         match item {
-            Item::Deliver { node, event } => self.drive(node, event),
-            Item::Timer {
-                node,
-                slot,
-                ordinal,
-            } => self.timer(node, slot, ordinal),
-            Item::StoreApply { node, req } => self.store_apply(node, req),
-            Item::Uploaded {
-                node,
-                cell,
-                epoch,
-                len,
-            } => self.uploaded(node, cell, epoch, len),
-            Item::ChainRead {
-                node,
+            Item::Proc { node, inc, work } => {
+                let n = &self.nodes[node];
+                if n.up && n.inc == inc {
+                    self.proc_work(node, work);
+                }
+            }
+            Item::StoreApply { node, inc, req } => self.store_apply(node, inc, req),
+            Item::ClientNew => self.client_new(),
+            Item::Arrive { node, op, via } => self.arrive(node, op, via),
+            Item::Bounced { op, why } => self.bounced(op, why),
+            Item::Redispatch { op } => self.redispatch(op),
+            Item::Fault => self.fault(),
+            Item::Restart { node } => self.restart(node),
+        }
+    }
+
+    fn proc_work(&mut self, node: usize, work: Work) {
+        match work {
+            Work::Deliver(event) => self.drive(node, event),
+            Work::Timer { slot, ordinal } => self.timer(node, slot, ordinal),
+            Work::Uploaded { cell, epoch, len } => self.uploaded(node, cell, epoch, len),
+            Work::ChainRead {
                 op,
                 cell,
                 epoch,
                 chain,
             } => self.chain_read(node, op, cell, epoch, chain),
-            Item::ClientNew => self.client_new(),
-            Item::Arrive { node, op, via } => self.arrive(node, op, via),
-            Item::HandlerCommit { node, request } => self.handler_commit(node, request),
-            Item::HandlerEnd { node, request } => self.handler_end(node, request),
+            Work::HandlerCommit { request } => self.handler_commit(node, request),
+            Work::HandlerEnd { request } => self.handler_end(node, request),
         }
     }
 
+    /// Start a new process on `node`: a fresh core that first acquires its
+    /// node lease.
+    fn restart(&mut self, node: usize) {
+        let inc = self.nodes[node].inc + 1;
+        let mono_base = self.net_rng.range(1_000, 1_000_000);
+        self.nodes[node] = Node {
+            up: true,
+            ..Node::new(node, inc, mono_base)
+        };
+        self.note(|| format!("start n{node}#{inc}"));
+        let spec = NodeLeaseSpec {
+            addr: self.nodes[node].name.clone(),
+            peer_protocol: PEER_PROTOCOL,
+            generation: format!("g{node}.{inc}"),
+            resume_generation: None,
+            ttl_ms: self.config.ttl_ms,
+        };
+        let event = Event::StartNodeLease {
+            now_ms: 0,
+            now_mono_ms: 0,
+            spec,
+        };
+        self.drive(node, event);
+    }
+
+    /// The process on `node` dies. Its open databases stay on disk as it
+    /// left them, unless the disk is wiped too. Every request it held
+    /// fails, and the supervisor starts a new process later.
+    fn crash(&mut self, node: usize, wipe: bool) {
+        if !self.nodes[node].up {
+            return;
+        }
+        let who = self.who(node);
+        self.note(|| format!("crash {who}{}", if wipe { " (disk wiped)" } else { "" }));
+        let inc = self.nodes[node].inc;
+        let dead = std::mem::replace(&mut self.nodes[node], Node::new(node, inc, 0));
+        self.close_replicas(node, dead.replicas);
+        if wipe {
+            self.disks[node] = Disk::default();
+        }
+        self.fail_requests(node, dead.requests);
+        self.schedule_restart(node);
+    }
     /// Run one event through a node's core and carry out its effects. Some
     /// effects complete inside the same step, as they do in `Actor::drive`;
     /// their events queue behind the current one.
     fn drive(&mut self, node: usize, event: Event) {
         let mut queue = VecDeque::from([event]);
         while let Some(mut event) = queue.pop_front() {
-            if self.nodes[node].halted {
-                return;
+            if !self.nodes[node].up || self.nodes[node].halting {
+                break;
             }
             shell::stamp(&mut event, self.wall(), self.mono(node));
             self.record(node, "<-", &event);
@@ -268,6 +361,12 @@ impl World {
                 self.record(node, "->", &effect);
                 self.execute(node, effect, &mut queue);
             }
+        }
+        // A halt is the process exiting: as far as the fleet can tell, a
+        // crash that leaves its disk alone.
+        if self.nodes[node].halting {
+            self.halts.push(self.who(node));
+            self.crash(node, false);
         }
     }
 
@@ -302,7 +401,7 @@ impl World {
         Outcome {
             seed: self.seed,
             trace_hash: self.hash.0,
-            halts: names(&|n| n.halted),
+            halts: self.halts,
             authoritative: names(&|n| n.state.node_authoritative()),
             trace: self.trace,
             panic: self.panic,

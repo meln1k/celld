@@ -1,4 +1,4 @@
-//! `celld-sim [--seed N] [--trace]`: run one seed and print what happened.
+//! `celld-sim [--seed N] [--crashes PER_MINUTE] [--trace]`: run one seed and print what happened.
 
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
@@ -13,6 +13,10 @@ fn main() {
         match arg.as_str() {
             "--seed" => seed = args.next().and_then(|s| s.parse().ok()).expect("--seed N"),
             "--trace" => config.trace = true,
+            "--crashes" => {
+                let rate = args.next().and_then(|s| s.parse().ok());
+                config = SimConfig::crashing(rate.expect("--crashes PER_MINUTE"));
+            }
             other => panic!("unknown argument {other}"),
         }
     }
@@ -26,8 +30,17 @@ fn main() {
         stats.events, outcome.trace_hash, outcome.authoritative, outcome.halts
     );
     println!(
-        "requests {}: answered {}, failed {}, writes acknowledged {}, forwarded {}",
-        stats.requests, stats.answered, stats.failed, stats.acked_writes, stats.forwarded
+        "requests {}: answered {}, failed {}, writes acknowledged {}, forwarded {}, bounced {}",
+        stats.requests,
+        stats.answered,
+        stats.failed,
+        stats.acked_writes,
+        stats.forwarded,
+        stats.bounced
+    );
+    println!(
+        "crashes {}, restores from the bucket {}",
+        stats.crashes, stats.restored
     );
     for v in &outcome.violations {
         println!("VIOLATION t={} {}: {}", v.at_ms, v.kind, v.detail);
