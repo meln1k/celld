@@ -1,9 +1,9 @@
 //! The oracle.
 //!
 //! The world tells the checker facts as they happen: a claim applied at the
-//! bucket, a runtime started, a client told its write succeeded. The checker
-//! keeps the few records it needs (ghost state no node can see) and tests
-//! each property at the moment its fact arrives. The shell never decides
+//! bucket, a runtime started, a response released, a database restored. The
+//! checker keeps the few records it needs (ghost state no node can see) and
+//! tests each property when its fact arrives. The shell never decides
 //! whether something is a violation; every property lives in this file.
 
 use std::collections::BTreeSet;
@@ -23,8 +23,12 @@ pub struct Violation {
 
 #[derive(Default)]
 pub struct Checker {
-    /// Every ownership claim the bucket applied: (cell, epoch, node).
+    /// Every ownership claim the bucket applied: (cell, epoch, node). A
+    /// claim stays here after a later epoch supersedes it; the record says
+    /// a node once won this epoch, not that it still owns the cell.
     claims: BTreeSet<(String, Epoch, String)>,
+    /// Every write a client was told succeeded: (cell, epoch, write).
+    acked: BTreeSet<(String, Epoch, WriteId)>,
     pub violations: Vec<Violation>,
 }
 
@@ -71,27 +75,81 @@ impl Checker {
         }
     }
 
-    /// **No acknowledgement before durability.** The instant a client is
-    /// told a write succeeded, the write must already be in its epoch's
-    /// prefix in the bucket, at the position it was committed at. If the
-    /// node died right now, a restore would still find it.
-    pub fn write_acked(
+    /// **Nothing is revealed before it is durable.** When a response leaves,
+    /// the bucket must already hold everything it can reveal, in its epoch's
+    /// prefix:
+    ///
+    /// - a write's response reveals that write, at the position it was
+    ///   committed at;
+    /// - a read reveals every write up to the position it `observed`.
+    ///
+    /// An acknowledged write is remembered for [`Self::replica_opened`].
+    pub fn response_released(
         &mut self,
         t: u64,
         store: &Store,
         cell: &str,
         epoch: Epoch,
-        write: WriteId,
-        position: u64,
+        committed: Option<(WriteId, u64)>,
+        observed: Option<u64>,
     ) {
-        let durable = store.prefix(cell, epoch).get(position as usize - 1) == Some(&write);
-        if !durable {
+        let prefix = store.prefix(cell, epoch);
+        if let Some((write, position)) = committed {
+            self.acked.insert((cell.to_string(), epoch, write));
+            let at = position.checked_sub(1).and_then(|i| prefix.get(i as usize));
+            if at != Some(&write) {
+                self.violation(
+                    t,
+                    "ack-before-durable",
+                    format!(
+                        "write {write} of {cell} epoch {epoch} was acknowledged, but the bucket \
+                         does not hold it at position {position}"
+                    ),
+                );
+            }
+        }
+        if let Some(observed) = observed {
+            if (prefix.len() as u64) < observed {
+                self.violation(
+                    t,
+                    "read-before-durable",
+                    format!(
+                        "a read of {cell} epoch {epoch} saw position {observed} and was \
+                         released, but the bucket holds only {}",
+                        prefix.len()
+                    ),
+                );
+            }
+        }
+    }
+
+    /// **No acknowledged write is lost.** A database opened at `epoch` must
+    /// hold every write acknowledged at an earlier epoch of the cell. This is
+    /// what the acknowledgement promised: whoever owns the cell next sees
+    /// the write.
+    pub fn replica_opened(
+        &mut self,
+        t: u64,
+        node: &str,
+        cell: &str,
+        epoch: Epoch,
+        content: &[WriteId],
+    ) {
+        let content: BTreeSet<WriteId> = content.iter().copied().collect();
+        let lost: Vec<WriteId> = self
+            .acked
+            .range((cell.to_string(), 0, 0)..(cell.to_string(), epoch, 0))
+            .map(|(_, _, write)| *write)
+            .filter(|write| !content.contains(write))
+            .collect();
+        if let Some(first) = lost.first() {
             self.violation(
                 t,
-                "ack-before-durable",
+                "lost-write",
                 format!(
-                    "write {write} of {cell} epoch {epoch} was acknowledged, but the bucket \
-                     does not hold it at position {position}"
+                    "{node} opened {cell} epoch {epoch} without {} acknowledged write(s), \
+                     first {first}",
+                    lost.len()
                 ),
             );
         }

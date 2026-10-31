@@ -59,6 +59,20 @@ impl SimConfig {
     }
 }
 
+/// Counts of what a run did. A check that never had anything to look at
+/// proves nothing, so the tests read these too.
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    pub events: u64,
+    pub requests: u64,
+    /// Requests whose response was released to the client.
+    pub answered: u64,
+    /// Requests the core refused, or whose response it refused to release.
+    pub failed: u64,
+    /// Writes a client was told succeeded.
+    pub acked_writes: u64,
+}
+
 /// What a run produced.
 #[derive(Debug)]
 pub struct Outcome {
@@ -67,21 +81,15 @@ pub struct Outcome {
     /// of one seed must produce the same hash.
     pub trace_hash: u64,
     pub trace: Vec<String>,
-    pub events: u64,
     /// Nodes that halted (self-fenced). A calm run has none.
     pub halts: Vec<String>,
     /// Nodes that held a live node lease when the run ended.
     pub authoritative: Vec<String>,
-    /// A core panic or a failed `State::validate`, with its time and node.
+    /// A panic anywhere in the run, in a core or in the simulated shell,
+    /// with its seed and time. A failed `State::validate` is one.
     pub panic: Option<String>,
     pub violations: Vec<Violation>,
-    pub requests: u64,
-    /// Requests whose response was released to the client.
-    pub answered: u64,
-    /// Requests the core refused, or whose response it refused to release.
-    pub failed: u64,
-    /// Writes a client was told succeeded.
-    pub acked_writes: u64,
+    pub stats: Stats,
 }
 
 impl Outcome {

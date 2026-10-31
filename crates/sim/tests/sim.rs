@@ -9,8 +9,11 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
         assert_eq!(outcome.authoritative, ["n0", "n1", "n2"], "seed {seed}");
         // With no faults every request is answered, and the run did real
         // work: if nothing was acknowledged, the checks had nothing to see.
-        assert_eq!(outcome.answered, outcome.requests, "seed {seed}");
-        assert!(outcome.acked_writes > 100, "seed {seed}: {outcome:?}");
+        assert_eq!(
+            outcome.stats.answered, outcome.stats.requests,
+            "seed {seed}"
+        );
+        assert!(outcome.stats.acked_writes > 100, "seed {seed}: {outcome:?}");
     }
 }
 
@@ -28,8 +31,8 @@ fn a_bucket_slower_than_the_lease_never_grants_authority() {
     assert!(outcome.passed(), "{outcome:?}");
     assert!(outcome.authoritative.is_empty());
     assert!(outcome.halts.is_empty());
-    assert_eq!(outcome.answered, 0);
-    assert_eq!(outcome.acked_writes, 0);
+    assert_eq!(outcome.stats.answered, 0);
+    assert_eq!(outcome.stats.acked_writes, 0);
 }
 
 #[test]
