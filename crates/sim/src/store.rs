@@ -76,9 +76,10 @@ impl Store {
         }
     }
 
-    /// Every node's lease with its load, as the fleet capacity sample
-    /// reports it. Only the fields the simulation varies are measured; the
-    /// rest say every node is healthy and has memory to spare.
+    /// Every node's lease with its load, scanned at this instant. Production
+    /// reads a shared fleet sample that can be a few intervals old; that
+    /// staleness is not modeled yet. Only the fields the simulation varies
+    /// are measured; the rest say every node is healthy with memory to spare.
     pub fn capacity_peers(&self) -> Vec<CapacityPeer> {
         self.leases
             .values()
@@ -149,6 +150,16 @@ impl Store {
             .rev()
             .find(|(_, writes)| !writes.is_empty())
             .map(|(_, writes)| writes.clone())
+    }
+
+    /// How much of epoch `epoch`'s database the bucket holds: its own prefix
+    /// once anything was uploaded into it, or else the chain it was
+    /// restored from, which lives below it.
+    pub fn durable_len(&self, cell: &str, epoch: Epoch) -> usize {
+        match self.prefix(cell, epoch) {
+            [] => self.read_chain(cell, epoch).map_or(0, |chain| chain.len()),
+            prefix => prefix.len(),
+        }
     }
 
     pub fn prefix(&self, cell: &str, epoch: Epoch) -> &[WriteId] {

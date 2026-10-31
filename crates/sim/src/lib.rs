@@ -73,8 +73,6 @@ pub struct Stats {
     pub acked_writes: u64,
     /// Requests an ingress forwarded to another node.
     pub forwarded: u64,
-    /// Forwards a peer answered with `409 stale route`.
-    pub stale_routes: u64,
 }
 
 /// What a run produced.

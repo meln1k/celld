@@ -122,7 +122,8 @@ impl World {
                 // The lease body carries the node's load, sampled now.
                 let state = &self.nodes[node].state;
                 let load = Load {
-                    resident: state.residents().len(),
+                    // Activating cells hold a slot too, as production reports.
+                    resident: state.occupied(),
                     owned: state.owned_cells(),
                     sampled_ms: self.wall(),
                 };
@@ -249,41 +250,43 @@ impl World {
     /// never scheduled; the write it answers has still happened.
     pub(super) fn store_apply(&mut self, node: usize, req: StoreReq) {
         let name = self.nodes[node].name.clone();
-        let answer = match req {
-            StoreReq::ReadSelfLease { op } => Event::SelfNodeLeaseRead {
+        // Every answer to the core arrives as an event on the agenda.
+        let core = move |event| Item::Deliver { node, event };
+        let reply = match req {
+            StoreReq::ReadSelfLease { op } => core(Event::SelfNodeLeaseRead {
                 op,
                 now_ms: 0,
                 now_mono_ms: 0,
                 result: Ok(self.store.read_lease(&name)),
-            },
+            }),
             StoreReq::CasLease {
                 op,
                 guard,
                 record,
                 load,
-            } => Event::NodeLeaseCasCompleted {
+            } => core(Event::NodeLeaseCasCompleted {
                 op,
                 now_mono_ms: 0,
                 result: Ok(self.store.cas_lease(&guard, &record, load)),
                 // The bucket posture: lease bodies carry no node-log state.
                 stamped_log_state: None,
-            },
-            StoreReq::ReadOwner { op, cell } => Event::OwnerRead {
+            }),
+            StoreReq::ReadOwner { op, cell } => core(Event::OwnerRead {
                 op,
                 now_ms: 0,
                 result: Ok(self.store.read_owner(&cell)),
-            },
-            StoreReq::ReadCapacityPeers { op } => Event::CapacityPeersRead {
+            }),
+            StoreReq::ReadCapacityPeers { op } => core(Event::CapacityPeersRead {
                 op,
                 // The core judges the sample at the instant it was taken.
                 now_ms: self.wall(),
                 result: Ok(self.store.capacity_peers()),
-            },
-            StoreReq::ReadLease { op, node } => Event::NodeLeaseRead {
+            }),
+            StoreReq::ReadLease { op, node: owner } => core(Event::NodeLeaseRead {
                 op,
                 now_ms: 0,
-                result: Ok(self.store.read_lease(&node)),
-            },
+                result: Ok(self.store.read_lease(&owner)),
+            }),
             StoreReq::CasOwner {
                 op,
                 cell,
@@ -294,20 +297,20 @@ impl World {
                 if outcome == CasOutcome::Applied {
                     self.checker.claim_applied(&cell, epoch, &name);
                 }
-                Event::OwnerCasCompleted {
+                core(Event::OwnerCasCompleted {
                     op,
                     result: Ok(outcome),
-                }
+                })
             }
             StoreReq::Verify { op, cell, epoch } => {
                 let ours = self
                     .store
                     .read_owner(&cell)
                     .is_some_and(|r| r.node.as_ref() == Some(&name) && r.epoch == epoch);
-                Event::OwnershipVerified {
+                core(Event::OwnershipVerified {
                     op,
                     result: if ours { Ok(()) } else { Err(Failure::Definite) },
-                }
+                })
             }
             StoreReq::Upload {
                 cell,
@@ -316,35 +319,23 @@ impl World {
             } => {
                 self.checker.upload_applied(self.t, &name, &cell, epoch);
                 self.store.put(&cell, epoch, &content);
-                let len = content.len();
-                let delay = self.latency();
-                return self.after(
-                    delay,
-                    Item::Uploaded {
-                        node,
-                        cell,
-                        epoch,
-                        len,
-                    },
-                );
+                Item::Uploaded {
+                    node,
+                    cell,
+                    epoch,
+                    len: content.len(),
+                }
             }
-            StoreReq::ReadChain { op, cell, epoch } => {
-                let chain = self.store.read_chain(&cell, epoch);
-                let delay = self.latency();
-                return self.after(
-                    delay,
-                    Item::ChainRead {
-                        node,
-                        op,
-                        cell,
-                        epoch,
-                        chain,
-                    },
-                );
-            }
+            StoreReq::ReadChain { op, cell, epoch } => Item::ChainRead {
+                node,
+                op,
+                chain: self.store.read_chain(&cell, epoch),
+                cell,
+                epoch,
+            },
         };
         let delay = self.latency();
-        self.deliver(node, delay, answer);
+        self.after(delay, reply);
     }
 
     /// Ask the replicator to prove `position` durable. With no open

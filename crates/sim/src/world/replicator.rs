@@ -87,14 +87,11 @@ impl World {
         Some((write, position))
     }
 
-    /// The committed position a read can see, when a handler has written
-    /// above what the epoch opened with. The gate holds the read behind it.
-    pub(super) fn unproven_position(&self, node: usize, cell: &str, epoch: Epoch) -> Option<u64> {
-        self.nodes[node]
-            .replicas
-            .get(&(cell.to_string(), epoch))
-            .filter(|replica| replica.content.len() > replica.start_len)
-            .map(|replica| replica.content.len() as u64)
+    /// The epoch's database length when it opened, and now: what a handler
+    /// answering now has seen.
+    pub(super) fn positions(&self, node: usize, cell: &str, epoch: Epoch) -> (u64, u64) {
+        let replica = &self.nodes[node].replicas[&(cell.to_string(), epoch)];
+        (replica.start_len as u64, replica.content.len() as u64)
     }
 
     /// Wait for the bucket to hold `position`. Returns false when the epoch

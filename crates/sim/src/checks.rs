@@ -31,6 +31,9 @@ pub struct Checker {
     /// into its prefix.
     runtimes: BTreeMap<(String, Epoch), String>,
     uploaders: BTreeMap<(String, Epoch), String>,
+    /// What each cell epoch's database held when a node opened it. The
+    /// newest open of an epoch wins, so a crashed epoch's reopen counts.
+    opened: BTreeMap<(String, Epoch), BTreeSet<WriteId>>,
     /// Every write a client was told succeeded: (cell, epoch, write).
     acked: BTreeSet<(String, Epoch, WriteId)>,
     pub violations: Vec<Violation>,
@@ -105,15 +108,15 @@ impl Checker {
         }
     }
 
-    /// **Nothing is revealed before it is durable.** When a response leaves,
-    /// the bucket must already hold everything it can reveal, in its epoch's
-    /// prefix:
+    /// **Nothing is revealed before it is durable.** A response reveals
+    /// everything its handler saw: the cell's database up to `saw` when it
+    /// answered, which includes its own write if it made one. When the
+    /// response leaves, the bucket must hold all of that for the epoch, and
+    /// a write must sit at the position it was committed at.
     ///
-    /// - a write's response reveals that write, at the position it was
-    ///   committed at;
-    /// - a read reveals every write up to the position it `observed`.
-    ///
-    /// An acknowledged write is remembered for [`Self::replica_opened`].
+    /// `saw` comes from the simulated database, not from what the shell
+    /// told the core, so a shell that understates what a handler saw
+    /// cannot fool the core and this check together.
     pub fn response_released(
         &mut self,
         t: u64,
@@ -121,42 +124,60 @@ impl Checker {
         cell: &str,
         epoch: Epoch,
         committed: Option<(WriteId, u64)>,
-        observed: Option<u64>,
+        saw: u64,
     ) {
-        let prefix = store.prefix(cell, epoch);
-        if let Some((write, position)) = committed {
-            self.acked.insert((cell.to_string(), epoch, write));
-            let at = position.checked_sub(1).and_then(|i| prefix.get(i as usize));
-            if at != Some(&write) {
-                self.violation(
-                    t,
-                    "ack-before-durable",
-                    format!(
-                        "write {write} of {cell} epoch {epoch} was acknowledged, but the bucket \
-                         does not hold it at position {position}"
-                    ),
-                );
-            }
-        }
-        if let Some(observed) = observed {
-            if (prefix.len() as u64) < observed {
+        let durable = store.durable_len(cell, epoch) as u64;
+        let Some((write, position)) = committed else {
+            if durable < saw {
                 self.violation(
                     t,
                     "read-before-durable",
                     format!(
-                        "a read of {cell} epoch {epoch} saw position {observed} and was \
-                         released, but the bucket holds only {}",
-                        prefix.len()
+                        "a read of {cell} epoch {epoch} saw {saw} writes and was released, \
+                         but the bucket holds only {durable}"
                     ),
                 );
             }
+            return;
+        };
+        let prefix = store.prefix(cell, epoch);
+        let at = position.checked_sub(1).and_then(|i| prefix.get(i as usize));
+        if at != Some(&write) || durable < saw {
+            self.violation(
+                t,
+                "ack-before-durable",
+                format!(
+                    "write {write} of {cell} epoch {epoch} at position {position} was \
+                     acknowledged after its handler saw {saw} writes, but the bucket holds \
+                     {durable} and {at:?} there"
+                ),
+            );
         }
+        // A later epoch that already opened without this write has lost it,
+        // even though this epoch's prefix holds it: the ack came too late.
+        let missing = self
+            .opened
+            .range((cell.to_string(), epoch + 1)..(cell.to_string(), Epoch::MAX))
+            .find(|(_, content)| !content.contains(&write))
+            .map(|((_, later), _)| *later);
+        if let Some(later) = missing {
+            self.violation(
+                t,
+                "lost-write",
+                format!(
+                    "write {write} of {cell} epoch {epoch} was acknowledged after epoch \
+                     {later} had already opened without it"
+                ),
+            );
+        }
+        self.acked.insert((cell.to_string(), epoch, write));
     }
 
     /// **No acknowledged write is lost.** A database opened at `epoch` must
-    /// hold every write acknowledged at an earlier epoch of the cell. This is
-    /// what the acknowledgement promised: whoever owns the cell next sees
-    /// the write.
+    /// hold every write acknowledged so far at that epoch or an earlier one.
+    /// That is what the acknowledgement promised: whoever owns the cell next
+    /// sees the write. Reopening the same epoch, after a crash, is held to
+    /// the same promise.
     pub fn replica_opened(
         &mut self,
         t: u64,
@@ -168,7 +189,7 @@ impl Checker {
         let content: BTreeSet<WriteId> = content.iter().copied().collect();
         let lost: Vec<WriteId> = self
             .acked
-            .range((cell.to_string(), 0, 0)..(cell.to_string(), epoch, 0))
+            .range((cell.to_string(), 0, 0)..=(cell.to_string(), epoch, WriteId::MAX))
             .map(|(_, _, write)| *write)
             .filter(|write| !content.contains(write))
             .collect();
@@ -183,6 +204,7 @@ impl Checker {
                 ),
             );
         }
+        self.opened.insert((cell.to_string(), epoch), content);
     }
 }
 
