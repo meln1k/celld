@@ -1,4 +1,4 @@
-use celld_sim::{run, SimConfig};
+use celld_sim::{run, Mutation, SimConfig};
 
 #[test]
 fn calm_fleet_serves_every_request_and_breaks_nothing() {
@@ -121,4 +121,34 @@ fn a_swarm_seed_replays_its_configuration_and_its_run() {
         })
         .collect();
     assert!(shapes.len() > 10, "swarm barely varies: {shapes:?}");
+}
+
+#[test]
+fn every_planted_bug_is_caught_by_its_check() {
+    // A check that never fires proves nothing by staying quiet. Each
+    // mutation breaks one promise of the shell or bucket, and the check for
+    // that property must catch it within a few seeds of the same crashing
+    // fleet that `crashes_lose_no_acknowledged_write` shows clean.
+    for mutation in Mutation::ALL {
+        let expected: &[&str] = match mutation {
+            Mutation::None => unreachable!(),
+            Mutation::IgnoreCasGuard => &["two-writers"],
+            Mutation::PhantomClaim => &["unclaimed-runtime"],
+            Mutation::SkipPublish => &["local-without-runtime"],
+            Mutation::AckBeforeUpload => &["ack-before-durable", "read-before-durable"],
+            Mutation::StaleRestore => &["lost-write"],
+            Mutation::RejectClaims => &["liveness"],
+        };
+        let config = SimConfig {
+            mutation,
+            ..SimConfig::crashing(6.0)
+        };
+        let caught = (0..20).find(|&seed| {
+            run(seed, &config)
+                .violations
+                .iter()
+                .any(|v| expected.contains(&v.kind))
+        });
+        assert!(caught.is_some(), "{mutation:?} went unnoticed for 20 seeds");
+    }
 }

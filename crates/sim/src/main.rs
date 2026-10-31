@@ -1,19 +1,22 @@
-//! `celld-sim [--seed N | --seeds A..B] [--crashes PER_MINUTE | --chaos | --swarm] [--trace]`
+//! `celld-sim [--seed N | --seeds A..B] [--crashes PER_MINUTE | --chaos | --swarm]
+//! [--mutation NAME] [--trace]`
 //!
 //! One seed prints what happened. A range prints one line per failing seed,
 //! with its first violation or panic, then a count. `--swarm` draws each
-//! seed's configuration from the seed itself.
+//! seed's configuration from the seed itself. `--mutation` plants a known
+//! bug, named as in `Mutation`, to watch a check catch it.
 
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
 
-use celld_sim::{run, SimConfig};
+use celld_sim::{run, Mutation, SimConfig};
 
 fn main() {
     let mut seed = 0;
     let mut seeds = None;
     let mut config = SimConfig::calm();
     let (mut swarm, mut trace) = (false, false);
+    let mut mutation = Mutation::None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -22,6 +25,13 @@ fn main() {
                 let range = args.next().expect("--seeds A..B");
                 let (a, b) = range.split_once("..").expect("--seeds A..B");
                 seeds = Some(a.parse::<u64>().unwrap()..b.parse::<u64>().unwrap());
+            }
+            "--mutation" => {
+                let name = args.next().expect("--mutation NAME");
+                mutation = *Mutation::ALL
+                    .iter()
+                    .find(|m| format!("{m:?}") == name)
+                    .unwrap_or_else(|| panic!("no mutation {name}: {:?}", Mutation::ALL));
             }
             "--trace" => trace = true,
             "--swarm" => swarm = true,
@@ -35,6 +45,7 @@ fn main() {
     }
     let config_for = |seed| SimConfig {
         trace,
+        mutation,
         ..if swarm {
             SimConfig::swarm(seed)
         } else {

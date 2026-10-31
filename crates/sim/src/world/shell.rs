@@ -13,7 +13,7 @@ use super::{Item, Work, World};
 /// The bucket client's timeout for one call (`bucket.rs`).
 const STORE_TIMEOUT_MS: u64 = 15_000;
 use crate::store::Load;
-use crate::WriteId;
+use crate::{Mutation, WriteId};
 
 /// Which armed timer a new arm replaces. This follows `TimerSlot` in
 /// `crates/celld/actor.rs`: the lease timers coalesce, and the rest are
@@ -218,7 +218,9 @@ impl World {
             }
             Effect::Publish { op, cell, epoch } => {
                 // Production inserts into its registry inside the same step.
-                self.nodes[node].published.insert(cell, epoch);
+                if self.config.mutation != Mutation::SkipPublish {
+                    self.nodes[node].published.insert(cell, epoch);
+                }
                 immediate.push_back(Event::Published { op, result: Ok(()) });
             }
             Effect::Complete { request, result } => self.complete(node, request, result),
@@ -470,8 +472,22 @@ impl World {
                 guard,
                 epoch,
             } => {
-                let outcome = self.store.cas_owner(&cell, &guard, epoch, &name);
-                if outcome == CasOutcome::Applied {
+                let guard = match self.config.mutation {
+                    // Write against whatever is there, as if it had matched.
+                    Mutation::IgnoreCasGuard => match self.store.read_owner(&cell) {
+                        Some(record) => CasGuard::Match(record.etag),
+                        None => CasGuard::Absent,
+                    },
+                    _ => guard,
+                };
+                let outcome = match self.config.mutation {
+                    // Answered without touching the bucket.
+                    Mutation::PhantomClaim => CasOutcome::Applied,
+                    Mutation::RejectClaims => CasOutcome::Rejected,
+                    _ => self.store.cas_owner(&cell, &guard, epoch, &name),
+                };
+                if outcome == CasOutcome::Applied && self.config.mutation != Mutation::PhantomClaim
+                {
                     self.checker.claim_applied(&cell, epoch, &name);
                 }
                 core(Event::OwnerCasCompleted {
@@ -508,7 +524,11 @@ impl World {
             }
             StoreReq::ReadChain { op, cell, epoch } => Work::ChainRead {
                 op,
-                chain: self.store.read_chain(&cell, epoch),
+                chain: match self.config.mutation {
+                    // Skip the previous epoch's prefix, the usual source.
+                    Mutation::StaleRestore => self.store.read_chain(&cell, epoch.saturating_sub(1)),
+                    _ => self.store.read_chain(&cell, epoch),
+                },
                 cell,
                 epoch,
             },

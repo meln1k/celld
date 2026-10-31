@@ -17,7 +17,7 @@ use celld_logic::{
 
 use super::shell::StoreReq;
 use super::{Work, World, OPERATION_DEADLINE_MS};
-use crate::WriteId;
+use crate::{Mutation, WriteId};
 
 /// How long the replicator works on one durability proof before it says it
 /// could not give it.
@@ -249,6 +249,10 @@ impl World {
         epoch: Epoch,
         position: u64,
     ) {
+        if self.config.mutation == Mutation::AckBeforeUpload {
+            let event = Waiter::Gate { op, position }.answer(Ok(position));
+            return self.deliver(node, 1, event);
+        }
         self.wait_for_upload(node, cell, epoch, Waiter::Gate { op, position });
     }
 

@@ -52,8 +52,49 @@ pub struct SimConfig {
     pub sticky_eviction: bool,
     /// Give back a cell nobody has used for this long.
     pub idle_evict_ms: Option<u64>,
+    /// A bug planted in the simulated shell or bucket.
+    pub mutation: Mutation,
     /// Keep a human-readable line for every event and effect.
     pub trace: bool,
+}
+
+/// A known bug planted in the simulated shell or bucket, never in the core.
+/// Each one breaks a promise the core relies on, so the check that guards
+/// the matching property must fire. A check that stays quiet under its
+/// mutation proves nothing when it stays quiet on real code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mutation {
+    #[default]
+    None,
+    /// The bucket applies every owner write whatever its guard, so two
+    /// nodes can both win one epoch. Caught by `two-writers`.
+    IgnoreCasGuard,
+    /// An owner write answers `Applied` but never reaches the bucket. Caught
+    /// by `unclaimed-runtime`.
+    PhantomClaim,
+    /// `Publish` answers success without registering the runtime. Caught by
+    /// `local-without-runtime`.
+    SkipPublish,
+    /// `AwaitDurable` answers at once, before any upload. Caught by
+    /// `ack-before-durable` and `read-before-durable`.
+    AckBeforeUpload,
+    /// A restore reads the prefix below the newest one, missing the last
+    /// owner's writes. Caught by `lost-write`.
+    StaleRestore,
+    /// The bucket rejects every owner write: nothing is unsafe, but no cell
+    /// is ever served. Caught by `liveness`.
+    RejectClaims,
+}
+
+impl Mutation {
+    pub const ALL: [Mutation; 6] = [
+        Mutation::IgnoreCasGuard,
+        Mutation::PhantomClaim,
+        Mutation::SkipPublish,
+        Mutation::AckBeforeUpload,
+        Mutation::StaleRestore,
+        Mutation::RejectClaims,
+    ];
 }
 
 /// What goes wrong, and how often. Rates are per simulated minute across
@@ -106,6 +147,7 @@ impl SimConfig {
             max_activations: 4,
             sticky_eviction: false,
             idle_evict_ms: None,
+            mutation: Mutation::None,
             trace: false,
         }
     }
@@ -204,6 +246,7 @@ impl SimConfig {
             max_activations: r.range(1, 4) as usize,
             sticky_eviction: r.chance(0.5),
             idle_evict_ms: r.chance(0.3).then(|| r.range(500, 5_000)),
+            mutation: Mutation::None,
             trace: false,
         }
     }
