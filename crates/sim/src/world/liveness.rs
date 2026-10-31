@@ -3,8 +3,9 @@
 //! Safety checks run all along. They pass trivially for a fleet that
 //! refuses everything, so a run ends with two liveness phases:
 //!
-//! 1. **Probe.** The workload stops, every fault has long healed, and every
-//!    cell must take a write within `PROBE_WINDOW_MS`.
+//! 1. **Probe.** The workload stops, every fault has healed and every
+//!    restart it caused has happened, and every cell must take a write
+//!    within `PROBE_WINDOW_MS`.
 //! 2. **Audit.** Every machine retires: its process dies and never comes
 //!    back, so nothing on its disk can help. One fresh node joins and must
 //!    serve every cell, restoring it from the bucket alone.
@@ -32,13 +33,16 @@ pub(super) struct Goal {
 }
 
 impl World {
-    /// Schedule the two phases and the end of the run.
+    /// The probe comes once the workload ends; each phase schedules the
+    /// next when it begins.
     pub(super) fn start_liveness(&mut self) {
-        let probe = self.config.duration_ms;
-        let audit = probe + PROBE_WINDOW_MS;
-        self.after(probe, Item::Probe);
-        self.after(audit, Item::Audit);
-        self.after(audit + self.audit_window(), Item::End);
+        self.after(self.config.duration_ms, Item::Probe);
+    }
+
+    /// A fault, or the restart that follows it, still disturbs the fleet
+    /// until `until`: the probe must not start before then.
+    pub(super) fn disturbed_until(&mut self, until: Time) {
+        self.quiet_from = self.quiet_from.max(until);
     }
 
     fn audit_window(&self) -> u64 {
@@ -46,11 +50,17 @@ impl World {
     }
 
     pub(super) fn probe(&mut self) {
+        if self.t < self.quiet_from {
+            // A late pause, partition or restart is still under way. What
+            // the fleet does before it ends is the fault's doing.
+            return self.after(self.quiet_from - self.t, Item::Probe);
+        }
         self.note(|| "probe: every cell must take a write".into());
         let deadline = self.t + PROBE_WINDOW_MS;
         for cell in 0..self.config.cells {
             self.add_goal("probe", cell, true, None, deadline);
         }
+        self.after(PROBE_WINDOW_MS, Item::Audit);
     }
 
     pub(super) fn audit(&mut self) {
@@ -66,6 +76,7 @@ impl World {
         for cell in 0..self.config.cells {
             self.add_goal("audit", cell, false, Some(node), deadline);
         }
+        self.after(self.audit_window(), Item::End);
     }
 
     fn add_goal(

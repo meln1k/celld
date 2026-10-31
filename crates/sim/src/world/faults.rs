@@ -108,6 +108,7 @@ impl World {
         self.stats.pauses += 1;
         let kind = if suspend { "suspend" } else { "pause" };
         self.note(|| format!("{kind} n{node}#{inc} for {duration} ms"));
+        self.disturbed_until(self.t + duration);
         self.after(duration, Item::Resume { node, inc });
     }
 
@@ -142,6 +143,7 @@ impl World {
         let duration = self.fault_rng.range(100, max);
         self.stats.partitions += 1;
         self.note(|| format!("partition n{node} ({mode:?}) for {duration} ms"));
+        self.disturbed_until(self.t + duration);
         self.after(
             duration,
             Item::Heal {
@@ -168,6 +170,11 @@ impl World {
     pub(super) fn schedule_restart(&mut self, node: usize) {
         let ttl = self.config.ttl_ms;
         let delay = self.fault_rng.range(ttl, 3 * ttl);
+        if self.t < self.config.chaos_ms {
+            // A restart after the chaos is the system's own business, but
+            // one a fault caused is part of the fault.
+            self.disturbed_until(self.t + delay);
+        }
         self.after(delay, Item::Restart { node });
     }
 }

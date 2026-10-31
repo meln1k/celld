@@ -249,6 +249,8 @@ pub struct World {
     trace: Vec<String>,
     halts: Vec<String>,
     goals: Vec<Goal>,
+    /// When the last fault, and the last restart one caused, is over.
+    quiet_from: Time,
     panic: Option<String>,
 }
 
@@ -289,6 +291,7 @@ impl World {
             trace: Vec::new(),
             halts: Vec::new(),
             goals: Vec::new(),
+            quiet_from: 0,
             panic: None,
         }
     }
