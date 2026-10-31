@@ -8,6 +8,7 @@ use celld_logic::{
 };
 
 use super::{Item, World};
+use crate::store::Load;
 use crate::WriteId;
 
 /// Which armed timer a new arm replaces. This follows `TimerSlot` in
@@ -49,10 +50,20 @@ pub(super) enum StoreReq {
         op: OpId,
         guard: CasGuard,
         record: NodeLeaseRecord,
+        load: Load,
+    },
+    /// The fleet's leases, to place an unowned cell on a peer with room.
+    ReadCapacityPeers {
+        op: OpId,
     },
     ReadOwner {
         op: OpId,
         cell: String,
+    },
+    /// Another node's lease, to judge whether the owner it names is live.
+    ReadLease {
+        op: OpId,
+        node: String,
     },
     CasOwner {
         op: OpId,
@@ -107,7 +118,25 @@ impl World {
             }
             Effect::CasNodeLease {
                 op, guard, record, ..
-            } => self.store_call(node, StoreReq::CasLease { op, guard, record }),
+            } => {
+                // The lease body carries the node's load, sampled now.
+                let state = &self.nodes[node].state;
+                let load = Load {
+                    resident: state.residents().len(),
+                    owned: state.owned_cells(),
+                    sampled_ms: self.wall(),
+                };
+                let req = StoreReq::CasLease {
+                    op,
+                    guard,
+                    record,
+                    load,
+                };
+                self.store_call(node, req)
+            }
+            Effect::ReadCapacityPeers { op, .. } => {
+                self.store_call(node, StoreReq::ReadCapacityPeers { op })
+            }
             Effect::ReadLocalCells => {
                 // No disk yet, so no local cells. Production scans on a
                 // blocking task, so the answer arrives a little later.
@@ -116,6 +145,9 @@ impl World {
             }
             Effect::ReadOwner { op, cell } => {
                 self.store_call(node, StoreReq::ReadOwner { op, cell })
+            }
+            Effect::ReadNodeLease { op, owner, .. } => {
+                self.store_call(node, StoreReq::ReadLease { op, node: owner })
             }
             Effect::CasOwner {
                 op,
@@ -224,10 +256,15 @@ impl World {
                 now_mono_ms: 0,
                 result: Ok(self.store.read_lease(&name)),
             },
-            StoreReq::CasLease { op, guard, record } => Event::NodeLeaseCasCompleted {
+            StoreReq::CasLease {
+                op,
+                guard,
+                record,
+                load,
+            } => Event::NodeLeaseCasCompleted {
                 op,
                 now_mono_ms: 0,
-                result: Ok(self.store.cas_lease(&guard, &record)),
+                result: Ok(self.store.cas_lease(&guard, &record, load)),
                 // The bucket posture: lease bodies carry no node-log state.
                 stamped_log_state: None,
             },
@@ -235,6 +272,17 @@ impl World {
                 op,
                 now_ms: 0,
                 result: Ok(self.store.read_owner(&cell)),
+            },
+            StoreReq::ReadCapacityPeers { op } => Event::CapacityPeersRead {
+                op,
+                // The core judges the sample at the instant it was taken.
+                now_ms: self.wall(),
+                result: Ok(self.store.capacity_peers()),
+            },
+            StoreReq::ReadLease { op, node } => Event::NodeLeaseRead {
+                op,
+                now_ms: 0,
+                result: Ok(self.store.read_lease(&node)),
             },
             StoreReq::CasOwner {
                 op,
@@ -266,6 +314,7 @@ impl World {
                 epoch,
                 content,
             } => {
+                self.checker.upload_applied(self.t, &name, &cell, epoch);
                 self.store.put(&cell, epoch, &content);
                 let len = content.len();
                 let delay = self.latency();
@@ -336,8 +385,9 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
         }
         Event::NodeLeaseCasCompleted { now_mono_ms, .. }
         | Event::RequestAt { now_mono_ms, .. }
+        | Event::CapacityRequestAt { now_mono_ms, .. }
         | Event::OutputAt { now_mono_ms, .. } => *now_mono_ms = mono,
-        Event::OwnerRead { now_ms, .. } => *now_ms = wall,
+        Event::OwnerRead { now_ms, .. } | Event::NodeLeaseRead { now_ms, .. } => *now_ms = wall,
         _ => {}
     }
 }

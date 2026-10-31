@@ -32,7 +32,7 @@ use crate::checks::Checker;
 use crate::store::Store;
 use crate::{Outcome, Rng, SimConfig, Stats, WriteId};
 
-use clients::Req;
+use clients::{Op, Req};
 use replicator::Replica;
 use shell::{Slot, StoreReq};
 
@@ -72,6 +72,17 @@ enum Item {
     },
     /// A client sends its next request.
     ClientNew,
+    /// A request reaches a node: from its client, or forwarded by the
+    /// ingress on route `via`.
+    Arrive {
+        node: usize,
+        op: u64,
+        via: Option<Epoch>,
+    },
+    /// A peer's `409 stale route` reaches the ingress.
+    Stale { op: u64 },
+    /// The ingress resolves the request's route again.
+    Redispatch { op: u64 },
     /// A handler commits its write.
     HandlerCommit { node: usize, request: RequestId },
     /// A handler returns its response.
@@ -101,6 +112,8 @@ pub struct World {
     agenda: BTreeMap<(Time, u64), Item>,
     store: Store,
     nodes: Vec<Node>,
+    ops: BTreeMap<u64, Op>,
+    next_op: u64,
     next_request: RequestId,
     next_write: WriteId,
     net_rng: Rng,
@@ -141,6 +154,8 @@ impl World {
             agenda: BTreeMap::new(),
             store: Store::default(),
             nodes,
+            ops: BTreeMap::new(),
+            next_op: 1,
             next_request: 1,
             next_write: 1,
             net_rng,
@@ -234,6 +249,9 @@ impl World {
                 chain,
             } => self.chain_read(node, op, cell, epoch, chain),
             Item::ClientNew => self.client_new(),
+            Item::Arrive { node, op, via } => self.arrive(node, op, via),
+            Item::Stale { op } => self.stale(op),
+            Item::Redispatch { op } => self.redispatch(op),
             Item::HandlerCommit { node, request } => self.handler_commit(node, request),
             Item::HandlerEnd { node, request } => self.handler_end(node, request),
         }

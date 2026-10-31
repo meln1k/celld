@@ -26,8 +26,13 @@ fn main() {
         stats.events, outcome.trace_hash, outcome.authoritative, outcome.halts
     );
     println!(
-        "requests {}: answered {}, failed {}, writes acknowledged {}",
-        stats.requests, stats.answered, stats.failed, stats.acked_writes
+        "requests {}: answered {}, failed {}, writes acknowledged {}, forwarded {}, stale routes {}",
+        stats.requests,
+        stats.answered,
+        stats.failed,
+        stats.acked_writes,
+        stats.forwarded,
+        stats.stale_routes
     );
     for v in &outcome.violations {
         println!("VIOLATION t={} {}: {}", v.at_ms, v.kind, v.detail);

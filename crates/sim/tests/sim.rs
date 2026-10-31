@@ -14,6 +14,13 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
             "seed {seed}"
         );
         assert!(outcome.stats.acked_writes > 100, "seed {seed}: {outcome:?}");
+        // Clients pick a random ingress, so most requests run on a node
+        // that is not their ingress.
+        assert!(
+            outcome.stats.forwarded > outcome.stats.requests / 2,
+            "seed {seed}: {:?}",
+            outcome.stats
+        );
     }
 }
 
