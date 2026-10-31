@@ -245,6 +245,11 @@ impl World {
             }
             // An explicit eviction's caller; the simulation has none.
             Effect::EvictionAdmission { .. } | Effect::EvictionFinished { .. } => {}
+            Effect::VerifyOwnership { op, .. }
+                if self.config.mutation == Some(Mutation::BlindVerify) =>
+            {
+                immediate.push_back(Event::OwnershipVerified { op, result: Ok(()) });
+            }
             Effect::VerifyOwnership { op, cell, epoch } => {
                 self.store_call(node, StoreReq::Verify { op, cell, epoch })
             }

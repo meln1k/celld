@@ -165,8 +165,9 @@ impl Checker {
                 ),
             );
         }
-        // A later epoch that already opened without this write has lost it,
-        // even though this epoch's prefix holds it: the ack came too late.
+        // **No ack after a takeover.** A later epoch that already opened
+        // without this write has lost it, even though this epoch's prefix
+        // holds it: the ack came too late.
         let missing = self
             .opened
             .range((cell.to_string(), epoch + 1)..(cell.to_string(), Epoch::MAX))
@@ -175,7 +176,7 @@ impl Checker {
         if let Some(later) = missing {
             self.violation(
                 t,
-                "lost-write",
+                "late-ack",
                 format!(
                     "write {write} of {cell} epoch {epoch} was acknowledged after epoch \
                      {later} had already opened without it"

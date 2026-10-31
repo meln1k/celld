@@ -79,18 +79,27 @@ pub enum Mutation {
     /// A restore reads the prefix below the newest one, missing the last
     /// owner's writes. Caught by `lost-write`.
     StaleRestore,
+    /// A read answers without telling the gate what it saw, so it can
+    /// reveal writes that are not durable. Caught by `read-before-durable`.
+    ReadsBypassGate,
+    /// `VerifyOwnership` answers `Ok` without reading the owner record, so a
+    /// node that lost the cell still acknowledges into its old epoch.
+    /// Caught by `late-ack`.
+    BlindVerify,
     /// The bucket rejects every owner write: nothing is unsafe, but no cell
     /// is ever served. Caught by `liveness`.
     RejectClaims,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 6] = [
+    pub const ALL: [Mutation; 8] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
         Mutation::AckBeforeUpload,
         Mutation::StaleRestore,
+        Mutation::ReadsBypassGate,
+        Mutation::BlindVerify,
         Mutation::RejectClaims,
     ];
 }

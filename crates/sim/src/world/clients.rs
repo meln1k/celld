@@ -20,7 +20,7 @@ use celld_logic::routing::{Attempt, Dispatcher};
 use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route};
 
 use super::{Item, Time, Work, World, OPERATION_DEADLINE_MS};
-use crate::WriteId;
+use crate::{Mutation, WriteId};
 
 /// When clients start sending. Nodes need a few round trips for their
 /// leases first; a request before that is refused, which proves nothing.
@@ -459,6 +459,7 @@ impl World {
             Some(_) => (Some(saw), None),
             None => (None, (saw > opened).then_some(saw)),
         };
+        let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
         self.nodes[node].requests.get_mut(&request).unwrap().saw = saw;
         self.drive(
             node,
