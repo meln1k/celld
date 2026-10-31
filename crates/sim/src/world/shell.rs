@@ -108,7 +108,7 @@ impl World {
         match effect {
             Effect::ScheduleTimer { timer, at_mono_ms } => {
                 let mono = self.mono(node);
-                let n = &mut self.nodes[node];
+                let n = self.machines[node].proc_mut();
                 let slot = Slot::of(&timer);
                 let ordinal = n.next_ordinal;
                 n.next_ordinal += 1;
@@ -126,7 +126,7 @@ impl World {
                 authority_expires_ms,
             } => {
                 // The lease body carries the node's load, sampled now.
-                let state = &self.nodes[node].state;
+                let state = &self.machines[node].proc().state;
                 let load = Load {
                     // Activating cells hold a slot too, as production reports.
                     resident: state.occupied(),
@@ -192,19 +192,23 @@ impl World {
                 cause,
                 bounded,
             } => {
-                self.nodes[node].published.remove(&cell);
+                self.machines[node].proc_mut().published.remove(&cell);
                 self.stop_runtime(node, op, cell, epoch, cause, bounded);
             }
             Effect::StartRuntime { op, cell, epoch } => {
-                let (name, who) = (self.nodes[node].name.clone(), self.who(node));
+                let (name, who) = (self.machines[node].name.clone(), self.who(node));
                 self.checker
                     .runtime_started(self.t, &name, &who, &cell, epoch);
-                let result = if self.nodes[node].replicas.contains_key(&(cell, epoch)) {
+                let result = if self.machines[node]
+                    .proc()
+                    .replicas
+                    .contains_key(&(cell, epoch))
+                {
                     Ok(())
                 } else {
                     Err(Failure::Definite)
                 };
-                let generation = self.nodes[node].state.current_generation();
+                let generation = self.machines[node].proc().state.current_generation();
                 let delay = self.net_rng.range(1, 10);
                 let event = Event::RuntimeStarted {
                     op,
@@ -217,7 +221,7 @@ impl World {
             Effect::Publish { op, cell, epoch } => {
                 // Production inserts into its registry inside the same step.
                 if self.config.mutation != Some(Mutation::SkipPublish) {
-                    self.nodes[node].published.insert(cell, epoch);
+                    self.machines[node].proc_mut().published.insert(cell, epoch);
                 }
                 immediate.push_back(Event::Published { op, result: Ok(()) });
             }
@@ -260,7 +264,7 @@ impl World {
             } => self.release(node, request, channel, result),
             Effect::Halt { reason, .. } => {
                 self.note(|| format!("n{node} halts: {reason:?}"));
-                self.nodes[node].halting = true;
+                self.machines[node].proc_mut().halting = true;
             }
             other => unimplemented!("the simulated shell does not carry out {other:?} yet"),
         }
@@ -268,7 +272,7 @@ impl World {
 
     pub(super) fn timer(&mut self, node: usize, slot: Slot, ordinal: u64) {
         let mono = self.mono(node);
-        let n = &mut self.nodes[node];
+        let n = self.machines[node].proc_mut();
         let Some(&(armed, _, at_mono)) = n.timers.get(&slot) else {
             return;
         };
@@ -333,7 +337,7 @@ impl World {
                 failure = Some(Failure::Ambiguous);
             }
         }
-        match self.partitions[node] {
+        match self.machines[node].partition {
             Some((_, Partition::Refuse)) => (applies, failure) = (false, Some(Failure::Definite)),
             Some((_, Partition::Hang)) => (applies, failure) = (false, Some(Failure::Ambiguous)),
             None => {}
@@ -351,7 +355,7 @@ impl World {
             self.work(node, at.max(1), work);
         }
         if applies {
-            let inc = self.nodes[node].inc;
+            let inc = self.machines[node].inc;
             let answer_ms = failure.is_none().then_some(response_ms);
             let item = Item::StoreApply {
                 node,
@@ -431,7 +435,7 @@ impl World {
         req: StoreReq,
         answer_ms: Option<u64>,
     ) {
-        let name = self.nodes[node].name.clone();
+        let name = self.machines[node].name.clone();
         let sender = format!("{name}#{inc}");
         let core = Work::Deliver;
         let reply = match req {

@@ -85,7 +85,8 @@ impl Waiter {
 impl World {
     /// The databases on the node's disk, as the startup scan reports them.
     pub(super) fn local_cells(&self, node: usize) -> Vec<LocalCell> {
-        self.disks[node]
+        self.machines[node]
+            .disk
             .live
             .keys()
             .map(|(cell, epoch)| LocalCell {
@@ -103,7 +104,7 @@ impl World {
         replicas: BTreeMap<(String, Epoch), Replica>,
     ) {
         for (key, replica) in replicas {
-            self.disks[node].live.insert(key, replica.content);
+            self.machines[node].disk.live.insert(key, replica.content);
         }
     }
 
@@ -123,7 +124,7 @@ impl World {
             // eviction snapshot production keeps on disk serves only sticky
             // ownership, which is not modeled: a released cell is restored
             // from the bucket by whoever takes it next.
-            let Some(replica) = self.nodes[node].replicas.get_mut(&key) else {
+            let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
                 return self.deliver(node, 1, Event::RuntimeStopped { op });
             };
             replica.stop = Some(op);
@@ -140,7 +141,7 @@ impl World {
             self.settle_waiters(node, &key.0, epoch);
             return self.upload(node, &key.0, epoch);
         }
-        if let Some(replica) = self.nodes[node].replicas.remove(&key) {
+        if let Some(replica) = self.machines[node].proc_mut().replicas.remove(&key) {
             // Its proofs can no longer be given here.
             for waiter in &replica.waiters {
                 let event = waiter.answer(Err(Failure::Ambiguous));
@@ -150,7 +151,7 @@ impl World {
                 // The node lost its authority: close in place, with no
                 // final upload. The file stays on disk.
                 StopCause::Fence => {
-                    self.disks[node].live.insert(key, replica.content);
+                    self.machines[node].disk.live.insert(key, replica.content);
                 }
                 // A durability proof failed, so this database may hold
                 // writes the bucket never got and the client was told
@@ -196,8 +197,8 @@ impl World {
 
     fn open_replica(&mut self, node: usize, cell: String, epoch: Epoch, content: Vec<WriteId>) {
         // Opening an epoch replaces any file a dead process left for it.
-        self.disks[node].live.remove(&(cell.clone(), epoch));
-        let name = self.nodes[node].name.clone();
+        self.machines[node].disk.live.remove(&(cell.clone(), epoch));
+        let name = self.machines[node].name.clone();
         self.checker
             .replica_opened(self.t, &name, &cell, epoch, &content);
         let len = content.len();
@@ -210,7 +211,10 @@ impl World {
             waiters: Vec::new(),
             stop: None,
         };
-        self.nodes[node].replicas.insert((cell, epoch), replica);
+        self.machines[node]
+            .proc_mut()
+            .replicas
+            .insert((cell, epoch), replica);
     }
 
     /// A handler commits one write. Returns the write and its position, or
@@ -221,7 +225,8 @@ impl World {
         cell: &str,
         epoch: Epoch,
     ) -> Option<(WriteId, u64)> {
-        let replica = self.nodes[node]
+        let replica = self.machines[node]
+            .proc_mut()
             .replicas
             .get_mut(&(cell.to_string(), epoch))?;
         let write = self.next_write;
@@ -236,7 +241,10 @@ impl World {
     /// answering now has seen.
     /// `None` when the runtime was stopped and the database closed.
     pub(super) fn positions(&self, node: usize, cell: &str, epoch: Epoch) -> Option<(u64, u64)> {
-        let replica = self.nodes[node].replicas.get(&(cell.to_string(), epoch))?;
+        let replica = self.machines[node]
+            .proc()
+            .replicas
+            .get(&(cell.to_string(), epoch))?;
         Some((replica.start_len as u64, replica.content.len() as u64))
     }
 
@@ -259,7 +267,8 @@ impl World {
     /// An eviction's proof: answer once the bucket holds every write
     /// committed so far.
     pub(super) fn ensure_durable(&mut self, node: usize, op: OpId, cell: &str, epoch: Epoch) {
-        let position = self.nodes[node]
+        let position = self.machines[node]
+            .proc()
             .replicas
             .get(&(cell.to_string(), epoch))
             .map_or(0, |replica| replica.content.len() as u64);
@@ -269,7 +278,8 @@ impl World {
     /// Give a stop that has not finished its final upload back to the
     /// core, which restarts the cell on its open database.
     pub(super) fn abandon_stop(&mut self, node: usize, op: OpId) {
-        let pending = self.nodes[node]
+        let pending = self.machines[node]
+            .proc_mut()
             .replicas
             .values_mut()
             .find(|replica| replica.stop == Some(op));
@@ -280,7 +290,8 @@ impl World {
     }
 
     fn wait_for_upload(&mut self, node: usize, cell: &str, epoch: Epoch, waiter: Waiter) {
-        let Some(replica) = self.nodes[node]
+        let Some(replica) = self.machines[node]
+            .proc_mut()
             .replicas
             .get_mut(&(cell.to_string(), epoch))
         else {
@@ -302,7 +313,11 @@ impl World {
 
     /// A proof, or a stop's final upload, ran out of time.
     pub(super) fn proof_deadline(&mut self, node: usize, cell: String, epoch: Epoch, op: OpId) {
-        let Some(replica) = self.nodes[node].replicas.get_mut(&(cell, epoch)) else {
+        let Some(replica) = self.machines[node]
+            .proc_mut()
+            .replicas
+            .get_mut(&(cell, epoch))
+        else {
             return;
         };
         let event = if replica.stop == Some(op) {
@@ -319,7 +334,8 @@ impl World {
     /// Upload the epoch's database if the bucket is behind it and no upload
     /// is in flight. One upload at a time; its answer starts the next.
     pub(super) fn upload(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        let Some(replica) = self.nodes[node]
+        let Some(replica) = self.machines[node]
+            .proc_mut()
             .replicas
             .get_mut(&(cell.to_string(), epoch))
         else {
@@ -340,7 +356,11 @@ impl World {
     /// An upload failed, or nobody knows whether it applied. Upload again
     /// after a backoff: an upload is idempotent.
     pub(super) fn upload_failed(&mut self, node: usize, cell: String, epoch: Epoch) {
-        if let Some(replica) = self.nodes[node].replicas.get_mut(&(cell.clone(), epoch)) {
+        if let Some(replica) = self.machines[node]
+            .proc_mut()
+            .replicas
+            .get_mut(&(cell.clone(), epoch))
+        {
             replica.uploading = false;
             let delay = self.net_rng.range(50, 300);
             self.work(node, delay, Work::Upload { cell, epoch });
@@ -349,7 +369,11 @@ impl World {
 
     /// The bucket confirmed an upload of `len` writes.
     pub(super) fn uploaded(&mut self, node: usize, cell: String, epoch: Epoch, len: usize) {
-        if let Some(replica) = self.nodes[node].replicas.get_mut(&(cell.clone(), epoch)) {
+        if let Some(replica) = self.machines[node]
+            .proc_mut()
+            .replicas
+            .get_mut(&(cell.clone(), epoch))
+        {
             replica.uploading = false;
             replica.uploaded = replica.uploaded.max(len);
             self.settle_waiters(node, &cell, epoch);
@@ -362,7 +386,7 @@ impl World {
     /// can run inside `execute`.
     fn settle_waiters(&mut self, node: usize, cell: &str, epoch: Epoch) {
         let key = (cell.to_string(), epoch);
-        let Some(replica) = self.nodes[node].replicas.get_mut(&key) else {
+        let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
             return;
         };
         let uploaded = replica.uploaded as u64;
@@ -378,7 +402,11 @@ impl World {
             .stop
             .filter(|_| uploaded >= replica.content.len() as u64)
         {
-            let replica = self.nodes[node].replicas.remove(&key).unwrap();
+            let replica = self.machines[node]
+                .proc_mut()
+                .replicas
+                .remove(&key)
+                .unwrap();
             for waiter in &replica.waiters {
                 answers.push(waiter.answer(Err(Failure::Ambiguous)));
             }

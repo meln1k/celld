@@ -62,8 +62,8 @@ impl World {
         if self.t >= self.config.chaos_ms {
             return;
         }
-        let up: Vec<usize> = (0..self.nodes.len())
-            .filter(|&node| self.nodes[node].up)
+        let up: Vec<usize> = (0..self.machines.len())
+            .filter(|&node| self.machines[node].up())
             .collect();
         if let Some(&node) = self.fault_rng.pick(&up) {
             match fault {
@@ -77,7 +77,8 @@ impl World {
                 Fault::ClockStep => {
                     let max = self.config.faults.max_clock_step_ms;
                     let step = self.fault_rng.range(0, 2 * max) as i64 - max as i64;
-                    self.nodes[node].wall_step_ms += step;
+                    // The machine's clock: a restart does not undo it.
+                    self.machines[node].wall_offset_ms += step;
                     self.note(|| format!("n{node}'s wall clock steps by {step} ms"));
                 }
             }
@@ -89,7 +90,7 @@ impl World {
     /// Freeze the process. Its work waits until it resumes; on a suspend
     /// its monotonic clock waits too.
     fn pause(&mut self, node: usize) {
-        if self.nodes[node].paused_until.is_some() {
+        if self.machines[node].proc_mut().paused_until.is_some() {
             return;
         }
         let duration = self
@@ -98,10 +99,12 @@ impl World {
         let suspend = self
             .fault_rng
             .chance(self.config.faults.suspend_probability);
-        let n = &mut self.nodes[node];
-        n.paused_until = Some(self.t + duration);
-        n.suspended_at = suspend.then_some(self.t);
-        let inc = n.inc;
+        let t = self.t;
+        let m = &mut self.machines[node];
+        let inc = m.inc;
+        let p = m.proc_mut();
+        p.paused_until = Some(t + duration);
+        p.suspended_at = suspend.then_some(t);
         self.stats.pauses += 1;
         let kind = if suspend { "suspend" } else { "pause" };
         self.note(|| format!("{kind} n{node}#{inc} for {duration} ms"));
@@ -110,21 +113,21 @@ impl World {
 
     pub(super) fn resume(&mut self, node: usize, inc: u64) {
         let t = self.t;
-        let n = &mut self.nodes[node];
-        if !n.up || n.inc != inc {
+        let m = &mut self.machines[node];
+        let Some(p) = m.proc.as_mut().filter(|_| m.inc == inc) else {
             return;
-        }
-        n.paused_until = None;
-        if let Some(at) = n.suspended_at.take() {
+        };
+        p.paused_until = None;
+        if let Some(at) = p.suspended_at.take() {
             // The monotonic clock did not count the time it was suspended.
-            n.mono_base -= t - at;
+            p.mono_base -= t - at;
         }
         self.note(|| format!("resume n{node}#{inc}"));
     }
 
     /// Cut the node off from the bucket and from its peers for a while.
     fn partition(&mut self, node: usize) {
-        if self.partitions[node].is_some() {
+        if self.machines[node].partition.is_some() {
             return;
         }
         let mode = if self.fault_rng.chance(0.5) {
@@ -134,7 +137,7 @@ impl World {
         };
         let id = self.next_partition;
         self.next_partition += 1;
-        self.partitions[node] = Some((id, mode));
+        self.machines[node].partition = Some((id, mode));
         let max = self.config.faults.max_partition_ms.max(100);
         let duration = self.fault_rng.range(100, max);
         self.stats.partitions += 1;
@@ -149,8 +152,11 @@ impl World {
     }
 
     pub(super) fn heal(&mut self, node: usize, partition: u64) {
-        if self.partitions[node].is_some_and(|(id, _)| id == partition) {
-            self.partitions[node] = None;
+        if self.machines[node]
+            .partition
+            .is_some_and(|(id, _)| id == partition)
+        {
+            self.machines[node].partition = None;
             self.note(|| format!("heal n{node}"));
         }
     }

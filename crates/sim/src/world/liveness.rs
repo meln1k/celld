@@ -5,8 +5,9 @@
 //!
 //! 1. **Probe.** The workload stops, every fault has long healed, and every
 //!    cell must take a write within `PROBE_WINDOW_MS`.
-//! 2. **Audit.** Every process dies and every disk is wiped. One fresh node
-//!    joins and must serve every cell, restoring it from the bucket alone.
+//! 2. **Audit.** Every machine retires: its process dies and never comes
+//!    back, so nothing on its disk can help. One fresh node joins and must
+//!    serve every cell, restoring it from the bucket alone.
 //!    It can only take a cell over once its old owner's lease has expired,
 //!    so its window is a few lease lifetimes longer. Each of those restores
 //!    is also checked for lost writes, like any other.
@@ -14,8 +15,7 @@
 //! A phase is a set of goals: one per cell, retried until it is served or
 //! its deadline passes. A goal that is never served is a violation.
 
-use super::replicator::Disk;
-use super::{Item, Node, Time, World};
+use super::{Item, Machine, Time, World};
 
 /// How long every cell has to take a write once the probe starts.
 pub(super) const PROBE_WINDOW_MS: u64 = 30_000;
@@ -55,15 +55,12 @@ impl World {
 
     pub(super) fn audit(&mut self) {
         self.note(|| "audit: the fleet dies; a fresh node restores every cell".into());
-        self.auditing = true;
-        for node in 0..self.nodes.len() {
-            self.crash(node, true);
+        for node in 0..self.machines.len() {
+            self.machines[node].retired = true;
+            self.crash(node, false);
         }
-        let node = self.nodes.len();
-        self.nodes.push(Node::new(node, 0, 0, self.core));
-        self.disks.push(Disk::default());
-        self.skews.push(0);
-        self.partitions.push(None);
+        let node = self.machines.len();
+        self.machines.push(Machine::new(node, 0));
         self.restart(node);
         let deadline = self.t + self.audit_window();
         for cell in 0..self.config.cells {
@@ -100,7 +97,7 @@ impl World {
         }
         let (cell, write, ingress) = (g.cell.clone(), g.write, g.ingress);
         let ingress = match ingress {
-            Some(node) => self.nodes[node].up.then_some(node),
+            Some(node) => self.machines[node].up().then_some(node),
             None => self.pick_ingress(),
         };
         self.send(cell, write, ingress, Some(goal));

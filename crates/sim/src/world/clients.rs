@@ -146,8 +146,8 @@ impl World {
     /// The load balancer in front of the fleet only picks nodes whose
     /// process is up.
     pub(super) fn pick_ingress(&mut self) -> Option<usize> {
-        let up: Vec<usize> = (0..self.nodes.len())
-            .filter(|&node| self.nodes[node].up)
+        let up: Vec<usize> = (0..self.machines.len())
+            .filter(|&node| self.machines[node].up())
             .collect();
         self.work_rng.pick(&up).copied()
     }
@@ -201,18 +201,23 @@ impl World {
         if self.ops[&op].done {
             return;
         }
-        if let Some(until) = self.nodes[node].paused_until {
+        let paused = self.machines[node]
+            .proc
+            .as_ref()
+            .and_then(|p| p.paused_until);
+        if let Some(until) = paused {
             // The connection is accepted, but nothing reads it yet.
             return self.after(until - self.t, Item::Arrive { node, op, via });
         }
         // A forward needs the network on both ends; a client reaches its
         // ingress through the load balancer either way.
         let ingress = self.ops[&op].ingress;
-        let cut_off = self.partitions[node].is_some() || self.partitions[ingress].is_some();
+        let cut_off =
+            self.machines[node].partition.is_some() || self.machines[ingress].partition.is_some();
         if via.is_some() && cut_off {
             return self.bounce(op, Bounce::Unreachable);
         }
-        if !self.nodes[node].up {
+        if !self.machines[node].up() {
             match via {
                 // The client's own connection is refused.
                 None => self.settle(op, false),
@@ -230,7 +235,7 @@ impl World {
             committed: None,
             saw: 0,
         };
-        self.nodes[node].requests.insert(request, req);
+        self.machines[node].proc_mut().requests.insert(request, req);
         let event = if via == Some(0) {
             Event::CapacityRequestAt {
                 request,
@@ -254,7 +259,7 @@ impl World {
         request: RequestId,
         result: Result<Route, RequestError>,
     ) {
-        let Some(req) = self.nodes[node].requests.get(&request) else {
+        let Some(req) = self.machines[node].proc().requests.get(&request) else {
             return;
         };
         let (op, via) = (req.op, req.via);
@@ -263,7 +268,7 @@ impl World {
             Ok(Route::Remote {
                 node: owner, epoch, ..
             }) => {
-                self.nodes[node].requests.remove(&request);
+                self.machines[node].proc_mut().requests.remove(&request);
                 match via {
                     // The ingress forwarded here, but this node routes the
                     // cell elsewhere: `409 stale route`.
@@ -273,11 +278,11 @@ impl World {
             }
             Err(RequestError::CapacityExhausted) if via.is_some() => {
                 // The peer has no room: the same `409 stale route`.
-                self.nodes[node].requests.remove(&request);
+                self.machines[node].proc_mut().requests.remove(&request);
                 self.bounce(op, Bounce::Stale);
             }
             Err(_) => {
-                self.nodes[node].requests.remove(&request);
+                self.machines[node].proc_mut().requests.remove(&request);
                 self.settle(op, false);
             }
         }
@@ -297,9 +302,9 @@ impl World {
             return;
         }
         let target = self
-            .nodes
+            .machines
             .iter()
-            .position(|n| n.name == owner)
+            .position(|m| m.name == owner)
             .expect("routes name fleet nodes");
         self.stats.forwarded += 1;
         let delay = self.net_rng.range(1, 5);
@@ -393,19 +398,23 @@ impl World {
     /// The request runs here: maybe commit a write after a while, then
     /// answer.
     fn run_handler(&mut self, node: usize, request: RequestId) {
-        let op = self.nodes[node].requests[&request].op;
+        let op = self.machines[node].proc().requests[&request].op;
         let (cell, write) = (self.ops[&op].cell.clone(), self.ops[&op].write);
-        let n = &mut self.nodes[node];
-        let epoch = n.published.get(&cell).copied();
-        let name = n.name.clone();
+        let epoch = self.machines[node].proc().published.get(&cell).copied();
+        let name = self.machines[node].name.clone();
         self.checker
             .routed_local(self.t, &name, &cell, epoch.is_some());
         let Some(epoch) = epoch else {
-            self.nodes[node].requests.remove(&request);
+            self.machines[node].proc_mut().requests.remove(&request);
             self.settle(op, false);
             return;
         };
-        self.nodes[node].requests.get_mut(&request).unwrap().epoch = Some(epoch);
+        self.machines[node]
+            .proc_mut()
+            .requests
+            .get_mut(&request)
+            .unwrap()
+            .epoch = Some(epoch);
         let commit = self.work_rng.range(0, 10);
         let end = commit + self.work_rng.range(1, 30);
         if write {
@@ -419,13 +428,17 @@ impl World {
     /// If the runtime was stopped under it, the database is closed and the
     /// handler fails instead.
     pub(super) fn handler_commit(&mut self, node: usize, request: RequestId) {
-        let Some(req) = self.nodes[node].requests.get(&request) else {
+        let Some(req) = self.machines[node].proc().requests.get(&request) else {
             return;
         };
         let (cell, epoch) = (self.ops[&req.op].cell.clone(), req.epoch.unwrap());
         match self.commit_write(node, &cell, epoch) {
             Some(committed) => {
-                let req = self.nodes[node].requests.get_mut(&request).unwrap();
+                let req = self.machines[node]
+                    .proc_mut()
+                    .requests
+                    .get_mut(&request)
+                    .unwrap();
                 req.committed = Some(committed);
             }
             None => self.handler_failed(node, request),
@@ -434,7 +447,11 @@ impl World {
 
     /// The handler threw: the request fails and its activity ends.
     fn handler_failed(&mut self, node: usize, request: RequestId) {
-        let req = self.nodes[node].requests.remove(&request).unwrap();
+        let req = self.machines[node]
+            .proc_mut()
+            .requests
+            .remove(&request)
+            .unwrap();
         self.settle(req.op, false);
         self.drive(node, Event::ActivityFinished { request });
     }
@@ -443,7 +460,7 @@ impl World {
     /// holds it until every write it could reveal is durable; then the
     /// handler's activity is over.
     pub(super) fn handler_end(&mut self, node: usize, request: RequestId) {
-        let Some(req) = self.nodes[node].requests.get(&request) else {
+        let Some(req) = self.machines[node].proc().requests.get(&request) else {
             return;
         };
         let cell = self.ops[&req.op].cell.clone();
@@ -460,7 +477,12 @@ impl World {
             None => (None, (saw > opened).then_some(saw)),
         };
         let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
-        self.nodes[node].requests.get_mut(&request).unwrap().saw = saw;
+        self.machines[node]
+            .proc_mut()
+            .requests
+            .get_mut(&request)
+            .unwrap()
+            .saw = saw;
         self.drive(
             node,
             Event::OutputAt {
@@ -484,7 +506,7 @@ impl World {
         result: Result<(), RequestError>,
     ) {
         assert_eq!(channel, Channel::Response, "handlers only answer");
-        let Some(req) = self.nodes[node].requests.remove(&request) else {
+        let Some(req) = self.machines[node].proc_mut().requests.remove(&request) else {
             return;
         };
         if result.is_err() || self.ops[&req.op].done {

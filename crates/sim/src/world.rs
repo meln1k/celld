@@ -17,8 +17,8 @@
 //! - `faults`: what goes wrong, and the supervisor that restarts a node.
 //! - `liveness`: the probe and the audit that end every run.
 //!
-//! A node is a machine with a disk. The process on it can die and be
-//! restarted. Each start is a new *incarnation* with a fresh core, fresh
+//! A node is a [`Machine`] with a disk. The [`Process`] on it can die and
+//! be restarted. Each start is a new *incarnation* with a fresh core, fresh
 //! clocks and no memory. Work addressed to a process carries its
 //! incarnation and is dropped if that process has died since: a dead
 //! process's timers never fire and its bucket answers reach nobody.
@@ -142,21 +142,59 @@ enum Work {
     HandlerEnd { request: RequestId },
 }
 
-/// The process running on a node, or the gap between two of them. A crash
-/// replaces the whole value, so nothing of the old process survives in it.
-struct Node {
+/// One machine of the fleet: what outlives its process. Its disk, its
+/// wall clock's offset and its network belong to the machine, so a restart
+/// keeps them; everything else lives in the process, and a crash drops it.
+struct Machine {
     name: String,
-    /// Which start of this node's process this is.
+    /// Which start of this machine's process is the latest one.
     inc: u64,
-    up: bool,
+    /// The supervisor will never start another process here.
+    retired: bool,
+    /// How far this machine's wall clock is off: its fixed skew plus every
+    /// step since.
+    wall_offset_ms: i64,
+    disk: Disk,
+    /// The network partition the machine is in, while it lasts.
+    partition: Option<(u64, Partition)>,
+    proc: Option<Process>,
+}
+
+impl Machine {
+    fn new(index: usize, wall_offset_ms: i64) -> Self {
+        Self {
+            name: format!("n{index}"),
+            inc: 0,
+            retired: false,
+            wall_offset_ms,
+            disk: Disk::default(),
+            partition: None,
+            proc: None,
+        }
+    }
+
+    fn up(&self) -> bool {
+        self.proc.is_some()
+    }
+
+    fn proc(&self) -> &Process {
+        self.proc.as_ref().expect("a process is running")
+    }
+
+    fn proc_mut(&mut self) -> &mut Process {
+        self.proc.as_mut().expect("a process is running")
+    }
+}
+
+/// The process running on a machine: one incarnation, with a fresh core,
+/// fresh clocks and no memory of the last one.
+struct Process {
     /// The core asked to halt; the process exits after this step.
     halting: bool,
     /// While paused, the process runs nothing: its work waits until here.
     paused_until: Option<Time>,
     /// When a VM suspend began: the monotonic clock stops with it.
     suspended_at: Option<Time>,
-    /// How far this process's wall clock was stepped.
-    wall_step_ms: i64,
     state: State,
     /// Where this process's monotonic clock starts. Processes start at
     /// different moments, so their monotonic clocks disagree.
@@ -170,18 +208,13 @@ struct Node {
     requests: BTreeMap<RequestId, Req>,
 }
 
-impl Node {
-    fn new(index: usize, inc: u64, mono_base: u64, config: Config) -> Self {
-        let name = format!("n{index}");
+impl Process {
+    fn new(name: &str, mono_base: u64, config: Config) -> Self {
         Self {
-            state: State::new(name.clone(), config),
-            name,
-            inc,
-            up: false,
+            state: State::new(name.to_string(), config),
             halting: false,
             paused_until: None,
             suspended_at: None,
-            wall_step_ms: 0,
             mono_base,
             timers: BTreeMap::new(),
             next_ordinal: 0,
@@ -201,12 +234,7 @@ pub struct World {
     core: Config,
     agenda: BTreeMap<(Time, u64), Item>,
     store: Store,
-    nodes: Vec<Node>,
-    disks: Vec<Disk>,
-    /// Each node's fixed wall clock offset.
-    skews: Vec<i64>,
-    /// Each node's network partition, while it lasts.
-    partitions: Vec<Option<(u64, Partition)>>,
+    machines: Vec<Machine>,
     next_partition: u64,
     ops: BTreeMap<u64, Op>,
     next_op: u64,
@@ -221,8 +249,6 @@ pub struct World {
     trace: Vec<String>,
     halts: Vec<String>,
     goals: Vec<Goal>,
-    /// The audit has begun: dead processes stay dead.
-    auditing: bool,
     panic: Option<String>,
 }
 
@@ -235,15 +261,10 @@ impl World {
         let work_rng = master.fork();
         let mut fault_rng = master.fork();
         let skew = config.faults.max_skew_ms;
-        let skews = (0..config.nodes)
-            .map(|_| fault_rng.range(0, 2 * skew) as i64 - skew as i64)
+        let machines = (0..config.nodes)
+            .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
             .collect();
         let core = core_config(&config);
-        let nodes = (0..config.nodes)
-            .map(|index| Node::new(index, 0, 0, core))
-            .collect();
-        let disks = (0..config.nodes).map(|_| Disk::default()).collect();
-        let partitions = vec![None; config.nodes];
         let store = Store::new(config.mutation);
         Self {
             seed,
@@ -253,10 +274,7 @@ impl World {
             core,
             agenda: BTreeMap::new(),
             store,
-            nodes,
-            disks,
-            skews,
-            partitions,
+            machines,
             next_partition: 1,
             ops: BTreeMap::new(),
             next_op: 1,
@@ -271,7 +289,6 @@ impl World {
             trace: Vec::new(),
             halts: Vec::new(),
             goals: Vec::new(),
-            auditing: false,
             panic: None,
         }
     }
@@ -283,7 +300,7 @@ impl World {
 
     /// Schedule work for the process now running on `node`.
     fn work(&mut self, node: usize, delay: u64, work: Work) {
-        let inc = self.nodes[node].inc;
+        let inc = self.machines[node].inc;
         self.after(delay, Item::Proc { node, inc, work });
     }
 
@@ -293,22 +310,20 @@ impl World {
 
     /// The process on `node`, by name and incarnation: `n0#2`.
     fn who(&self, node: usize) -> String {
-        format!("{}#{}", self.nodes[node].name, self.nodes[node].inc)
+        format!("{}#{}", self.machines[node].name, self.machines[node].inc)
     }
 
-    /// The node's wall clock: true time, plus the machine's skew, plus
-    /// whatever its process's clock was stepped by.
+    /// The machine's wall clock: true time, plus its skew and steps.
     fn wall(&self, node: usize) -> u64 {
-        let skew = self.skews[node] + self.nodes[node].wall_step_ms;
-        (WALL_EPOCH_MS as i64 + self.t as i64 + skew) as u64
+        (WALL_EPOCH_MS as i64 + self.t as i64 + self.machines[node].wall_offset_ms) as u64
     }
 
     fn mono(&self, node: usize) -> u64 {
-        self.nodes[node].mono_base + self.t
+        self.machines[node].proc().mono_base + self.t
     }
 
     pub fn run(mut self) -> Outcome {
-        for node in 0..self.nodes.len() {
+        for node in 0..self.machines.len() {
             let delay = self.net_rng.range(0, 50);
             self.after(delay, Item::Restart { node });
         }
@@ -342,11 +357,11 @@ impl World {
     fn handle(&mut self, item: Item) {
         match item {
             Item::Proc { node, inc, work } => {
-                let n = &self.nodes[node];
-                if !n.up || n.inc != inc {
+                let m = &self.machines[node];
+                let Some(proc) = m.proc.as_ref().filter(|_| m.inc == inc) else {
                     return;
-                }
-                match n.paused_until {
+                };
+                match proc.paused_until {
                     // A paused process runs this when it resumes, in order.
                     Some(until) => self.after(until - self.t, Item::Proc { node, inc, work }),
                     None => self.proc_work(node, work),
@@ -396,20 +411,20 @@ impl World {
     /// Start a new process on `node`: a fresh core that first acquires its
     /// node lease.
     fn restart(&mut self, node: usize) {
-        if self.nodes[node].up || (self.auditing && node < self.config.nodes) {
+        let m = &self.machines[node];
+        if m.up() || m.retired {
             return;
         }
-        let inc = self.nodes[node].inc + 1;
         // Large enough that a suspend can hold the clock back without it
         // ever reaching zero.
         let mono_base = self.net_rng.range(1_000_000_000, 2_000_000_000);
-        self.nodes[node] = Node {
-            up: true,
-            ..Node::new(node, inc, mono_base, self.core)
-        };
+        let m = &mut self.machines[node];
+        m.inc += 1;
+        m.proc = Some(Process::new(&m.name, mono_base, self.core));
+        let inc = m.inc;
         self.note(|| format!("start n{node}#{inc}"));
         let spec = NodeLeaseSpec {
-            addr: self.nodes[node].name.clone(),
+            addr: self.machines[node].name.clone(),
             peer_protocol: PEER_PROTOCOL,
             generation: format!("g{node}.{inc}"),
             resume_generation: None,
@@ -430,7 +445,7 @@ impl World {
     /// pressured; the sample still drives idle eviction.
     fn sample_load(&mut self, node: usize) {
         let load = pressure::Load {
-            resident_cells: self.nodes[node].state.occupied(),
+            resident_cells: self.machines[node].proc().state.occupied(),
             rss_bytes: 0,
             in_use_bytes: 0,
             cgroup_working_set_bytes: None,
@@ -447,37 +462,38 @@ impl World {
 
     /// The process on `node` dies. Its open databases stay on disk as it
     /// left them, unless the disk is wiped too. Every request it held
-    /// fails, and the supervisor starts a new process later.
+    /// fails, and the supervisor starts a new process later, unless the
+    /// machine is retired.
     fn crash(&mut self, node: usize, wipe: bool) {
-        if !self.nodes[node].up {
-            return;
-        }
         let who = self.who(node);
+        let Some(dead) = self.machines[node].proc.take() else {
+            return;
+        };
         self.note(|| format!("crash {who}{}", if wipe { " (disk wiped)" } else { "" }));
-        let inc = self.nodes[node].inc;
-        let dead = std::mem::replace(&mut self.nodes[node], Node::new(node, inc, 0, self.core));
         self.close_replicas(node, dead.replicas);
         if wipe {
-            self.disks[node] = Disk::default();
+            self.machines[node].disk = Disk::default();
         }
         self.fail_requests(node, dead.requests);
-        if !self.auditing {
+        if !self.machines[node].retired {
             self.schedule_restart(node);
         }
     }
+
     /// Run one event through a node's core and carry out its effects. Some
     /// effects complete inside the same step, as they do in `Actor::drive`;
     /// their events queue behind the current one.
     fn drive(&mut self, node: usize, event: Event) {
         let mut queue = VecDeque::from([event]);
         while let Some(mut event) = queue.pop_front() {
-            if !self.nodes[node].up || self.nodes[node].halting {
-                break;
+            match &self.machines[node].proc {
+                Some(proc) if !proc.halting => {}
+                _ => break,
             }
             shell::stamp(&mut event, self.wall(node), self.mono(node));
             self.record(node, "<-", &event);
             self.stats.events += 1;
-            let effects = on_event(&mut self.nodes[node].state, event);
+            let effects = on_event(&mut self.machines[node].proc_mut().state, event);
             for effect in effects {
                 self.record(node, "->", &effect);
                 self.execute(node, effect, &mut queue);
@@ -485,7 +501,7 @@ impl World {
         }
         // A halt is the process exiting: as far as the fleet can tell, a
         // crash that leaves its disk alone.
-        if self.nodes[node].halting {
+        if self.machines[node].proc.as_ref().is_some_and(|p| p.halting) {
             self.halts.push(self.who(node));
             self.crash(node, false);
         }
@@ -516,18 +532,21 @@ impl World {
         if self.panic.is_none() {
             self.judge_goals();
         }
-        let names = |keep: &dyn Fn(&Node) -> bool| {
-            self.nodes
-                .iter()
-                .filter(|n| keep(n))
-                .map(|n| n.name.clone())
-                .collect()
-        };
+        let authoritative = self
+            .machines
+            .iter()
+            .filter(|m| {
+                m.proc
+                    .as_ref()
+                    .is_some_and(|p| p.state.node_authoritative())
+            })
+            .map(|m| m.name.clone())
+            .collect();
         Outcome {
             seed: self.seed,
             trace_hash: self.hash.0,
             halts: self.halts,
-            authoritative: names(&|n| n.state.node_authoritative()),
+            authoritative,
             trace: self.trace,
             panic: self.panic,
             violations: self.checker.violations,
