@@ -24,6 +24,16 @@ fn main() {
         "seed {seed}: {} events, hash {:016x}, authoritative {:?}, halted {:?}",
         outcome.events, outcome.trace_hash, outcome.authoritative, outcome.halts
     );
+    println!(
+        "requests {}: answered {}, failed {}, writes acknowledged {}",
+        outcome.requests, outcome.answered, outcome.failed, outcome.acked_writes
+    );
+    for v in &outcome.violations {
+        println!("VIOLATION t={} {}: {}", v.at_ms, v.kind, v.detail);
+    }
+    if !outcome.violations.is_empty() {
+        std::process::exit(1);
+    }
     if let Some(panic) = outcome.panic {
         println!("PANIC {panic}");
         std::process::exit(1);
