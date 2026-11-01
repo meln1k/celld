@@ -245,7 +245,11 @@ impl World {
                 }
                 immediate.push_back(Event::Published { op, result: Ok(()) });
             }
-            Effect::Complete { request, result } => self.complete(node, request, result, immediate),
+            Effect::Complete { request, result } => {
+                if !self.offer_routed(node, request, &result, immediate) {
+                    self.complete(node, request, result, immediate)
+                }
+            }
             Effect::AwaitDurable {
                 op,
                 cell,
@@ -259,13 +263,25 @@ impl World {
             Effect::ReleaseOwner { op, cell, epoch } => {
                 self.store_call(node, StoreReq::ReleaseOwner { op, cell, epoch })
             }
-            Effect::AdoptReleased { op, .. } => {
-                // Peer adoption is not modeled: no successor acknowledges,
-                // so a released cell waits for its next request to claim it.
-                immediate.push_back(Event::SuccessorAdopted {
-                    op,
-                    result: Err(Failure::Definite),
-                });
+            Effect::AdoptReleased {
+                op,
+                cell,
+                released_epoch,
+                rebalance,
+            } => self.adopt_released(node, op, cell, released_epoch, rebalance),
+            Effect::CancelCellActivity {
+                cell,
+                requests,
+                websockets,
+                ..
+            } => {
+                self.abort_requests(node, requests);
+                for websocket in websockets {
+                    immediate.push_back(Event::WebSocketClosed {
+                        cell: cell.clone(),
+                        websocket,
+                    });
+                }
             }
             Effect::EvictionAdmission { request, result } => {
                 self.eviction_admitted(node, request, result)
@@ -627,6 +643,11 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
         | Event::NudgeNodeLease {
             now_ms,
             now_mono_ms,
+        }
+        | Event::HandoffRequestAt {
+            now_ms,
+            now_mono_ms,
+            ..
         } => {
             *now_ms = wall;
             *now_mono_ms = mono;

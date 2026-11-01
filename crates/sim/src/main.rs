@@ -102,8 +102,8 @@ fn main() {
         stats.crashes, stats.pauses, stats.partitions, stats.store_failures, stats.restored
     );
     println!(
-        "evictions asked {}, evicted {}",
-        stats.evictions, stats.evicted
+        "evictions asked {}, evicted {}, drains {}, cells handed off {}",
+        stats.evictions, stats.evicted, stats.drains, stats.handed_off
     );
     for v in &outcome.violations {
         println!("VIOLATION t={} {}: {}", v.at_ms, v.kind, v.detail);

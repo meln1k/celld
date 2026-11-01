@@ -84,8 +84,10 @@ protocol variants verify that the checkers detect the faults.
 simulated bucket. A simulated shell carries out each effect the way
 `crates/celld/actor.rs` does. A cell is a scripted handler that can commit one
 write and answers through the output gate. Some clients give up before they
-hear back, an operator evicts cells by hand, and the log tier nudges node
-leases.
+hear back, an operator evicts cells by hand and shuts nodes down, a balancer
+gives idle cells away, and the log tier nudges node leases. A node that shuts
+down or gives a cell away offers it to its peers until one acquires it, as
+`AdoptReleased` and the peer's handoff endpoint do in production.
 
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
@@ -128,8 +130,7 @@ simulated shell or bucket. A test requires every check to catch its bug, so a
 check cannot go blind without a test failing.
 
 The simulator does not yet model V8, alarms, the fleet log and fleet
-proofs, runtime generations, adoption by a peer, eviction snapshots, or
-memory pressure.
+proofs, runtime generations, eviction snapshots, or memory pressure.
 
 The core on `main` fails some seeds.
 
@@ -142,10 +143,15 @@ The core on `main` fails some seeds.
   until a write fails its ownership read, 8 s later in one seed. A VM
   suspend, which `CLOCK_MONOTONIC` does not count, does the same. Writes
   stay safe.
-- **Three `State::validate` invariants:** `indexed cell op N has no owning
-  slot`, `confirming cell … left the owner read in Fenced`, and the same in
-  `Inactive`. The last is a client giving up on the only request for a cell
-  that a restarted node is still confirming it owns.
+- **Five `State::validate` invariants:**
+  - `indexed cell op N has no owning slot`.
+  - `confirming cell … left the owner read in Fenced`.
+  - The same in `Inactive`: a client gives up on the only request for a cell
+    that a restarted node is still confirming it owns.
+  - `handoffs N exceeds release ceiling N`: a drain begins while an
+    eviction is already in flight.
+  - `handoff cell … is outside the pipeline in Fenced`: a node loses its
+    lease while it is handing a cell off, then gets a request for that cell.
 - **A capacity livelock.** A full fleet can pass an unowned cell between
   peers that are all at their residency cap, so the cell is never served.
 

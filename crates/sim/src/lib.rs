@@ -136,6 +136,11 @@ pub struct Operator {
     /// The node's log tier asks its core to renew the lease now
     /// (`Message::NudgeNodeLease`).
     pub nudges: f64,
+    /// An operator shuts a node down gracefully: it hands every cell to a
+    /// peer, exits, and is restarted.
+    pub drains: f64,
+    /// The balancer asks a node to give a few idle cells to emptier peers.
+    pub rebalances: f64,
 }
 
 /// What goes wrong, and how often. Rates are per simulated minute across
@@ -188,6 +193,10 @@ impl SimConfig {
             operator: Operator {
                 evictions: 30.0,
                 nudges: 6.0,
+                // A drain fails the requests it cuts off; the calm fleet
+                // answers every one.
+                drains: 0.0,
+                rebalances: 6.0,
             },
             max_resident: 4,
             max_activations: 4,
@@ -236,6 +245,10 @@ impl SimConfig {
                 store_spike_ms: 3_000,
             },
             cancel_probability: 0.05,
+            operator: Operator {
+                drains: 2.0,
+                ..Self::calm().operator
+            },
             ..Self::crashing(3.0)
         }
     }
@@ -322,6 +335,8 @@ impl Operator {
         Self {
             evictions: maybe(1, 30),
             nudges: maybe(1, 30),
+            drains: maybe(1, 4),
+            rebalances: maybe(1, 30),
         }
     }
 }
@@ -355,6 +370,9 @@ pub struct Stats {
     /// Evictions an operator asked for, and those that evicted.
     pub evictions: u64,
     pub evicted: u64,
+    /// Graceful shutdowns, and cells a peer acquired from their donor.
+    pub drains: u64,
+    pub handed_off: u64,
 }
 
 /// What a run produced.

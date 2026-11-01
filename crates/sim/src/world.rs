@@ -16,6 +16,7 @@
 //! - `clients`: the workload and the scripted handler that serves it.
 //! - `faults`: what goes wrong, and the supervisor that restarts a node.
 //! - `operator`: what an operator and the rest of a node do unprompted.
+//! - `handoff`: draining and rebalancing, which hand cells to peers.
 //! - `liveness`: the probe and the audit that end every run.
 //!
 //! A node is a [`Machine`] with a disk. The [`Process`] on it can die and
@@ -26,6 +27,7 @@
 
 mod clients;
 mod faults;
+mod handoff;
 mod liveness;
 mod operator;
 mod replicator;
@@ -46,6 +48,7 @@ use crate::{Mutation, Outcome, Rng, SimConfig, Stats, WriteId};
 
 use clients::{Bounce, Op, Req, Via};
 use faults::{Fault, Partition};
+use handoff::{Adoption, Answer, Offer};
 use liveness::Goal;
 use operator::Act;
 use replicator::{Disk, Replica};
@@ -87,6 +90,9 @@ enum Item {
     Arrive { node: usize, op: u64, via: Via },
     /// A forward came back to the ingress without running.
     Bounced { op: u64, why: Bounce },
+    /// A donor's offer of a released cell reaches a peer. Like `Arrive`,
+    /// it reaches whichever process runs there by then.
+    Offer { node: usize, offer: Offer },
     /// The next fault of this kind.
     Fault(Fault),
     /// The next act of this kind.
@@ -149,6 +155,16 @@ enum Work {
     Evict { cell: String },
     /// The log tier asks the core to renew its lease now.
     Nudge,
+    /// The operator starts a graceful shutdown.
+    Drain,
+    /// Has the drain finished?
+    DrainPoll,
+    /// The balancer asks the core to give some idle cells away.
+    Rebalance { cells: usize },
+    /// The donor looks for peers to offer a released cell to.
+    AdoptSearch { op: OpId },
+    /// A peer answered the donor's offer.
+    OfferAnswered { op: OpId, answer: Answer },
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -220,6 +236,12 @@ struct Process {
     requests: BTreeMap<RequestId, Req>,
     /// Operator evictions the core has not answered yet, and their cells.
     evictions: BTreeMap<RequestId, String>,
+    /// While draining: when the process exits whatever is left.
+    draining: Option<Time>,
+    /// Released cells this process is finding a successor for.
+    adoptions: BTreeMap<OpId, Adoption>,
+    /// Offers from donors this process's core is deciding on.
+    offers: BTreeMap<RequestId, Offer>,
 }
 
 impl Process {
@@ -237,6 +259,9 @@ impl Process {
             published: BTreeMap::new(),
             requests: BTreeMap::new(),
             evictions: BTreeMap::new(),
+            draining: None,
+            adoptions: BTreeMap::new(),
+            offers: BTreeMap::new(),
         }
     }
 }
@@ -418,6 +443,7 @@ impl World {
             Item::GiveUp { op } => self.give_up(op),
             Item::Arrive { node, op, via } => self.arrive(node, op, via),
             Item::Bounced { op, why } => self.bounced(op, why),
+            Item::Offer { node, offer } => self.offer_arrives(node, offer),
             Item::Fault(fault) => self.fault(fault),
             Item::Operator(act) => self.operator(act),
             Item::Restart { node } => self.restart(node),
@@ -449,6 +475,11 @@ impl World {
             Work::HandlerEnd { request } => self.handler_end(node, request),
             Work::Redispatch { op } => self.redispatch(op),
             Work::Evict { cell } => self.evict(node, cell),
+            Work::Drain => self.drain(node),
+            Work::DrainPoll => self.drain_poll(node),
+            Work::Rebalance { cells } => self.drive(node, Event::Rebalance { cells }),
+            Work::AdoptSearch { op } => self.adopt_search(node, op),
+            Work::OfferAnswered { op, answer } => self.offer_answered(node, op, answer),
             Work::Nudge => self.drive(
                 node,
                 Event::NudgeNodeLease {
@@ -526,6 +557,11 @@ impl World {
             self.machines[node].disk = Disk::default();
         }
         self.fail_requests(node, dead.requests);
+        // Each donor waiting on this process sees its connection drop.
+        for offer in dead.offers.into_values() {
+            let delay = self.net_rng.range(1, 5);
+            self.answer_offer(offer, Answer::Failed, delay);
+        }
         if !self.machines[node].retired {
             self.schedule_restart(node);
         }
@@ -552,6 +588,13 @@ impl World {
             for effect in effects {
                 self.record(node, "->", &effect);
                 self.execute(node, effect, &mut queue);
+            }
+            if self.machines[node]
+                .proc
+                .as_ref()
+                .is_some_and(|p| !p.offers.is_empty())
+            {
+                self.settle_offers(node);
             }
         }
         // A halt is the process exiting: as far as the fleet can tell, a

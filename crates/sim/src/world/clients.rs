@@ -181,6 +181,9 @@ pub(super) struct Req {
     via: Via,
     /// The epoch the request ran at, once routed locally.
     epoch: Option<Epoch>,
+    /// The handler has answered: its activity is over, and its response
+    /// waits at the output gate.
+    answered: bool,
     /// The write the handler committed and its position.
     committed: Option<(WriteId, u64)>,
     /// The cell's database when the handler answered: everything its
@@ -208,10 +211,13 @@ impl World {
     }
 
     /// The load balancer in front of the fleet only picks nodes whose
-    /// process is up.
+    /// process is up and not shutting down.
     pub(super) fn pick_ingress(&mut self) -> Option<usize> {
         let up: Vec<usize> = (0..self.machines.len())
-            .filter(|&node| self.machines[node].up())
+            .filter(|&node| {
+                let m = &self.machines[node];
+                m.up() && m.proc().draining.is_none()
+            })
             .collect();
         self.work_rng.pick(&up).copied()
     }
@@ -309,6 +315,7 @@ impl World {
             sent_at,
             via,
             epoch: None,
+            answered: false,
             committed: None,
             seen: Vec::new(),
         };
@@ -470,6 +477,33 @@ impl World {
         }
     }
 
+    /// A cell is being handed off: abort the work it listed, as
+    /// `cancel_core_request` and `abort_activity` do. A handler that has
+    /// not answered dies, its client hears a failure, and its activity
+    /// guard reports it finished. A response already at the output gate is
+    /// left for the core to release or refuse.
+    pub(super) fn abort_requests(&mut self, node: usize, requests: Vec<RequestId>) {
+        for request in requests {
+            let p = self.machines[node].proc_mut();
+            let Some(req) = p.requests.get(&request) else {
+                continue;
+            };
+            if req.answered {
+                continue;
+            }
+            let routed = req.epoch.is_some();
+            let req = p.requests.remove(&request).unwrap();
+            self.settle(req.op, false);
+            let event = if routed {
+                Event::ActivityFinished { request }
+            } else {
+                Event::Cancel { request }
+            };
+            let delay = self.net_rng.range(0, 3);
+            self.deliver(node, delay, event);
+        }
+    }
+
     /// The client stops waiting. Nobody is told the request worked, or
     /// that it failed.
     pub(super) fn give_up(&mut self, op: u64) {
@@ -585,12 +619,13 @@ impl World {
         };
         let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
         let seen = self.seen(node, &cell, req.epoch.unwrap()).unwrap().to_vec();
-        self.machines[node]
+        let req = self.machines[node]
             .proc_mut()
             .requests
             .get_mut(&request)
-            .unwrap()
-            .seen = seen;
+            .unwrap();
+        req.seen = seen;
+        req.answered = true;
         self.drive(
             node,
             Event::OutputAt {

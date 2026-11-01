@@ -137,16 +137,24 @@ fn crashing_and_pausing() -> SimConfig {
     }
 }
 
-/// Three `State::validate` failures in this core, deliberately not fixed
-/// here. The first two are fixed upstream on the `dst` branch (`ea471ee`,
-/// `e46a685`). The third is a cancel of the last request for a cell whose
-/// ownership a restarted node is still confirming: `cancel` drops the cell
-/// to `Inactive` without leaving the confirming set. A seed that hits one
-/// stops there; anything else is a new failure.
-const KNOWN_CORE_PANICS: [&str; 3] = [
+/// `State::validate` failures in this core, deliberately not fixed here. A
+/// seed that hits one stops there; anything else is a new failure.
+///
+/// - The first two are fixed upstream on the `dst` branch (`ea471ee`,
+///   `e46a685`).
+/// - A cancel of the last request for a cell whose ownership a restarted
+///   node is still confirming drops the cell to `Inactive` without leaving
+///   the confirming set.
+/// - A drain that begins while an eviction is already in flight counts it
+///   against `max_releases` on top of a full batch.
+/// - A node that loses its lease while a cell's handoff is in flight, and
+///   then gets a request for that cell, fences the cell inside the pipeline.
+const KNOWN_CORE_PANICS: [&str; 5] = [
     "has no owning slot",
     "left the owner read in Fenced",
     "left the owner read in Inactive",
+    "exceeds release ceiling",
+    "is outside the pipeline in Fenced",
 ];
 
 /// A clean read is released without reading the owner record, so it is
@@ -196,6 +204,10 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         faulted.partitions += outcome.stats.partitions;
         faulted.store_failures += outcome.stats.store_failures;
         faulted.crashes += outcome.stats.crashes;
+        faulted.cancelled += outcome.stats.cancelled;
+        faulted.evicted += outcome.stats.evicted;
+        faulted.drains += outcome.stats.drains;
+        faulted.handed_off += outcome.stats.handed_off;
     }
     // Most seeds run to the end and through the liveness audit.
     assert!(
@@ -206,6 +218,12 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.partitions > 10, "{faulted:?}");
     assert!(faulted.store_failures > 500, "{faulted:?}");
     assert!(faulted.crashes > 10, "{faulted:?}");
+    // So did the operator's work: clients gave up, cells were evicted, and
+    // drained nodes handed cells to their peers.
+    assert!(faulted.cancelled > 500, "{faulted:?}");
+    assert!(faulted.evicted > 20, "{faulted:?}");
+    assert!(faulted.drains > 10, "{faulted:?}");
+    assert!(faulted.handed_off > 20, "{faulted:?}");
 }
 
 #[test]

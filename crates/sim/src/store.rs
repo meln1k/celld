@@ -108,7 +108,7 @@ impl Store {
                 pressured: false,
                 memory_headroom: Some(true),
                 restoring: 0,
-                paced_handoff: false,
+                paced_handoff: true,
                 rebalance_paused: false,
                 draining: false,
             })

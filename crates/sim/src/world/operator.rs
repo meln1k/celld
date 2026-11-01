@@ -1,6 +1,7 @@
 //! What happens to a node besides its requests and its faults: an operator
-//! evicting a cell by hand, and the parts of the node outside the core that
-//! talk to it unprompted, such as the log tier nudging its lease.
+//! evicting a cell by hand or shutting a node down, and the parts of the
+//! node outside the core that talk to it unprompted, such as the log tier
+//! nudging its lease and the balancer giving cells away.
 //!
 //! Each act arrives at its own rate per simulated minute across the fleet,
 //! on a random node that is up, while clients are sending.
@@ -16,11 +17,15 @@ pub(super) enum Act {
     Evict,
     /// `Message::NudgeNodeLease`: renew the lease now.
     Nudge,
+    /// A graceful shutdown (`SIGTERM`): drain, exit, and be restarted.
+    Drain,
+    /// `Message::Rebalance`: give a few idle cells to emptier peers.
+    Rebalance,
 }
 
 impl World {
     pub(super) fn start_operator(&mut self) {
-        for act in [Act::Evict, Act::Nudge] {
+        for act in [Act::Evict, Act::Nudge, Act::Drain, Act::Rebalance] {
             if self.act_rate(act) > 0.0 {
                 let gap = self.act_gap(act);
                 self.after(gap, Item::Operator(act));
@@ -33,6 +38,8 @@ impl World {
         match act {
             Act::Evict => operator.evictions,
             Act::Nudge => operator.nudges,
+            Act::Drain => operator.drains,
+            Act::Rebalance => operator.rebalances,
         }
     }
 
@@ -55,6 +62,10 @@ impl World {
                     Work::Evict { cell }
                 }
                 Act::Nudge => Work::Nudge,
+                Act::Drain => Work::Drain,
+                Act::Rebalance => Work::Rebalance {
+                    cells: self.op_rng.range(1, 3) as usize,
+                },
             };
             // Through the process's queue, so a pause holds it back.
             self.work(node, 0, work);
