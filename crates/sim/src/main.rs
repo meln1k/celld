@@ -104,7 +104,8 @@ fn main() {
     println!(
         "evictions asked {}, evicted {}, drains {}, cells handed off {}, preserves {}, \
          databases resumed {}, websockets {}\n\
-         handler calls released {}, worker requests {} ({} on a resident), deploys {}",
+         handler calls released {}, worker requests {} ({} on a resident), deploys {}\n\
+         alarms set {}, alarms fired {}, wake hints {}",
         stats.evictions,
         stats.evicted,
         stats.drains,
@@ -115,7 +116,10 @@ fn main() {
         stats.effects,
         stats.workers,
         stats.workers_resident,
-        stats.deploys
+        stats.deploys,
+        stats.alarms_set,
+        stats.alarms_fired,
+        stats.wake_hints
     );
     for v in &outcome.violations {
         println!("VIOLATION t={} {}: {}", v.at_ms, v.kind, v.detail);

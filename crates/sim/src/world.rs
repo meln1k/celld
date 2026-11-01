@@ -20,6 +20,7 @@
 //! - `handoff`: draining and rebalancing, which hand cells to peers.
 //! - `sockets`: WebSockets the workload opens, and the messages on them.
 //! - `workers`: top-level Worker requests, which can borrow a resident.
+//! - `alarms`: alarms in each database, their wake entries and the scan.
 //! - `liveness`: the probe and the audit that end every run.
 //!
 //! A node is a [`Machine`] with a disk. The [`Process`] on it can die and
@@ -28,6 +29,7 @@
 //! incarnation and is dropped if that process has died since: a dead
 //! process's timers never fire and its bucket answers reach nobody.
 
+mod alarms;
 mod clients;
 mod faults;
 mod handoff;
@@ -43,6 +45,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use celld_logic::wake::{AlarmSnapshot, PublicationId};
 use celld_logic::{
     on_event, pressure, Config, Epoch, Event, NodeLeaseSpec, OpId, OwnershipOnEvict, RequestId,
     State, Timer, WebSocketId,
@@ -183,6 +186,20 @@ enum Work {
     SocketMessage { websocket: WebSocketId },
     /// A client closes its WebSocket.
     SocketClosed { websocket: WebSocketId },
+    /// An activity on the cell ends: report its alarm, then finish it.
+    ActivityDone { request: RequestId, cell: String },
+    /// An alarm handler finishes.
+    AlarmRun { op: OpId },
+    /// A wake entry write landed.
+    WakeMaintained {
+        cell: String,
+        alarm: AlarmSnapshot,
+        report: bool,
+    },
+    /// The process lists the bucket's due wake entries.
+    WakeScan,
+    /// Nothing: a failure nobody waits for.
+    Nothing,
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -282,6 +299,10 @@ struct Process {
     gates: BTreeMap<RequestId, Gate>,
     /// Worker requests waiting for the core to pick an isolate.
     workers: BTreeSet<RequestId>,
+    /// Alarm installations whose wake entry this process saw land.
+    covered: BTreeSet<(String, PublicationId)>,
+    /// Alarm handlers running: the cell and epoch each fires on.
+    firing: BTreeMap<OpId, (String, Epoch)>,
 }
 
 impl Process {
@@ -306,6 +327,8 @@ impl Process {
             generation: 0,
             gates: BTreeMap::new(),
             workers: BTreeSet::new(),
+            covered: BTreeSet::new(),
+            firing: BTreeMap::new(),
         }
     }
 }
@@ -326,6 +349,9 @@ pub struct World {
     next_request: RequestId,
     next_write: WriteId,
     next_socket: WebSocketId,
+    /// What each alarm write did: when it makes the alarm due, or `None`
+    /// when it clears it.
+    alarm_writes: BTreeMap<WriteId, Option<i64>>,
     net_rng: Rng,
     work_rng: Rng,
     fault_rng: Rng,
@@ -371,6 +397,7 @@ impl World {
             next_request: 1,
             next_write: 1,
             next_socket: 1,
+            alarm_writes: BTreeMap::new(),
             net_rng,
             work_rng,
             fault_rng,
@@ -533,6 +560,15 @@ impl World {
             Work::WorkerRequest => self.worker_request(node),
             Work::SocketMessage { websocket } => self.socket_message(node, websocket),
             Work::SocketClosed { websocket } => self.socket_closed(node, websocket),
+            Work::ActivityDone { request, cell } => self.activity_done(node, request, &cell),
+            Work::AlarmRun { op } => self.alarm_run(node, op),
+            Work::WakeMaintained {
+                cell,
+                alarm,
+                report,
+            } => self.wake_maintained(node, cell, alarm, report),
+            Work::WakeScan => self.wake_scan(node),
+            Work::Nothing => {}
             Work::Nudge => self.drive(
                 node,
                 Event::NudgeNodeLease {
@@ -580,6 +616,7 @@ impl World {
         self.drive(node, event);
         let delay = self.net_rng.range(1, LOAD_SAMPLE_MS);
         self.work(node, delay, Work::LoadSample);
+        self.start_wake_scans(node);
     }
 
     /// Production's periodic sampler. The simulation has no memory to
@@ -730,7 +767,10 @@ fn core_config(config: &SimConfig) -> Config {
         operation_deadline_ms: Some(OPERATION_DEADLINE_MS),
         owner_log_recovery_backoff_ms: 1_000,
         owner_log_recovery_attempts: 240,
-        alarm_resident_ms: 3_600_000,
+        // Production keeps a cell resident for an alarm due within the hour
+        // (`CELLD_ALARM_RESIDENT_MS`). One second lets most alarms here be
+        // evicted behind a wake entry, so a scan must find them.
+        alarm_resident_ms: 1_000,
         idle_evict_ms: config.idle_evict_ms,
         pressure: pressure::PressureConfig::from_limits(None, None),
     }

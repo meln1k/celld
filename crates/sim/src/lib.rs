@@ -49,6 +49,8 @@ pub struct SimConfig {
     pub websocket_probability: f64,
     /// Share of handlers that call out to a third party mid-request.
     pub effect_probability: f64,
+    /// Share of writes that also set the cell's alarm, or clear it.
+    pub alarm_probability: f64,
     /// Share of client sends that are top-level Worker requests, for no
     /// cell.
     pub worker_probability: f64,
@@ -114,13 +116,19 @@ pub enum Mutation {
     /// A WebSocket the core asks to close is reported closed but stays
     /// open. Caught by `evicted-pinned` when a drain then evicts its cell.
     PhantomSocketClose,
+    /// The shell never tells the core about a cell's alarm: every report
+    /// and every restore says there is none. Caught by `alarm-not-fired`.
+    AlarmsUnreported,
+    /// A wake entry write answers success but writes nothing. Caught by
+    /// `uncovered-alarm` when the cell is then evicted.
+    LostWakeEntry,
     /// An eviction stops the runtime but leaves it in the registry. Caught
     /// by `evicted-but-serving`.
     StaleRegistry,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 13] = [
+    pub const ALL: [Mutation; 15] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -134,6 +142,8 @@ impl Mutation {
         Mutation::SlowMonoClock,
         Mutation::StaleRegistry,
         Mutation::PhantomSocketClose,
+        Mutation::LostWakeEntry,
+        Mutation::AlarmsUnreported,
     ];
 }
 
@@ -210,6 +220,7 @@ impl SimConfig {
             websocket_probability: 0.02,
             effect_probability: 0.1,
             worker_probability: 0.1,
+            alarm_probability: 0.05,
             operator: Operator {
                 evictions: 30.0,
                 nudges: 6.0,
@@ -311,6 +322,7 @@ impl SimConfig {
             websocket_probability: *r.pick(&[0.0, 0.0, 0.0, 0.005]).unwrap(),
             effect_probability: *r.pick(&[0.0, 0.1, 0.5]).unwrap(),
             worker_probability: *r.pick(&[0.0, 0.1, 0.3]).unwrap(),
+            alarm_probability: *r.pick(&[0.0, 0.05, 0.2]).unwrap(),
             operator: Operator::draw(r),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
@@ -419,6 +431,11 @@ pub struct Stats {
     /// Worker requests, and those that ran in a resident cell's isolate.
     pub workers: u64,
     pub workers_resident: u64,
+    /// Alarms handlers set, alarms that fired and were consumed, and the
+    /// wake hints scans sent.
+    pub alarms_set: u64,
+    pub alarms_fired: u64,
+    pub wake_hints: u64,
 }
 
 /// What a run produced.

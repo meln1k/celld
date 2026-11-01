@@ -28,8 +28,8 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
             "seed {seed}: {:?}",
             outcome.stats
         );
-        // Handlers' calls left through the gate, and Worker requests
-        // borrowed resident isolates.
+        // Handlers' calls left through the gate, Worker requests borrowed
+        // resident isolates, and alarms fired.
         assert!(
             outcome.stats.effects > 20,
             "seed {seed}: {:?}",
@@ -37,6 +37,11 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
         );
         assert!(
             outcome.stats.workers_resident > 20,
+            "seed {seed}: {:?}",
+            outcome.stats
+        );
+        assert!(
+            outcome.stats.alarms_fired > 5,
             "seed {seed}: {:?}",
             outcome.stats
         );
@@ -167,13 +172,17 @@ fn crashing_and_pausing() -> SimConfig {
 /// - A reset (a failed proof or ownership read) of a cell holding a regular
 ///   or outbound WebSocket moves it to `Cleaning` with the transport still
 ///   counted.
-const KNOWN_CORE_PANICS: [&str; 6] = [
+const KNOWN_CORE_PANICS: [&str; 10] = [
     "has no owning slot",
     "left the owner read in Fenced",
     "left the owner read in Inactive",
     "exceeds release ceiling",
     "is outside the pipeline in Fenced",
     "has a live transport while not resident",
+    "is firing an alarm while not resident",
+    "is outside the pipeline in WaitingActivation",
+    "is outside the pipeline in ReadingOwner",
+    "disagrees with the walk",
 ];
 
 /// A clean read is released without reading the owner record, so it is
@@ -230,6 +239,8 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         faulted.resumed += outcome.stats.resumed;
         faulted.sockets += outcome.stats.sockets;
         faulted.deploys += outcome.stats.deploys;
+        faulted.alarms_fired += outcome.stats.alarms_fired;
+        faulted.wake_hints += outcome.stats.wake_hints;
     }
     // Most seeds run to the end and through the liveness audit.
     assert!(
@@ -243,7 +254,8 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     // So did the operator's work: clients gave up, cells were evicted,
     // drained nodes handed cells to their peers, and preserved nodes'
     // replacements resumed databases in place, handlers opened WebSockets,
-    // and nodes moved their cells onto new application generations.
+    // nodes moved their cells onto new application generations, alarms
+    // fired, and wake scans hinted cells whose alarms came due.
     assert!(faulted.cancelled > 500, "{faulted:?}");
     assert!(faulted.evicted > 20, "{faulted:?}");
     assert!(faulted.drains > 10, "{faulted:?}");
@@ -251,6 +263,8 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.resumed > 10, "{faulted:?}");
     assert!(faulted.sockets > 20, "{faulted:?}");
     assert!(faulted.deploys > 20, "{faulted:?}");
+    assert!(faulted.alarms_fired > 100, "{faulted:?}");
+    assert!(faulted.wake_hints > 100, "{faulted:?}");
 }
 
 #[test]
@@ -275,6 +289,8 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::SlowMonoClock => &["stale-read"],
             Mutation::StaleRegistry => &["evicted-but-serving"],
             Mutation::PhantomSocketClose => &["evicted-pinned"],
+            Mutation::LostWakeEntry => &["uncovered-alarm"],
+            Mutation::AlarmsUnreported => &["alarm-not-fired"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.

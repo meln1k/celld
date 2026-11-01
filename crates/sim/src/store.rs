@@ -9,10 +9,13 @@
 //!
 //! - node leases, `nodes/<node>.json`;
 //! - ownership records, `cells/<cell>/own.json`;
-//! - replica prefixes, `cells/<cell>/ltx/e<epoch>/`.
+//! - replica prefixes, `cells/<cell>/ltx/e<epoch>/`;
+//! - wake entries, `wake/<minute>/<cell>/<id>`: one per alarm installation
+//!   that some node must wake its cell for.
 
 use std::collections::BTreeMap;
 
+use celld_logic::wake::{AlarmSnapshot, PublicationId};
 use celld_logic::{
     format::BUCKET_FORMAT, CapacityPeer, CasGuard, CasOutcome, Epoch, LeaseCasOutcome,
     NodeLeaseRecord, OwnerRecord,
@@ -43,6 +46,8 @@ pub struct Store {
     /// upload adds files and never rolls the prefix back. Keeping the longest
     /// list has the same effect.
     prefixes: BTreeMap<(String, Epoch), Vec<WriteId>>,
+    /// Wake entries: (cell, installation) → when it is due, wall clock ms.
+    wake: BTreeMap<(String, PublicationId), i64>,
 }
 
 impl Store {
@@ -197,11 +202,15 @@ impl Store {
     /// The newest non-empty prefix below `epoch`, as the bucket truly holds
     /// it. The oracle reads this, so a planted bug never bends its view.
     fn chain_below(&self, cell: &str, epoch: Epoch) -> Option<&[WriteId]> {
+        self.newest_below(cell, epoch).map(|(_, writes)| writes)
+    }
+
+    fn newest_below(&self, cell: &str, epoch: Epoch) -> Option<(Epoch, &[WriteId])> {
         self.prefixes
             .range((cell.to_string(), 0)..(cell.to_string(), epoch))
             .rev()
             .find(|(_, writes)| !writes.is_empty())
-            .map(|(_, writes)| writes.as_slice())
+            .map(|((_, epoch), writes)| (*epoch, writes.as_slice()))
     }
 
     /// How much of epoch `epoch`'s database the bucket holds: its own prefix
@@ -212,6 +221,53 @@ impl Store {
             [] => self.chain_below(cell, epoch).map_or(0, <[WriteId]>::len),
             prefix => prefix.len(),
         }
+    }
+
+    /// The cell's newest durable database, and the epoch that opened it.
+    pub fn newest(&self, cell: &str) -> Option<(Epoch, &[WriteId])> {
+        self.newest_below(cell, Epoch::MAX)
+    }
+
+    /// `maintain_wake_entry`: write the wake entry of an armed alarm, then
+    /// delete every entry the retirement frontier retires. The frontier is
+    /// the alarm in the cell's newest durable database (`Retirement`): an
+    /// installation older than it, or it once consumed, is gone for good,
+    /// while a newer one that is not durable yet could still be lost.
+    pub fn maintain_wake(
+        &mut self,
+        cell: &str,
+        alarm: AlarmSnapshot,
+        frontier: Option<AlarmSnapshot>,
+    ) {
+        if let (Some(at_ms), Some(source)) = (alarm.at_ms(), alarm.source()) {
+            if self.mutation != Some(Mutation::LostWakeEntry) {
+                self.wake.insert((cell.to_string(), source.id), at_ms);
+            }
+        }
+        let Some(durable) = frontier.and_then(AlarmSnapshot::source) else {
+            return;
+        };
+        let consumed = frontier.and_then(AlarmSnapshot::at_ms).is_none();
+        let retired = |id: PublicationId| id < durable.id || (id == durable.id && consumed);
+        self.wake.retain(|(c, id), _| c != cell || !retired(*id));
+    }
+
+    /// Whether a scan will wake `cell` by `at_ms`: some wake entry for it,
+    /// of any installation, is due by then. The woken owner reads the alarm
+    /// its database really holds.
+    pub fn wake_covers(&self, cell: &str, at_ms: i64) -> bool {
+        self.wake
+            .iter()
+            .any(|((c, _), due)| c == cell && *due <= at_ms)
+    }
+
+    /// `due_scan`: every wake entry due by `now_ms`, as (cell, due).
+    pub fn wake_due(&self, now_ms: i64) -> Vec<(String, i64)> {
+        self.wake
+            .iter()
+            .filter(|(_, at_ms)| **at_ms <= now_ms)
+            .map(|((cell, _), at_ms)| (cell.clone(), *at_ms))
+            .collect()
     }
 
     /// Who the bucket's owner record names for `cell`, and at which epoch.

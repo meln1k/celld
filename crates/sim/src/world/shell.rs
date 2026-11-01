@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 
+use celld_logic::wake::AlarmSnapshot;
 use celld_logic::{
     CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, StopCause, Timer,
 };
@@ -114,6 +115,12 @@ pub(super) enum StoreReq {
         cell: String,
         epoch: Epoch,
     },
+    /// Bring the cell's wake entries into line with its alarm.
+    Wake {
+        cell: String,
+        alarm: AlarmSnapshot,
+        report: bool,
+    },
 }
 
 impl World {
@@ -210,7 +217,17 @@ impl World {
             } => {
                 if matches!(cause, StopCause::Evict { .. }) {
                     let (who, pinned) = (self.who(node), self.pinned(node, &cell));
-                    self.checker.evicting(self.t, &who, &cell, pinned);
+                    // A runtime a newer epoch superseded gives up nothing:
+                    // the bucket rightly retired its wake entries.
+                    let current = self.store.owner(&cell).is_none_or(|(_, e)| e <= epoch);
+                    let uncovered = current
+                        && self
+                            .seen(node, &cell, epoch)
+                            .and_then(|content| self.alarm_of(content, epoch))
+                            .and_then(|alarm| alarm.at_ms())
+                            .is_some_and(|at_ms| !self.store.wake_covers(&cell, at_ms));
+                    self.checker
+                        .evicting(self.t, &who, &cell, pinned, uncovered);
                 }
                 let leak = matches!(cause, StopCause::Evict { .. })
                     && self.config.mutation == Some(Mutation::StaleRegistry);
@@ -283,10 +300,25 @@ impl World {
                 cell,
                 requests,
                 websockets,
-                ..
+                alarm,
+                keep_hibernatable,
             } => {
                 self.abort_requests(node, requests);
+                if let Some(op) = alarm {
+                    self.abort_alarm(node, op);
+                }
                 self.close_sockets(node, &cell, websockets, immediate);
+                if !keep_hibernatable {
+                    // A handoff: the cell is leaving, so its alarm must be
+                    // covered by a wake entry first.
+                    self.refresh_coverage(node, &cell, immediate);
+                }
+            }
+            Effect::FireAlarm {
+                op, cell, epoch, ..
+            } => self.fire_alarm(node, op, cell, epoch),
+            Effect::ReconcileWakeEntry { cell, alarm } => {
+                self.maintain_wake(node, &cell, alarm, false)
             }
             Effect::CloseWebSocket { cell, websocket } => {
                 self.close_sockets(node, &cell, vec![websocket], immediate)
@@ -314,7 +346,6 @@ impl World {
                 self.note(|| format!("n{node} halts: {reason:?}"));
                 self.machines[node].proc_mut().halting = true;
             }
-            other => unimplemented!("the simulated shell does not carry out {other:?} yet"),
         }
     }
 
@@ -504,6 +535,8 @@ impl World {
                 op: *op,
                 result: Err(Failure::Definite),
             }),
+            // Logged and left for a later scan or reconcile.
+            StoreReq::Wake { .. } => Work::Nothing,
         }
     }
 
@@ -618,6 +651,22 @@ impl World {
                 cell,
                 epoch,
             },
+            StoreReq::Wake {
+                cell,
+                alarm,
+                report,
+            } => {
+                let frontier = self
+                    .store
+                    .newest(&cell)
+                    .and_then(|(epoch, db)| self.alarm_of(db, epoch));
+                self.store.maintain_wake(&cell, alarm, frontier);
+                Work::WakeMaintained {
+                    cell,
+                    alarm,
+                    report,
+                }
+            }
         };
         // The answer goes back to the process that asked. If it has died
         // since, or the answer is lost, nobody hears it, but what it answers
@@ -661,6 +710,16 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
             now_ms,
             now_mono_ms,
             ..
+        }
+        | Event::AlarmObserved {
+            now_ms,
+            now_mono_ms,
+            ..
+        }
+        | Event::AlarmFinished {
+            now_ms,
+            now_mono_ms,
+            ..
         } => {
             *now_ms = wall;
             *now_mono_ms = mono;
@@ -672,7 +731,8 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
         | Event::LoadSampled { now_mono_ms, .. }
         | Event::EvictRequested { now_mono_ms, .. }
         | Event::GateRequestAt { now_mono_ms, .. }
-        | Event::GenerationChanged { now_mono_ms, .. } => *now_mono_ms = mono,
+        | Event::GenerationChanged { now_mono_ms, .. }
+        | Event::WakeHintAt { now_mono_ms, .. } => *now_mono_ms = mono,
         Event::OwnerRead { now_ms, .. } | Event::NodeLeaseRead { now_ms, .. } => *now_ms = wall,
         _ => {}
     }

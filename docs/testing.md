@@ -95,7 +95,15 @@ down or gives a cell away offers it to its peers until one acquires it, as
 also be replaced in place: its process preserves its cells and exits, and the
 replacement resumes each database at the same epoch without the bucket. A
 deploy moves a node's resident cells onto a new application generation, which
-restarts each runtime on its open database.
+restarts each runtime on its open database. A write can set or clear its
+cell's alarm, which lives in the database like any other write, with its
+installation id: opening the database at a new epoch moves the id into that
+epoch, as production's wake record does. Its wake
+entry goes to the bucket, a timer fires it on the owner, and each node scans
+the due wake entries every second to wake cells nobody holds.
+
+The simulated shell carries out every effect the core can return, and sends
+every event production sends, in its timed form.
 
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
@@ -126,6 +134,14 @@ The checks, in `crates/sim/src/checks.rs`:
   runtime was still published.
 - **evicted-pinned**: the core evicted a cell that held a regular or outbound
   WebSocket open.
+- **uncovered-alarm**: the core evicted a cell with an armed alarm, and no
+  wake entry in the bucket for that cell comes due by the alarm's time, so
+  no node would wake it in time. An entry from an older installation counts,
+  because the woken owner reads the alarm its database really holds. A
+  runtime that a newer epoch already superseded is exempt: its entries were
+  rightly retired.
+- **alarm-not-fired**: when the liveness probe ends, a cell's newest durable
+  database still holds an alarm that came due more than 10 s earlier.
 - **stale-read**: a response missed a write that a client had already been
   told succeeded when the request was sent.
 - **liveness**: once every fault is over, each cell takes a write within
@@ -139,8 +155,9 @@ Each check has a planted bug (`Mutation` in `crates/sim/src/lib.rs`) in the
 simulated shell or bucket. A test requires every check to catch its bug, so a
 check cannot go blind without a test failing.
 
-The simulator does not yet model V8, alarms, the fleet log and fleet
-proofs, eviction snapshots, or memory pressure.
+The simulator does not yet model V8, the fleet log and fleet proofs, eviction
+snapshots, memory pressure, or the waker election (the lowest live node
+stands in for it).
 
 The core on `main` fails some seeds.
 
@@ -153,7 +170,7 @@ The core on `main` fails some seeds.
   until a write fails its ownership read, 8 s later in one seed. A VM
   suspend, which `CLOCK_MONOTONIC` does not count, does the same. Writes
   stay safe.
-- **Six `State::validate` invariants:**
+- **Ten `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.
   - The same in `Inactive`: a client gives up on the only request for a cell
@@ -166,13 +183,26 @@ The core on `main` fails some seeds.
     ownership read resets a cell that holds a regular or outbound WebSocket.
     One failed bucket read is enough, so the simulator opens few sockets
     under faults.
+  - `cell … is firing an alarm while not resident`: an ownership read fails
+    while the cell's alarm handler is running.
+  - `handoff cell … is outside the pipeline in WaitingActivation`: a cell's
+    alarm timer fires after its node evicted it and released its owner
+    record.
+  - The same in `ReadingOwner`: a request brings a cell back to the node
+    that just released it, and the elected waker hints the cell while its
+    owner read is in flight.
+  - `occupied counter N disagrees with the walk N`: the startup scan finds
+    two live epochs of one cell on disk, which production leaves until
+    `prune_stale_live`.
 - **A capacity livelock.** A full fleet can pass an unowned cell between
   peers that are all at their residency cap, so the cell is never served.
 
-In 100,000 swarm seeds, 1,872 failed in a debug build: 1,061 on the two
-invariants, 766 on stale reads and 45 on liveness. With validation compiled
-out, 839 failed: 793 on stale reads and 46 on liveness. The test suite
-allows only these known failures, by name.
+In 100,000 swarm seeds, 10,114 failed in a debug build: 9,455 on the
+invariants (5,131 of them on live transports), 620 on stale reads, 38 on
+liveness and one on an alarm that a livelocked cell never fired. With validation compiled out, 954 failed: 734 on stale reads,
+176 on `evicted-pinned` (the core goes on to evict a cell whose live
+transport the invariant would have caught), 43 on liveness and the same
+unfired alarm. The test suite allows only the known failures, by name.
 
 ```
 cargo test -p celld-sim                                    # the suite

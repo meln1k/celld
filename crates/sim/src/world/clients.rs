@@ -203,6 +203,9 @@ pub(super) struct Req {
     answered: bool,
     /// The write the handler committed and its position.
     committed: Option<(WriteId, u64)>,
+    /// The handler's write also sets the cell's alarm this far ahead, or
+    /// clears it.
+    alarm: Option<Option<u64>>,
     /// The cell's database when the handler answered: everything its
     /// response can reveal.
     seen: Vec<WriteId>,
@@ -380,6 +383,7 @@ impl World {
             epoch: None,
             answered: false,
             committed: None,
+            alarm: None,
             seen: Vec::new(),
         };
         self.machines[node].proc_mut().requests.insert(request, req);
@@ -565,13 +569,13 @@ impl World {
             let routed = req.epoch.is_some();
             let req = p.requests.remove(&request).unwrap();
             self.settle(req.op, false);
-            let event = if routed {
-                Event::ActivityFinished { request }
-            } else {
-                Event::Cancel { request }
-            };
             let delay = self.net_rng.range(0, 3);
-            self.deliver(node, delay, event);
+            if routed {
+                let cell = req.cell;
+                self.work(node, delay, Work::ActivityDone { request, cell });
+            } else {
+                self.deliver(node, delay, Event::Cancel { request });
+            }
         }
     }
 
@@ -630,6 +634,16 @@ impl World {
         let commit = self.work_rng.range(0, 10);
         let end = commit + self.work_rng.range(1, 30);
         if write {
+            // Liveness goals leave the alarm alone.
+            if self.ops.get(&op).is_some_and(|o| o.goal.is_none()) {
+                let alarm = self.draw_alarm();
+                self.machines[node]
+                    .proc_mut()
+                    .requests
+                    .get_mut(&request)
+                    .unwrap()
+                    .alarm = alarm;
+            }
             self.work(node, commit, Work::HandlerCommit { request });
         }
         if self.work_rng.chance(self.config.effect_probability) {
@@ -727,7 +741,7 @@ impl World {
         let Some(req) = self.machines[node].proc().requests.get(&request) else {
             return;
         };
-        let (cell, epoch) = (req.cell.clone(), req.epoch.unwrap());
+        let (cell, epoch, alarm) = (req.cell.clone(), req.epoch.unwrap(), req.alarm);
         match self.commit_write(node, &cell, epoch) {
             Some(committed) => {
                 let req = self.machines[node]
@@ -736,6 +750,20 @@ impl World {
                     .get_mut(&request)
                     .unwrap();
                 req.committed = Some(committed);
+                if let Some(ahead_ms) = alarm {
+                    // The write sets or clears the alarm, and the runtime's
+                    // alarm observer reports the change.
+                    let alarm = self.alarm_written(node, &cell, epoch, committed.0, ahead_ms);
+                    let alarm = self.reported(alarm);
+                    let event = Event::AlarmObserved {
+                        cell,
+                        alarm,
+                        covered: false,
+                        now_ms: 0,
+                        now_mono_ms: 0,
+                    };
+                    self.deliver(node, 0, event);
+                }
             }
             None => self.handler_failed(node, request),
         }
@@ -749,7 +777,7 @@ impl World {
             .remove(&request)
             .unwrap();
         self.settle(req.op, false);
-        self.drive(node, Event::ActivityFinished { request });
+        self.activity_done(node, request, &req.cell);
     }
 
     /// The handler returns. Its response goes to the output gate, which
@@ -783,7 +811,7 @@ impl World {
         req.answered = true;
         if req.upgrade {
             // The handler accepts a WebSocket before it answers.
-            self.open_socket(node, cell);
+            self.open_socket(node, cell.clone());
         }
         self.drive(
             node,
@@ -796,7 +824,7 @@ impl World {
                 now_mono_ms: 0,
             },
         );
-        self.drive(node, Event::ActivityFinished { request });
+        self.activity_done(node, request, &cell);
     }
 
     /// The gate released or refused the response: the client hears back.
@@ -860,7 +888,8 @@ impl World {
             );
         }
         let delay = self.net_rng.range(0, 2);
-        self.deliver(node, delay, Event::ActivityFinished { request });
+        let cell = gate.cell;
+        self.work(node, delay, Work::ActivityDone { request, cell });
     }
 
     /// The client hears its answer. Only the first one counts: a request

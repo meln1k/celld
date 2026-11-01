@@ -65,6 +65,8 @@ impl World {
     }
 
     pub(super) fn audit(&mut self) {
+        // The probe is over: every alarm due well before now has fired.
+        self.judge_alarms();
         self.note(|| "audit: the fleet dies; a fresh node restores every cell".into());
         for node in 0..self.machines.len() {
             self.machines[node].retired = true;

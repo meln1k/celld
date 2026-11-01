@@ -52,10 +52,6 @@ impl World {
         self.stats.workers_resident += 1;
         let (lo, hi) = WORKER_RUN_MS;
         let run = self.work_rng.range(lo, hi);
-        self.work(
-            node,
-            run,
-            Work::Deliver(Event::ActivityFinished { request }),
-        );
+        self.work(node, run, Work::ActivityDone { request, cell });
     }
 }

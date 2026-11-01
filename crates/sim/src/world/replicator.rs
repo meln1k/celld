@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 
 use celld_logic::durability::{proof_deadline, ProofProgress, ProofWait};
 use celld_logic::{
-    Epoch, Event, Failure, LocalCell, OpId, ProofSource, RestoreOutcome, RestoreSpec, StopCause,
+    Epoch, Event, Failure, LocalCell, OpId, ProofSource, RestoreOutcome, RestoreSpec,
+    RestoredAlarm, StopCause,
 };
 
 use super::shell::StoreReq;
@@ -205,14 +206,16 @@ impl World {
                 return self.deliver(node, delay, Event::RestoreCompleted { op, result });
             };
             self.stats.resumed += 1;
-            self.open_replica(node, cell, spec.epoch, content);
-            return self.deliver(node, delay, restore_completed(op, false));
+            self.open_replica(node, cell.clone(), spec.epoch, content);
+            let event = self.restore_completed(node, op, &cell, spec.epoch, false);
+            return self.deliver(node, delay, event);
         }
         if spec.fresh {
             // Epoch one of a new cell: there is nothing to restore.
-            self.open_replica(node, cell, spec.epoch, Vec::new());
+            self.open_replica(node, cell.clone(), spec.epoch, Vec::new());
             let delay = self.net_rng.range(1, 5);
-            self.deliver(node, delay, restore_completed(op, false));
+            let event = self.restore_completed(node, op, &cell, spec.epoch, false);
+            self.deliver(node, delay, event);
         } else {
             // No eviction snapshots yet, so nothing on disk is ever a safe
             // source: always read the chain from the bucket.
@@ -232,8 +235,9 @@ impl World {
     ) {
         let restored = chain.is_some();
         self.stats.restored += 1;
-        self.open_replica(node, cell, epoch, chain.unwrap_or_default());
-        self.drive(node, restore_completed(op, restored));
+        self.open_replica(node, cell.clone(), epoch, chain.unwrap_or_default());
+        let event = self.restore_completed(node, op, &cell, epoch, restored);
+        self.drive(node, event);
     }
 
     fn open_replica(&mut self, node: usize, cell: String, epoch: Epoch, content: Vec<WriteId>) {
@@ -543,12 +547,33 @@ impl World {
     }
 }
 
-fn restore_completed(op: OpId, restored: bool) -> Event {
-    Event::RestoreCompleted {
-        op,
-        result: Ok(RestoreOutcome {
-            restored,
-            alarm: None,
-        }),
+impl World {
+    /// A restore opened `cell` at `epoch`: report it with the alarm its
+    /// database holds armed, covered only if this process saw its wake
+    /// entry land.
+    fn restore_completed(
+        &self,
+        node: usize,
+        op: OpId,
+        cell: &str,
+        epoch: Epoch,
+        restored: bool,
+    ) -> Event {
+        let alarm = self
+            .seen(node, cell, epoch)
+            .and_then(|content| self.alarm_of(content, epoch))
+            .and_then(|alarm| {
+                let at_ms = self.reported(alarm).at_ms()?;
+                let id = alarm.source()?.id;
+                let covered = self.machines[node]
+                    .proc()
+                    .covered
+                    .contains(&(cell.to_string(), id));
+                Some(RestoredAlarm { at_ms, covered })
+            });
+        Event::RestoreCompleted {
+            op,
+            result: Ok(RestoreOutcome { restored, alarm }),
+        }
     }
 }

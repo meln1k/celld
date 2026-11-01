@@ -33,6 +33,9 @@ pub struct Checker {
     /// the dead one can still have an upload on the wire.
     runtimes: BTreeMap<(String, Epoch), String>,
     uploaders: BTreeMap<(String, Epoch), String>,
+    /// Each clean-reload process, and the preserved one it took over from.
+    /// The two are one writer: they share the node's database files.
+    predecessors: BTreeMap<String, String>,
     /// What each cell epoch's database held when a node opened it. The
     /// newest open of an epoch wins, so a crashed epoch's reopen counts.
     opened: BTreeMap<(String, Epoch), BTreeSet<WriteId>>,
@@ -121,7 +124,8 @@ impl Checker {
     /// would be two histories of the cell under one name, and a restore
     /// would read whichever it found.
     pub fn runtime_started(&mut self, t: u64, node: &str, who: &str, cell: &str, epoch: Epoch) {
-        if let Some(first) = first_writer(&mut self.runtimes, who, cell, epoch) {
+        let writer = self.writer(who);
+        if let Some(first) = first_writer(&mut self.runtimes, &writer, cell, epoch) {
             self.violation(
                 t,
                 "two-writers",
@@ -143,7 +147,8 @@ impl Checker {
     /// when it is sent, because a node that lost the cell can still have an
     /// upload on the wire.
     pub fn upload_applied(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch) {
-        if let Some(first) = first_writer(&mut self.uploaders, who, cell, epoch) {
+        let writer = self.writer(who);
+        if let Some(first) = first_writer(&mut self.uploaders, &writer, cell, epoch) {
             self.violation(
                 t,
                 "two-writers",
@@ -165,24 +170,30 @@ impl Checker {
     }
 
     /// A preserved process `old` handed its epochs to its replacement
-    /// `new`, which resumes them in place. They become `new`'s to run and to
-    /// upload into; `old` has exited, and its last uploads all landed.
+    /// `new`, which resumes them in place. The two count as one writer, so
+    /// `new` may run and upload into `old`'s epochs, and an upload `old` left
+    /// on the wire may still land.
     pub fn reloaded(&mut self, old: &str, new: &str) {
-        for writer in self
-            .runtimes
-            .values_mut()
-            .chain(self.uploaders.values_mut())
-        {
-            if writer == old {
-                *writer = new.to_string();
-            }
+        self.predecessors.insert(new.to_string(), old.to_string());
+    }
+
+    /// The first process of `who`'s chain of clean reloads.
+    fn writer(&self, who: &str) -> String {
+        let mut who = who;
+        while let Some(old) = self.predecessors.get(who) {
+            who = old;
         }
+        who.to_string()
     }
 
     /// **An open transport pins its cell.** A regular or outbound WebSocket
     /// cannot move with ownership, so the core must not evict a cell that
     /// holds one open; a handoff closes them first.
-    pub fn evicting(&mut self, t: u64, who: &str, cell: &str, pinned: bool) {
+    ///
+    /// **An evicted alarm can be found.** A cell given up with an armed
+    /// alarm must have a wake entry for it in the bucket, or no node will
+    /// wake it when it comes due.
+    pub fn evicting(&mut self, t: u64, who: &str, cell: &str, pinned: bool, uncovered: bool) {
         if pinned {
             self.violation(
                 t,
@@ -190,6 +201,23 @@ impl Checker {
                 format!("{who} evicted {cell} with a regular or outbound WebSocket open"),
             );
         }
+        if uncovered {
+            self.violation(
+                t,
+                "uncovered-alarm",
+                format!("{who} evicted {cell} with an armed alarm and no wake entry due by then"),
+            );
+        }
+    }
+
+    /// **Every durable alarm fires.** Once faults heal, an alarm the bucket
+    /// holds is fired and consumed soon after it comes due.
+    pub fn alarm_unfired(&mut self, t: u64, cell: &str, overdue_ms: i64) {
+        self.violation(
+            t,
+            "alarm-not-fired",
+            format!("{cell}'s durable alarm is still armed {overdue_ms} ms after it came due"),
+        );
     }
 
     /// **Liveness.** Once faults have healed, the fleet must serve every
