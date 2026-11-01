@@ -77,6 +77,69 @@ node after a crash). A property must survive tens of thousands of seeds, and
 the core protocols have run through millions of schedules. Deliberately broken
 protocol variants verify that the checkers detect the faults.
 
+### The simulator in this repository
+
+[`crates/sim`](../crates/sim) covers the core of this design. It runs several
+`celld-logic` cores in one thread, on one simulated clock, against one
+simulated bucket. A simulated shell carries out each effect the way
+`crates/celld/actor.rs` does. A cell is a scripted handler that can commit one
+write and answers through the output gate.
+
+A seed fixes the whole run. With `--swarm`, the seed also draws the run's
+configuration: the fleet size, the cell count, the lease lifetime, the
+residency caps, the eviction policy, and which faults happen. The faults are
+crashes with or without the disk, pauses and VM suspends, partitions that hang
+or refuse, clock steps and skew, and bucket calls that fail, time out, lose
+their answer, or arrive late.
+
+The checks, in `crates/sim/src/checks.rs`:
+
+- **two-writers**: two processes ran one cell epoch, or uploaded into its
+  prefix.
+- **unclaimed-runtime**: a node ran a cell epoch that its own claim did not
+  install in the bucket.
+- **local-without-runtime**: the core routed a request locally with no
+  runtime published.
+- **ack-before-durable** and **read-before-durable**: a response left before
+  the bucket held every write its handler saw.
+- **lost-write**: a restore opened without an acknowledged write.
+- **late-ack**: a write was acknowledged after a later epoch had opened
+  without it.
+- **liveness**: once every fault is over, each cell takes a write within
+  30 s. Then the whole fleet stops for good, and one fresh node must restore
+  every cell from the bucket alone.
+
+In debug builds, the core's own `State::validate` runs after every event, and
+a failure ends the run.
+
+Each check has a planted bug (`Mutation` in `crates/sim/src/lib.rs`) in the
+simulated shell or bucket. A test requires every check to catch its bug, so a
+check cannot go blind without a test failing.
+
+The simulator does not yet model V8, alarms, the fleet log and fleet
+proofs, runtime generations, adoption by a peer, eviction snapshots, or
+memory pressure.
+
+The core on `main` fails some seeds. Two `State::validate` invariants fail:
+`indexed cell op N has no owning slot` and `confirming cell … left the owner
+read in Fenced`. A full fleet can also pass an unowned cell between peers
+that are all at their residency cap, so the cell is never served. In 100,000
+swarm seeds, 1,108 failed in a debug build. With validation compiled out, 49
+failed, all on liveness; every one inspected was that livelock. The test
+suite allows only the two known invariants.
+
+```
+cargo test -p celld-sim                                    # the suite
+cargo run -p celld-sim -- --seeds 0..1000 --swarm          # a sweep
+cargo run -p celld-sim -- --seed 1562 --swarm --trace      # replay one seed
+cargo run -p celld-sim -- --seeds 0..20 --crashes 6 --mutation IgnoreCasGuard
+```
+
+A sweep prints one line for each failing seed. A large sweep runs faster with
+`CARGO_PROFILE_DEV_OPT_LEVEL=2`, which keeps debug assertions on. The
+[Simulation workflow](../.github/workflows/sim.yml) runs the suite in the
+debug profile on every change to `crates/logic` or `crates/sim`.
+
 ## Live fleets: what simulation cannot see
 
 Simulation cannot see real S3 tail latency, real kernel and filesystem
