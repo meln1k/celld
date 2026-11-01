@@ -323,7 +323,7 @@ that it can. In 100,000 swarm seeds:
   than half the lease TTL. `maintain` counts a peer as live only if its
   lease expires after its own wall clock's now, as production does, so a
   node far enough ahead, or a peer far enough behind, sees no peer to
-  recruit. Its writes still reach the bucket through bundles.
+  recruit: the second shell bug below.
 - With validation compiled out, 1,785 seeds kept an outbound socket open
   after its runtime stopped. With it on, the live-transport invariant stops
   those runs first. These hits are not yet traced.
@@ -424,13 +424,33 @@ The core on `main` fails some seeds.
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-One shell bug fails no check, and the simulator models it as production
-behaves: **an eviction snapshot abandons every clean reload.**
+Two shell bugs fail no check, and the simulator models both as production
+behaves.
+
+**An eviction snapshot abandons every clean reload.**
 `prune_stale_live` deletes stale live databases, then requires the local
 inventory to be exactly the resident set, but the inventory also lists
 eviction snapshots (`db.evicted`), which it keeps. Once a node has evicted
 a cell to a snapshot, its graceful exits write no clean-reload marker, and
 its replacement restores from the bucket.
+
+**Clock skew stops a degraded log from recruiting** (watched as
+**reopen-stuck**). `NodeLogManager::maintain` in `crates/celld/node_log.rs`
+counts a peer as recruitable only if `peer.expires_ms > now`, where `now` is
+its own wall clock and `expires_ms` was stamped by the peer's. Once the two
+clocks are stepped apart by more than the time a renewed lease has left,
+which is less than the TTL, a node whose clock runs ahead, or whose peers'
+clocks run behind, finds every peer expired and reports a fleet shortfall
+on every tick. Its log stays degraded for as long as the skew lasts. Nothing
+is lost and no check fails: the output gate rides the bundle loop, so writes
+are acknowledged at the bucket's latency instead of the fleet's, and the
+node's acknowledged writes have only the bucket as their witness. In 100,000
+swarm seeds this held 122 logs degraded (152 with validation compiled out),
+every one with the nodes' net clock steps at least 0.6 TTL apart; in each
+validated hit, `maintain` found no peer live by its own clock. A fix would
+judge a peer's liveness without comparing two machines' wall clocks, for
+example by a successful probe, or by how long ago this node saw the peer's
+lease change on its own monotonic clock.
 
 In 100,000 swarm seeds, 11,967 failed in a debug build: 10,208 on the
 invariants (3,060 of them on live transports, 2,549 on alarms firing while
