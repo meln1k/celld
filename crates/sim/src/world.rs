@@ -42,7 +42,7 @@ use crate::checks::Checker;
 use crate::store::Store;
 use crate::{Outcome, Rng, SimConfig, Stats, WriteId};
 
-use clients::{Bounce, Op, Req};
+use clients::{Bounce, Op, Req, Via};
 use faults::{Fault, Partition};
 use liveness::Goal;
 use replicator::{Disk, Replica};
@@ -75,13 +75,9 @@ enum Item {
     /// A client sends its next request.
     ClientNew,
     /// A request reaches a node: from its client, or forwarded by the
-    /// ingress on route `via`. Not tied to a process: it reaches whichever
+    /// ingress. Not tied to a process: it reaches whichever
     /// process runs on the node by then, or none.
-    Arrive {
-        node: usize,
-        op: u64,
-        via: Option<Epoch>,
-    },
+    Arrive { node: usize, op: u64, via: Via },
     /// A forward came back to the ingress without running.
     Bounced { op: u64, why: Bounce },
     /// The next fault of this kind.

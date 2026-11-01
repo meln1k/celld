@@ -56,6 +56,29 @@ pub(super) enum Bounce {
     Unreachable,
 }
 
+/// How a request reached the node it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Via {
+    /// From its client, through the load balancer.
+    Client,
+    /// Forwarded by the ingress to the cell's owner at this epoch.
+    Owner(Epoch),
+    /// Forwarded by the ingress to a peer with room, to take an unowned
+    /// cell. The peer must refuse at once if it has none.
+    Capacity,
+}
+
+impl Via {
+    /// The route a forward follows. Epoch zero names a capacity candidate,
+    /// not an owner, as it does in the core's `Route::Remote`.
+    fn forward(epoch: Epoch) -> Self {
+        match epoch {
+            0 => Via::Capacity,
+            epoch => Via::Owner(epoch),
+        }
+    }
+}
+
 /// The ingress's retry state for one request: `RemoteRouteRetry` in
 /// `crates/celld/main.rs`. It keeps the shared one-retry budget, but does
 /// not spend that retry on an owner a peer already rejected. Instead it
@@ -99,6 +122,33 @@ impl RouteRetry {
         self.blocked
     }
 
+    /// A forward on the current route came back without running: how long
+    /// to wait before resolving again, or `None` to give up. Production's
+    /// `RemoteRouteRetry::failed` and `wait`, plus the capacity refusal
+    /// that `dispatch_do_call` handles before them.
+    fn failed(&mut self, why: Bounce, now: Time) -> Option<u64> {
+        let (_, epoch) = self.generation.as_ref().expect("a route was tried");
+        match (why, Via::forward(*epoch)) {
+            // A capacity candidate's refusal spends no budget and has no
+            // deadline: invalidate, pace, retry.
+            (Bounce::Stale, Via::Capacity) => Some(CAPACITY_REFUSED_WAIT_MS),
+            // The owner said it is not the owner. Spend the one retry, and
+            // do not send to that same route again until it changes.
+            (Bounce::Stale, _) => {
+                if !self.dispatcher.redispatch(Attempt::NotOwner) {
+                    return None;
+                }
+                self.blocked = true;
+                self.wait(now)
+            }
+            // Nobody listened, so nothing ran: one retry, at once.
+            (Bounce::Unreachable, _) => self
+                .dispatcher
+                .redispatch(Attempt::NeverConnected)
+                .then_some(0),
+        }
+    }
+
     /// How long to wait before resolving again, or `None` once the
     /// deadline has passed.
     fn wait(&mut self, now: Time) -> Option<u64> {
@@ -115,9 +165,8 @@ impl RouteRetry {
 /// One delivery of a client request to one node's core.
 pub(super) struct Req {
     op: u64,
-    /// The route the ingress forwarded this request on, `None` when it
-    /// arrived from the client. A forwarded request is never forwarded on.
-    via: Option<Epoch>,
+    /// How the request got here. A forwarded request is never forwarded on.
+    via: Via,
     /// The epoch the request ran at, once routed locally.
     epoch: Option<Epoch>,
     /// The write the handler committed and its position.
@@ -190,7 +239,7 @@ impl World {
                     Item::Arrive {
                         node,
                         op,
-                        via: None,
+                        via: Via::Client,
                     },
                 );
             }
@@ -198,10 +247,8 @@ impl World {
         }
     }
 
-    /// The request reaches a node: hand it to the core. A forward on a
-    /// capacity route (epoch 0) asks the peer to take an unowned cell, and
-    /// the peer must refuse at once if it has no room.
-    pub(super) fn arrive(&mut self, node: usize, op: u64, via: Option<Epoch>) {
+    /// The request reaches a node: hand it to the core.
+    pub(super) fn arrive(&mut self, node: usize, op: u64, via: Via) {
         if self.ops[&op].done {
             return;
         }
@@ -217,7 +264,7 @@ impl World {
         // ingress through the load balancer either way.
         let ingress = self.ops[&op].ingress;
         let partitions = [node, ingress].map(|n| self.machines[n].partition.map(|(_, mode)| mode));
-        if via.is_some() && partitions.iter().any(Option::is_some) {
+        if via != Via::Client && partitions.iter().any(Option::is_some) {
             // A refused connection fails at once; a hung one only when the
             // connect timeout gives up. Either way it never connected.
             let delay = if partitions.contains(&Some(Partition::Hang)) {
@@ -230,8 +277,8 @@ impl World {
         if !self.machines[node].up() {
             match via {
                 // The client's own connection is refused.
-                None => self.settle(op, false),
-                Some(_) => self.bounce(op, Bounce::Unreachable),
+                Via::Client => self.settle(op, false),
+                _ => self.bounce(op, Bounce::Unreachable),
             }
             return;
         }
@@ -246,7 +293,7 @@ impl World {
             saw: 0,
         };
         self.machines[node].proc_mut().requests.insert(request, req);
-        let event = if via == Some(0) {
+        let event = if via == Via::Capacity {
             Event::CapacityRequestAt {
                 request,
                 cell,
@@ -280,13 +327,13 @@ impl World {
             }) => {
                 self.machines[node].proc_mut().requests.remove(&request);
                 match via {
+                    Via::Client => self.forward(op, owner, epoch),
                     // The ingress forwarded here, but this node routes the
                     // cell elsewhere: `409 stale route`.
-                    Some(_) => self.bounce(op, Bounce::Stale),
-                    None => self.forward(op, owner, epoch),
+                    _ => self.bounce(op, Bounce::Stale),
                 }
             }
-            Err(RequestError::CapacityExhausted) if via.is_some() => {
+            Err(RequestError::CapacityExhausted) if via != Via::Client => {
                 // The peer has no room: the same `409 stale route`.
                 self.machines[node].proc_mut().requests.remove(&request);
                 self.bounce(op, Bounce::Stale);
@@ -323,7 +370,7 @@ impl World {
             Item::Arrive {
                 node: target,
                 op,
-                via: Some(epoch),
+                via: Via::forward(epoch),
             },
         );
     }
@@ -348,28 +395,7 @@ impl World {
         if entry.done {
             return;
         }
-        let retry = &mut entry.retry;
-        let (_, epoch) = retry.generation.clone().expect("a route was tried");
-        let wait = match why {
-            // Epoch zero is a capacity candidate, not an owner. Its refusal
-            // spends no budget and has no deadline: invalidate, pace, retry.
-            Bounce::Stale if epoch == 0 => Some(CAPACITY_REFUSED_WAIT_MS),
-            // The owner said it is not the owner. Spend the one retry, and
-            // do not send to that same route again until it changes.
-            Bounce::Stale => match retry.dispatcher.redispatch(Attempt::NotOwner) {
-                true => {
-                    retry.blocked = true;
-                    retry.wait(t)
-                }
-                false => None,
-            },
-            // Nobody listened, so nothing ran: one retry, at once.
-            Bounce::Unreachable => retry
-                .dispatcher
-                .redispatch(Attempt::NeverConnected)
-                .then_some(0),
-        };
-        match wait {
+        match entry.retry.failed(why, t) {
             Some(wait) => self.redispatch_after(op, wait),
             None => self.settle(op, false),
         }
@@ -391,7 +417,7 @@ impl World {
         let (ingress, cell) = (entry.ingress, entry.cell.clone());
         let (node, epoch) = entry.retry.generation.clone().expect("a route was tried");
         self.drive(ingress, Event::InvalidateRemote { cell, node, epoch });
-        self.arrive(ingress, op, None);
+        self.arrive(ingress, op, Via::Client);
     }
 
     /// A process died. Every request it was running fails, and so does
