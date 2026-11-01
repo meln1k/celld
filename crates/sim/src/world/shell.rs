@@ -137,15 +137,6 @@ pub(super) enum StoreReq {
 }
 
 impl World {
-    /// The core is evicting `cell`: what it leaves behind must be safe to
-    /// leave. No transport pins it, and its alarm has a wake entry.
-    fn judge_eviction(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        let who = self.who(node);
-        let pinned = self.pinned(node, cell);
-        let uncovered = self.alarm_uncovered(node, cell, epoch);
-        self.checker.evicting(self.t, &who, cell, pinned, uncovered);
-    }
-
     /// Carry out one effect. It either finishes now (its event goes on
     /// `immediate`, as in `Actor::drive`) or starts work whose completion
     /// is scheduled on the agenda.
@@ -279,7 +270,8 @@ impl World {
                     self.machines[node].proc_mut().published.remove(&cell);
                 }
                 if cause != StopCause::Swap {
-                    self.stopped.push((node, cell.clone()));
+                    let p = self.machines[node].proc_mut();
+                    p.watch.stopped.push(cell.clone());
                 }
                 self.stop_runtime(node, op, cell, epoch, cause, bounded);
             }
@@ -288,7 +280,7 @@ impl World {
                 self.checker
                     .runtime_started(self.t, &name, &who, &cell, epoch);
                 let p = self.machines[node].proc_mut();
-                p.runtime_generations.insert(cell.clone(), p.generation);
+                p.watch.generations.insert(cell.clone(), p.generation);
                 let result = if self.machines[node]
                     .proc()
                     .replicas
@@ -313,7 +305,7 @@ impl World {
                 // Production inserts into its registry inside the same step.
                 if self.config.mutation != Some(Mutation::SkipPublish) {
                     let p = self.machines[node].proc_mut();
-                    p.touched.insert(cell.clone(), self.t);
+                    p.watch.touched.insert(cell.clone(), self.t);
                     p.published.insert(cell, epoch);
                 }
                 immediate.push_back(Event::Published { op, result: Ok(()) });
@@ -689,12 +681,8 @@ impl World {
                 };
                 if let (CasOutcome::Applied, Some(epoch)) = (outcome, installed) {
                     self.checker.claim_applied(self.t, &cell, epoch, &name);
-                    // Reclaiming a cell the record named this node for is
-                    // not new ownership.
-                    if let Some(phase) = shutting_down.filter(|_| prior.as_ref() != Some(&name)) {
-                        let detail = format!("{phase}: epoch {epoch} over {prior:?}");
-                        self.checker
-                            .claimed_during_shutdown(self.t, &sender, &cell, detail);
+                    if let Some(phase) = shutting_down {
+                        self.judge_claim(&sender, &name, &cell, epoch, prior, phase);
                     }
                 }
                 core(Event::OwnerCasCompleted {

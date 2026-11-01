@@ -266,13 +266,7 @@ impl World {
                 return self.deliver(node, delay, Event::RestoreCompleted { op, result });
             };
             self.stats.resumed += 1;
-            let name = self.machines[node].name.clone();
-            let owner = self.store.owner(&cell);
-            if owner != Some((Some(name.as_str()), spec.epoch)) {
-                let who = self.who(node);
-                let owner = format!("{owner:?}");
-                self.checker.resumed(self.t, &who, &cell, spec.epoch, owner);
-            }
+            self.judge_resume(node, &cell, spec.epoch);
             self.open_replica(node, cell.clone(), spec.epoch, content, true);
             let event = self.restore_completed(node, op, &cell, spec.epoch, false);
             return self.deliver(node, delay, event);

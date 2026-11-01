@@ -24,6 +24,7 @@
 //! - `workers`: top-level Worker requests, which can borrow a resident.
 //! - `alarms`: alarms in each database, their wake entries and the scan.
 //! - `node_log`: the fleet log: followers, fleet proofs and recovery.
+//! - `judges`: the properties judged on the fleet's state at a moment.
 //! - `liveness`: the probe and the audit that end every run.
 //!
 //! A node is a [`Machine`] with a disk. The [`Process`] on it can die and
@@ -37,6 +38,7 @@ mod clients;
 mod faults;
 mod gates;
 mod handoff;
+mod judges;
 mod liveness;
 mod node_log;
 mod operator;
@@ -55,6 +57,7 @@ use celld_logic::{
     State, Timer, WebSocketId,
 };
 
+use self::judges::Watch;
 use crate::checks::Checker;
 use crate::coverage::{self, Coverage};
 use crate::store::Store;
@@ -81,8 +84,6 @@ type AgendaKey = (Time, u64);
 const OPERATION_DEADLINE_MS: u64 = 15_000;
 /// How often a process samples its load (`LOAD_SAMPLE_PERIOD`, main.rs).
 const LOAD_SAMPLE_MS: u64 = 1_000;
-/// How long a quiet node may stay over its memory ceiling.
-const MEMORY_RELIEF_MS: u64 = 10_000;
 
 /// Simulated time zero on the wall clock.
 const WALL_EPOCH_MS: u64 = 1_800_000_000_000;
@@ -268,16 +269,12 @@ struct Process {
     generation: u64,
     /// What this process knows of its cells' alarms.
     alarms: ProcAlarms,
-    /// The generation each cell's runtime last started on, and when
-    /// anything last used the cell here: for the watched properties.
-    runtime_generations: BTreeMap<String, u64>,
-    touched: BTreeMap<String, Time>,
+    /// What the judges remember of this process.
+    watch: Watch,
     /// The log this process leads, in the fleet posture.
     log: Option<Log>,
-    /// The memory the last load sample measured, and since when the core
-    /// has been shedding without a break.
+    /// The memory the last load sample measured.
     memory: u64,
-    shedding_since: Option<Time>,
 }
 
 impl Process {
@@ -300,11 +297,9 @@ impl Process {
             sockets: BTreeMap::new(),
             generation: 0,
             alarms: ProcAlarms::default(),
-            runtime_generations: BTreeMap::new(),
-            touched: BTreeMap::new(),
+            watch: Watch::default(),
             log: None,
             memory: 0,
-            shedding_since: None,
         }
     }
 }
@@ -430,9 +425,6 @@ pub struct World {
     goals: Vec<Goal>,
     /// When the last fault, and the last restart one caused, is over.
     quiet_from: Time,
-    /// Cells whose runtime a step stopped, for good: judged once the step
-    /// is over, when every socket it closed has closed.
-    stopped: Vec<(usize, String)>,
     /// Every log session that opened, by its lease generation.
     sessions: BTreeMap<String, Session>,
     /// The phase transitions the cores took, and every cell's name.
@@ -486,7 +478,6 @@ impl World {
             halts: Vec::new(),
             goals: Vec::new(),
             quiet_from: 0,
-            stopped: Vec::new(),
             sessions: BTreeMap::new(),
             panic: None,
         }
@@ -700,59 +691,6 @@ impl World {
         self.start_wake_scans(node);
     }
 
-    /// Record that something used `cell` on `node` just now.
-    fn touch(&mut self, node: usize, cell: &str) {
-        let t = self.t;
-        self.machines[node]
-            .proc_mut()
-            .touched
-            .insert(cell.to_string(), t);
-    }
-
-    /// Watched: in a quiet fleet, a cell nothing has used for well over
-    /// `idle_evict_ms` has been given back. The allowance covers a refused
-    /// eviction, which waits out another idle period, and the sampling
-    /// period. A cell with work in flight here is not idle: a request
-    /// routed to it, or an output of its handler held at the gate. A cell
-    /// with a socket open or an armed alarm is excused: the core may keep
-    /// either resident.
-    fn judge_idle(&mut self, node: usize) {
-        let Some(idle_ms) = self.config.idle_evict_ms else {
-            return;
-        };
-        // The whole allowance must have passed in a quiet fleet: a process
-        // that just woke from a pause has had no chance to evict.
-        let allowance = 2 * idle_ms + 2 * LOAD_SAMPLE_MS + 2_000;
-        let p = self.machines[node].proc();
-        if self.t < self.settled_from() + allowance || p.shutdown.is_some() {
-            return;
-        }
-        let kept: Vec<(String, u64)> = p
-            .published
-            .iter()
-            .filter(|(cell, _)| !p.sockets.values().any(|s| s.cell == **cell))
-            .filter(|(cell, _)| {
-                !p.pending.values().any(|pending| match pending {
-                    Pending::Client(req) => req.cell == **cell && req.epoch.is_some(),
-                    Pending::Gate(gate) => gate.reveal.cell == **cell,
-                    _ => false,
-                })
-            })
-            .filter(|(cell, epoch)| {
-                self.seen(node, cell, **epoch)
-                    .is_some_and(|content| self.alarm_of(content, **epoch).at_ms().is_none())
-            })
-            .filter_map(|(cell, _)| {
-                let idle = self.t - p.touched.get(cell).copied().unwrap_or(0);
-                (idle > allowance).then(|| (cell.clone(), idle))
-            })
-            .collect();
-        let who = self.who(node);
-        for (cell, idle) in kept {
-            self.checker.idle_kept(self.t, &who, &cell, idle);
-        }
-    }
-
     /// Production's periodic sampler.
     fn sample_load(&mut self, node: usize) {
         self.judge_idle(node);
@@ -789,27 +727,6 @@ impl World {
             self.stats.shedding_samples += 1;
         }
         self.judge_memory(node);
-    }
-
-    /// Watched: in a quiet fleet, a node that latched on memory pressure
-    /// sheds down to its resume line, 80% of the ceiling, and releases the
-    /// latch within a few samples. Shedding cuts a tenth of the residents
-    /// per sample (`release_target`), and here every cell's memory comes
-    /// back when it goes, so 10 s is plenty. A node holding a socket is
-    /// excused: a socket can pin its cell resident.
-    fn judge_memory(&mut self, node: usize) {
-        let t = self.t;
-        let p = self.machines[node].proc_mut();
-        if !p.state.shedding() || !p.sockets.is_empty() {
-            p.shedding_since = None;
-            return;
-        }
-        let since = *p.shedding_since.get_or_insert(t);
-        let memory = p.memory;
-        if t >= self.settled_from() + MEMORY_RELIEF_MS && t - since > MEMORY_RELIEF_MS {
-            let who = self.who(node);
-            self.checker.memory_kept(t, &who, memory, t - since);
-        }
     }
 
     /// The process on `node` dies. Its open databases stay on disk as it

@@ -10,11 +10,9 @@
 use celld_logic::{Event, EvictError, EvictSuccess, EvictionAdmission, RequestId};
 
 use super::clients::CLIENTS_STOP_BEFORE_END_MS;
+use super::judges::DEPLOY_SLACK_MS;
 use super::shutdown::{Mode, ShutdownWork};
 use super::{Item, Pending, Work, World};
-
-/// How long after a deploy's `max_age_ms` its forced moves may still take.
-const DEPLOY_SLACK_MS: u64 = 10_000;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Act {
@@ -168,31 +166,6 @@ impl World {
                 max_age_ms,
             };
             self.work(node, max_age_ms + DEPLOY_SLACK_MS, Work::Operator(work));
-        }
-    }
-
-    /// Every runtime of a cell still served here must have moved to the
-    /// deploy's generation, unless a later deploy has superseded it.
-    fn judge_deploy(&mut self, node: usize, generation: u64, max_age_ms: u64) {
-        let p = self.machines[node].proc();
-        if p.generation != generation || p.shutdown.is_some() {
-            return;
-        }
-        let stuck: Vec<(String, u64)> = p
-            .published
-            .keys()
-            .filter_map(|cell| {
-                let on = p.runtime_generations.get(cell).copied().unwrap_or(0);
-                (on < generation).then(|| (cell.clone(), on))
-            })
-            .collect();
-        let who = self.who(node);
-        for (cell, on) in stuck {
-            let detail = format!(
-                "on generation {on}, {DEPLOY_SLACK_MS} ms after generation {generation}'s \
-                 max age of {max_age_ms} ms"
-            );
-            self.checker.deploy_stuck(self.t, &who, &cell, detail);
         }
     }
 

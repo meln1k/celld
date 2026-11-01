@@ -4,7 +4,10 @@
 //! bucket, a runtime started, a response released, a database restored. The
 //! checker keeps the few records it needs (ghost state no node can see) and
 //! tests each property when its fact arrives. The shell never decides
-//! whether something is a violation; every property lives in this file.
+//! whether something is a violation: every property lives in this file,
+//! or, when its facts are the fleet's state at a moment (which cells a
+//! process serves, what it holds open), in `world/judges.rs`, which picks
+//! out those facts and their thresholds and hands each hit here.
 //!
 //! Some properties are only *watched*: a hit is recorded in
 //! `Outcome::watched` but never fails a run. A property starts there, and is

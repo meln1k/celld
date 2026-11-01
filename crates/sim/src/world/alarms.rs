@@ -39,7 +39,7 @@ use celld_logic::wake::{
 use celld_logic::{Epoch, Event, Failure, OpId, RequestId, WakeHintScope};
 
 use super::shell::StoreReq;
-use super::{Work, World, WALL_EPOCH_MS};
+use super::{Work, World};
 use crate::{Mutation, WriteId};
 
 /// How far ahead a handler sets an alarm.
@@ -233,33 +233,6 @@ impl World {
                 .seen(node, cell, epoch)
                 .and_then(|content| self.alarm_of(content, epoch).at_ms())
                 .is_some_and(|at_ms| !self.store.wake_covers(cell, at_ms))
-    }
-
-    /// The process on `node` is about to die: every alarm a client was told
-    /// was set must be covered by a wake entry.
-    pub(super) fn judge_death(&mut self, node: usize) {
-        let who = self.who(node);
-        let published: Vec<(String, Epoch)> = self.machines[node]
-            .proc()
-            .published
-            .iter()
-            .map(|(cell, epoch)| (cell.clone(), *epoch))
-            .collect();
-        for (cell, epoch) in published {
-            if !self.alarm_uncovered(node, &cell, epoch) {
-                continue;
-            }
-            let content = self.seen(node, &cell, epoch).expect("uncovered: open");
-            let last = content
-                .iter()
-                .rev()
-                .find(|w| self.alarm_writes.contains_key(w))
-                .copied()
-                .expect("uncovered: armed");
-            if self.checker.answered(&cell, last) {
-                self.checker.died_uncovered(self.t, &who, &cell, last);
-            }
-        }
     }
 
     /// An activity on the cell is over: report its alarm, then finish it.
@@ -513,27 +486,6 @@ impl World {
                 now_mono_ms: 0,
             };
             self.drive(node, event);
-        }
-    }
-
-    /// **Every durable alarm fires.** When the probe ends, no cell's newest
-    /// durable database may still hold an alarm that came due long before.
-    /// When the audit ends, the same is watched.
-    pub(super) fn judge_alarms(&mut self, audit: bool) {
-        let now = (WALL_EPOCH_MS + self.t) as i64;
-        for cell in 0..self.config.cells {
-            let cell = format!("c{cell}");
-            let Some((epoch, content)) = self.store.newest(&cell) else {
-                continue;
-            };
-            let at_ms = self.alarm_of(content, epoch).at_ms();
-            if let Some(at_ms) = at_ms.filter(|at| *at + (ALARM_SLACK_MS as i64) < now) {
-                if audit {
-                    self.checker.audit_alarm_unfired(self.t, &cell, now - at_ms);
-                } else {
-                    self.checker.alarm_unfired(self.t, &cell, now - at_ms);
-                }
-            }
         }
     }
 }
