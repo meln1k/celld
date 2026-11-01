@@ -38,6 +38,20 @@ pub struct Checker {
     opened: BTreeMap<(String, Epoch), BTreeSet<WriteId>>,
     /// Every write a client was told succeeded: (cell, epoch, write).
     acked: BTreeSet<(String, Epoch, WriteId)>,
+    /// Each cell's acknowledged writes, with the instant each client heard.
+    acked_at: BTreeMap<String, Vec<(u64, WriteId)>>,
+    /// Every database that ever ran each cell epoch, as the list of writes
+    /// it held: what it opened with, then each commit. A restore must
+    /// produce a state one of them actually passed through.
+    lineages: BTreeMap<(String, Epoch), Vec<Vec<WriteId>>>,
+    /// The newest epoch the bucket ever recorded for each cell.
+    newest_epoch: BTreeMap<String, Epoch>,
+    /// When each cell epoch's prefix first held each length: index `n` is
+    /// the instant it reached `n + 1` writes.
+    durable_at: BTreeMap<(String, Epoch), Vec<u64>>,
+    /// The last instant a process's ownership read found the record naming
+    /// it at a cell epoch: (process, cell, epoch).
+    verified_at: BTreeMap<(String, String, Epoch), u64>,
     pub violations: Vec<Violation>,
 }
 
@@ -53,9 +67,49 @@ impl Checker {
     /// An owner compare-and-swap applied at the bucket. Recorded when it
     /// applies, not when the node hears back: a node can lose the response
     /// to a claim that did take effect.
-    pub fn claim_applied(&mut self, cell: &str, epoch: Epoch, node: &str) {
+    ///
+    /// **The epoch only grows.** Every activation advances it
+    /// (`docs/guarantees.md`), so a claim at an epoch the cell already had
+    /// gives one epoch two lineages, whether or not both ever run.
+    pub fn claim_applied(&mut self, t: u64, cell: &str, epoch: Epoch, node: &str) {
         self.claims
             .insert((cell.to_string(), epoch, node.to_string()));
+        let newest = self.newest_epoch.entry(cell.to_string()).or_insert(0);
+        if epoch <= *newest {
+            let newest = *newest;
+            self.violation(
+                t,
+                "epoch-reused",
+                format!(
+                    "{node} claimed {cell} at epoch {epoch}, but it already had epoch {newest}"
+                ),
+            );
+        } else {
+            *newest = epoch;
+        }
+    }
+
+    /// The bucket now holds `len` writes in this cell epoch's prefix.
+    pub fn prefix_grew(&mut self, t: u64, cell: &str, epoch: Epoch, len: usize) {
+        let times = self
+            .durable_at
+            .entry((cell.to_string(), epoch))
+            .or_default();
+        while times.len() < len {
+            times.push(t);
+        }
+    }
+
+    /// A process's ownership read found the record naming it at `epoch`.
+    pub fn ownership_read(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch) {
+        let key = (who.to_string(), cell.to_string(), epoch);
+        self.verified_at.insert(key, t);
+    }
+
+    /// A database committed `write` on the lineage `replica_opened` named.
+    pub fn committed(&mut self, cell: &str, epoch: Epoch, lineage: usize, write: WriteId) {
+        let key = (cell.to_string(), epoch);
+        self.lineages.get_mut(&key).expect("opened")[lineage].push(write);
     }
 
     /// **No runtime without its own claim.** A node may run a cell at an
@@ -129,15 +183,69 @@ impl Checker {
     /// `saw` comes from the simulated database, not from what the shell
     /// told the core, so a shell that understates what a handler saw
     /// cannot fool the core and this check together.
+    ///
+    /// **No stale read.** Whatever a response reveals must include every
+    /// write a client had already been told succeeded when this request was
+    /// sent. Otherwise two nodes served the cell at once: the one that
+    /// acknowledged and the one that answered from older state.
+    ///
+    /// **No ack without a fresh ownership read.** A write proven through
+    /// the bucket is acknowledged only after a read of the owner record,
+    /// made once the bucket held the write, named this process's node at
+    /// this epoch (`docs/guarantees.md`).
+    #[allow(clippy::too_many_arguments)]
     pub fn response_released(
         &mut self,
         t: u64,
         store: &Store,
+        who: &str,
         cell: &str,
         epoch: Epoch,
         committed: Option<(WriteId, u64)>,
-        saw: u64,
+        seen: &[WriteId],
+        sent_at: u64,
     ) {
+        let saw = seen.len() as u64;
+        let missed = self
+            .acked_at
+            .get(cell)
+            .into_iter()
+            .flatten()
+            .find(|(at, write)| *at < sent_at && !seen.contains(write))
+            .copied();
+        if let Some((at, write)) = missed {
+            self.violation(
+                t,
+                "stale-read",
+                format!(
+                    "{who} answered a request for {cell} sent at {sent_at} from epoch {epoch} \
+                     without write {write}, acknowledged at {at}"
+                ),
+            );
+        }
+        if let Some((write, position)) = committed {
+            let durable_since = self
+                .durable_at
+                .get(&(cell.to_string(), epoch))
+                .and_then(|times| times.get(position as usize - 1))
+                .copied();
+            let read = self
+                .verified_at
+                .get(&(who.to_string(), cell.to_string(), epoch))
+                .copied();
+            let fresh = matches!((durable_since, read), (Some(d), Some(r)) if r >= d);
+            if !fresh {
+                self.violation(
+                    t,
+                    "unverified-ack",
+                    format!(
+                        "{who} acknowledged write {write} of {cell} epoch {epoch} with no \
+                         ownership read since the bucket held it at {durable_since:?} \
+                         (last read {read:?})"
+                    ),
+                );
+            }
+        }
         let durable = store.durable_len(cell, epoch) as u64;
         let Some((write, position)) = committed else {
             if durable < saw {
@@ -184,6 +292,10 @@ impl Checker {
             );
         }
         self.acked.insert((cell.to_string(), epoch, write));
+        self.acked_at
+            .entry(cell.to_string())
+            .or_default()
+            .push((t, write));
     }
 
     /// **No acknowledged write is lost.** A database opened at `epoch` must
@@ -191,6 +303,12 @@ impl Checker {
     /// That is what the acknowledgement promised: whoever owns the cell next
     /// sees the write. Reopening the same epoch, after a crash, is held to
     /// the same promise.
+    ///
+    /// **A restore is a real state.** What it opens with must be a state
+    /// some database of an earlier epoch actually held: a prefix of one of
+    /// its lineages. A hole, a reordering or a foreign write is not.
+    ///
+    /// Returns the lineage this database starts, for `committed`.
     pub fn replica_opened(
         &mut self,
         t: u64,
@@ -198,7 +316,27 @@ impl Checker {
         cell: &str,
         epoch: Epoch,
         content: &[WriteId],
-    ) {
+    ) -> usize {
+        let real = content.is_empty()
+            || self
+                .lineages
+                .range((cell.to_string(), 0)..(cell.to_string(), epoch))
+                .flat_map(|(_, lineages)| lineages)
+                .any(|lineage| lineage.starts_with(content));
+        if !real {
+            self.violation(
+                t,
+                "torn-restore",
+                format!(
+                    "{node} opened {cell} epoch {epoch} with {} writes that no earlier \
+                     database ever held in that order",
+                    content.len()
+                ),
+            );
+        }
+        let lineages = self.lineages.entry((cell.to_string(), epoch)).or_default();
+        lineages.push(content.to_vec());
+        let lineage = lineages.len() - 1;
         let content: BTreeSet<WriteId> = content.iter().copied().collect();
         let lost: Vec<WriteId> = self
             .acked
@@ -218,6 +356,7 @@ impl Checker {
             );
         }
         self.opened.insert((cell.to_string(), epoch), content);
+        lineage
     }
 }
 

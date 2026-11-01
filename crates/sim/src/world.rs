@@ -40,7 +40,7 @@ use celld_logic::{
 
 use crate::checks::Checker;
 use crate::store::Store;
-use crate::{Outcome, Rng, SimConfig, Stats, WriteId};
+use crate::{Mutation, Outcome, Rng, SimConfig, Stats, WriteId};
 
 use clients::{Bounce, Op, Req, Via};
 use faults::{Fault, Partition};
@@ -331,7 +331,16 @@ impl World {
     }
 
     fn mono(&self, node: usize) -> u64 {
-        self.machines[node].proc().mono_base + self.t
+        self.machines[node].proc().mono_base + mono_ms(self.config.mutation, self.t)
+    }
+
+    /// How long the agenda takes for a process's monotonic clock to move
+    /// by `mono_ms`.
+    fn agenda_ms(&self, mono_ms: u64) -> u64 {
+        match self.config.mutation {
+            Some(Mutation::SlowMonoClock) => 4 * mono_ms,
+            _ => mono_ms,
+        }
     }
 
     pub fn run(mut self) -> Outcome {
@@ -593,6 +602,15 @@ fn core_config(config: &SimConfig) -> Config {
         alarm_resident_ms: 3_600_000,
         idle_evict_ms: config.idle_evict_ms,
         pressure: pressure::PressureConfig::from_limits(None, None),
+    }
+}
+
+/// How far every process's monotonic clock has run by simulated time `t`,
+/// before its own base and any suspend.
+fn mono_ms(mutation: Option<Mutation>, t: Time) -> u64 {
+    match mutation {
+        Some(Mutation::SlowMonoClock) => t / 4,
+        _ => t,
     }
 }
 

@@ -141,6 +141,10 @@ impl Store {
             _ if !guard_matches(guard, current) => return CasOutcome::Rejected,
             _ => {}
         }
+        let epoch = match (self.mutation, self.owners.get(cell)) {
+            (Some(Mutation::StaleEpoch), Some((_, current, _))) => *current,
+            _ => epoch,
+        };
         let etag = self.etag();
         self.owners
             .insert(cell.to_string(), (Some(node.to_string()), epoch, etag));
@@ -181,7 +185,13 @@ impl Store {
             Some(Mutation::StaleRestore) => epoch.saturating_sub(1),
             _ => epoch,
         };
-        self.chain_below(cell, epoch).map(<[WriteId]>::to_vec)
+        let chain = self.chain_below(cell, epoch).map(<[WriteId]>::to_vec);
+        match (self.mutation, chain) {
+            (Some(Mutation::TornRestore), Some(chain)) if chain.len() >= 2 => {
+                Some(chain[1..].to_vec())
+            }
+            (_, chain) => chain,
+        }
     }
 
     /// The newest non-empty prefix below `epoch`, as the bucket truly holds

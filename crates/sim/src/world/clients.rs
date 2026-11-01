@@ -45,6 +45,8 @@ pub(super) struct Op {
     retry: RouteRetry,
     /// The liveness goal this request is an attempt at.
     goal: Option<usize>,
+    /// When the client sent it.
+    sent_at: Time,
 }
 
 /// Why a forward came back without running.
@@ -170,15 +172,16 @@ pub(super) struct Req {
     /// the handler runs on even after the client stopped waiting.
     cell: String,
     write: bool,
+    sent_at: Time,
     /// How the request got here. A forwarded request is never forwarded on.
     via: Via,
     /// The epoch the request ran at, once routed locally.
     epoch: Option<Epoch>,
     /// The write the handler committed and its position.
     committed: Option<(WriteId, u64)>,
-    /// How many writes the cell's database held when the handler answered:
-    /// everything its response can reveal.
-    saw: u64,
+    /// The cell's database when the handler answered: everything its
+    /// response can reveal.
+    seen: Vec<WriteId>,
 }
 
 impl World {
@@ -233,6 +236,7 @@ impl World {
             ingress,
             retry: RouteRetry::new(self.t),
             goal,
+            sent_at: self.t,
         };
         self.ops.insert(op, entry);
         let delay = self.net_rng.range(1, 3);
@@ -252,7 +256,12 @@ impl World {
         let Some(entry) = self.ops.get(&op) else {
             return;
         };
-        let (ingress, cell, write) = (entry.ingress, entry.cell.clone(), entry.write);
+        let (ingress, cell, write, sent_at) = (
+            entry.ingress,
+            entry.cell.clone(),
+            entry.write,
+            entry.sent_at,
+        );
         let paused = self.machines[node]
             .proc
             .as_ref()
@@ -289,10 +298,11 @@ impl World {
             op,
             cell: cell.clone(),
             write,
+            sent_at,
             via,
             epoch: None,
             committed: None,
-            saw: 0,
+            seen: Vec::new(),
         };
         self.machines[node].proc_mut().requests.insert(request, req);
         let event = if via == Via::Capacity {
@@ -526,12 +536,13 @@ impl World {
             None => (None, (saw > opened).then_some(saw)),
         };
         let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
+        let seen = self.seen(node, &cell, req.epoch.unwrap()).unwrap().to_vec();
         self.machines[node]
             .proc_mut()
             .requests
             .get_mut(&request)
             .unwrap()
-            .saw = saw;
+            .seen = seen;
         self.drive(
             node,
             Event::OutputAt {
@@ -568,13 +579,16 @@ impl World {
         if req.committed.is_some() {
             self.stats.acked_writes += 1;
         }
+        let who = self.who(node);
         self.checker.response_released(
             self.t,
             &self.store,
+            &who,
             &req.cell,
             epoch,
             req.committed,
-            req.saw,
+            &req.seen,
+            req.sent_at,
         );
         self.settle(req.op, true);
     }

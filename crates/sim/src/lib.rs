@@ -84,15 +84,26 @@ pub enum Mutation {
     ReadsBypassGate,
     /// `VerifyOwnership` answers `Ok` without reading the owner record, so a
     /// node that lost the cell still acknowledges into its old epoch.
-    /// Caught by `late-ack`.
+    /// Caught by `unverified-ack`, and by `late-ack` once a successor has
+    /// opened.
     BlindVerify,
     /// The bucket rejects every owner write: nothing is unsafe, but no cell
     /// is ever served. Caught by `liveness`.
     RejectClaims,
+    /// A restore loses the first write of its chain: a hole no database
+    /// ever held. Caught by `torn-restore`.
+    TornRestore,
+    /// An owner write keeps the epoch the record already had. Caught by
+    /// `epoch-reused`.
+    StaleEpoch,
+    /// Each process's monotonic clock runs at a quarter speed, so its core
+    /// believes in its node lease long after peers think it expired. Caught
+    /// by `stale-read`.
+    SlowMonoClock,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 8] = [
+    pub const ALL: [Mutation; 11] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -101,6 +112,9 @@ impl Mutation {
         Mutation::ReadsBypassGate,
         Mutation::BlindVerify,
         Mutation::RejectClaims,
+        Mutation::TornRestore,
+        Mutation::StaleEpoch,
+        Mutation::SlowMonoClock,
     ];
 }
 

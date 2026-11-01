@@ -6,7 +6,7 @@
 //! system's doing, not the fault's. Bucket call failures are drawn per call
 //! in `shell.rs`; a fixed clock skew per node is drawn in `World::new`.
 
-use super::{Item, World};
+use super::{mono_ms, Item, World};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Fault {
@@ -113,7 +113,7 @@ impl World {
     }
 
     pub(super) fn resume(&mut self, node: usize, inc: u64) {
-        let t = self.t;
+        let (t, mutation) = (self.t, self.config.mutation);
         let m = &mut self.machines[node];
         let Some(p) = m.proc.as_mut().filter(|_| m.inc == inc) else {
             return;
@@ -121,7 +121,7 @@ impl World {
         p.paused_until = None;
         if let Some(at) = p.suspended_at.take() {
             // The monotonic clock did not count the time it was suspended.
-            p.mono_base -= t - at;
+            p.mono_base -= mono_ms(mutation, t) - mono_ms(mutation, at);
         }
         self.note(|| format!("resume n{node}#{inc}"));
     }

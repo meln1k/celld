@@ -34,6 +34,8 @@ pub(super) struct Disk {
 /// A cell's open database on one node, at one epoch.
 pub(super) struct Replica {
     content: Vec<WriteId>,
+    /// The checker's name for this database's history (`Checker::committed`).
+    lineage: usize,
     /// Length when the epoch opened: the chain it was restored from.
     start_len: usize,
     /// Length the bucket is known to hold for this epoch.
@@ -212,11 +214,13 @@ impl World {
         // Opening an epoch replaces any file a dead process left for it.
         self.machines[node].disk.live.remove(&(cell.clone(), epoch));
         let name = self.machines[node].name.clone();
-        self.checker
+        let lineage = self
+            .checker
             .replica_opened(self.t, &name, &cell, epoch, &content);
         let len = content.len();
         let replica = Replica {
             content,
+            lineage,
             start_len: len,
             // What it opened with is already in the bucket, below this epoch.
             uploaded: len,
@@ -249,12 +253,21 @@ impl World {
         self.next_write += 1;
         replica.content.push(write);
         let position = replica.content.len() as u64;
+        let lineage = replica.lineage;
+        self.checker.committed(cell, epoch, lineage, write);
         self.upload(node, cell, epoch);
         Some((write, position))
     }
 
-    /// The epoch's database length when it opened, and now: what a handler
-    /// answering now has seen.
+    /// What a handler answering now has seen: every write in the epoch's
+    /// database. `None` when the runtime was stopped and the database closed.
+    pub(super) fn seen(&self, node: usize, cell: &str, epoch: Epoch) -> Option<&[WriteId]> {
+        let key = (cell.to_string(), epoch);
+        let replica = self.machines[node].proc().replicas.get(&key)?;
+        Some(&replica.content)
+    }
+
+    /// The epoch's database length when it opened, and now.
     /// `None` when the runtime was stopped and the database closed.
     pub(super) fn positions(&self, node: usize, cell: &str, epoch: Epoch) -> Option<(u64, u64)> {
         let replica = self.machines[node]
@@ -365,7 +378,8 @@ impl World {
                         epoch,
                         op,
                     };
-                    let key = self.work(node, deadline - mono, work);
+                    let delay = self.agenda_ms(deadline - mono);
+                    let key = self.work(node, delay, work);
                     self.replica_mut(node, &cell, epoch)
                         .deadlines
                         .insert(op, key);

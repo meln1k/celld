@@ -103,8 +103,15 @@ The checks, in `crates/sim/src/checks.rs`:
 - **ack-before-durable** and **read-before-durable**: a response left before
   the bucket held every write its handler saw.
 - **lost-write**: a restore opened without an acknowledged write.
+- **torn-restore**: a restore opened with a state that no earlier database
+  ever held, such as one with a hole or a reordering.
 - **late-ack**: a write was acknowledged after a later epoch had opened
   without it.
+- **unverified-ack**: a write was acknowledged with no read of the owner
+  record, naming this node at this epoch, since the bucket held the write.
+- **epoch-reused**: an ownership claim did not advance the cell's epoch.
+- **stale-read**: a response missed a write that a client had already been
+  told succeeded when the request was sent.
 - **liveness**: once every fault is over, each cell takes a write within
   30 s. Then the whole fleet stops for good, and one fresh node must restore
   every cell from the bucket alone.
@@ -120,13 +127,26 @@ The simulator does not yet model V8, alarms, the fleet log and fleet
 proofs, runtime generations, adoption by a peer, eviction snapshots, or
 memory pressure.
 
-The core on `main` fails some seeds. Two `State::validate` invariants fail:
-`indexed cell op N has no owning slot` and `confirming cell … left the owner
-read in Fenced`. A full fleet can also pass an unowned cell between peers
-that are all at their residency cap, so the cell is never served. In 100,000
-swarm seeds, 1,108 failed in a debug build. With validation compiled out, 49
-failed, all on liveness; every one inspected was that livelock. The test
-suite allows only the two known invariants.
+The core on `main` fails some seeds.
+
+- **Stale reads.** A clean read is released without a read of the owner
+  record, so it is only as fresh as its node's belief that it still owns the
+  cell. A peer whose wall clock runs a few hundred milliseconds ahead can
+  judge a lease expired while its holder's late renewal is still in flight.
+  The renewal then lands, the holder keeps its lease, and nothing tells it
+  that the peer took its cells. It answers reads of them from the old epoch
+  until a write fails its ownership read, 8 s later in one seed. A VM
+  suspend, which `CLOCK_MONOTONIC` does not count, does the same. Writes
+  stay safe.
+- **Two `State::validate` invariants:** `indexed cell op N has no owning
+  slot` and `confirming cell … left the owner read in Fenced`.
+- **A capacity livelock.** A full fleet can pass an unowned cell between
+  peers that are all at their residency cap, so the cell is never served.
+
+In 100,000 swarm seeds, 1,872 failed in a debug build: 1,061 on the two
+invariants, 766 on stale reads and 45 on liveness. With validation compiled
+out, 839 failed: 793 on stale reads and 46 on liveness. The test suite
+allows only these known failures, by name.
 
 ```
 cargo test -p celld-sim                                    # the suite

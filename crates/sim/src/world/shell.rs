@@ -3,7 +3,9 @@
 
 use std::collections::VecDeque;
 
-use celld_logic::{CasGuard, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, Timer};
+use celld_logic::{
+    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, Timer,
+};
 
 use super::faults::Partition;
 use super::{Item, Work, World};
@@ -127,7 +129,7 @@ impl World {
                 let ordinal = n.next_ordinal;
                 n.next_ordinal += 1;
                 n.timers.insert(slot.clone(), (ordinal, timer, at_mono_ms));
-                let delay = at_mono_ms.saturating_sub(mono);
+                let delay = self.agenda_ms(at_mono_ms.saturating_sub(mono));
                 self.work(node, delay, Work::Timer { slot, ordinal });
             }
             Effect::ReadSelfNodeLease { op } => {
@@ -296,7 +298,8 @@ impl World {
         }
         if mono < at_mono {
             // A suspend held the monotonic clock back: not due yet.
-            self.work(node, at_mono - mono, Work::Timer { slot, ordinal });
+            let delay = self.agenda_ms(at_mono - mono);
+            self.work(node, delay, Work::Timer { slot, ordinal });
             return;
         }
         let (_, timer, _) = n.timers.remove(&slot).unwrap();
@@ -532,9 +535,13 @@ impl World {
             } => {
                 let outcome = self.store.cas_owner(&cell, &guard, epoch, &name);
                 // The oracle believes the bucket, not the answer: a claim
-                // counts only if the record now names this node and epoch.
-                if self.store.owner(&cell) == Some((Some(name.as_str()), epoch)) {
-                    self.checker.claim_applied(&cell, epoch, &name);
+                // is the epoch the record names this node at afterwards.
+                let installed = match self.store.owner(&cell) {
+                    Some((Some(owner), epoch)) if owner == name => Some(epoch),
+                    _ => None,
+                };
+                if let (CasOutcome::Applied, Some(epoch)) = (outcome, installed) {
+                    self.checker.claim_applied(self.t, &cell, epoch, &name);
                 }
                 core(Event::OwnerCasCompleted {
                     op,
@@ -550,6 +557,9 @@ impl World {
                     .store
                     .read_owner(&cell)
                     .is_some_and(|r| r.node.as_ref() == Some(&name) && r.epoch == epoch);
+                if ours {
+                    self.checker.ownership_read(self.t, &sender, &cell, epoch);
+                }
                 core(Event::OwnershipVerified {
                     op,
                     result: if ours { Ok(()) } else { Err(Failure::Definite) },
@@ -562,6 +572,8 @@ impl World {
             } => {
                 self.checker.upload_applied(self.t, &sender, &cell, epoch);
                 self.store.put(&cell, epoch, &content);
+                let held = self.store.prefix(&cell, epoch).len();
+                self.checker.prefix_grew(self.t, &cell, epoch, held);
                 Work::Uploaded {
                     cell,
                     epoch,
