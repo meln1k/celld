@@ -17,7 +17,7 @@
 
 use celld_logic::Event;
 
-use super::{Time, Work, World};
+use super::{Pending, Time, Work, World};
 
 /// How long a shutdown may take before the process exits anyway.
 const SHUTDOWN_DEADLINE_MS: u64 = 20_000;
@@ -39,8 +39,32 @@ pub(super) enum Mode {
     Closing,
 }
 
+/// A shutdown's work for its process.
+pub(super) enum ShutdownWork {
+    /// The operator starts a graceful shutdown.
+    Begin(Mode),
+    /// Has the shutdown finished?
+    Poll,
+}
+
 impl World {
-    pub(super) fn shut_down(&mut self, node: usize, mode: Mode) {
+    pub(super) fn shutdown_work(&mut self, node: usize, work: ShutdownWork) {
+        match work {
+            ShutdownWork::Begin(mode) => self.shut_down(node, mode),
+            ShutdownWork::Poll => self.shutdown_poll(node),
+        }
+    }
+
+    /// The process on `node` is up and preserving: it refuses every new
+    /// request.
+    pub(super) fn preserving(&self, node: usize) -> bool {
+        self.machines[node].proc.as_ref().is_some_and(|p| {
+            p.shutdown
+                .is_some_and(|s| matches!(s.mode, Mode::Preserve | Mode::Closing))
+        })
+    }
+
+    fn shut_down(&mut self, node: usize, mode: Mode) {
         let p = self.machines[node].proc_mut();
         if p.shutdown.is_some() {
             return;
@@ -62,10 +86,10 @@ impl World {
                 self.drive(node, Event::BeginPreserve);
             }
         }
-        self.work(node, SHUTDOWN_POLL_MS, Work::ShutdownPoll);
+        self.work(node, SHUTDOWN_POLL_MS, Work::Shutdown(ShutdownWork::Poll));
     }
 
-    pub(super) fn shutdown_poll(&mut self, node: usize) {
+    fn shutdown_poll(&mut self, node: usize) {
         let p = self.machines[node].proc();
         let Shutdown { mode, deadline } = p.shutdown.expect("shutting down");
         let s = &p.state;
@@ -87,7 +111,10 @@ impl World {
             }
             // A preserve waits for its requests and its cold work.
             Mode::Preserve => {
-                if p.requests.is_empty() && s.activating() == 0 && s.evicting() == 0 {
+                if !p.pending.values().any(|p| matches!(p, Pending::Client(_)))
+                    && s.activating() == 0
+                    && s.evicting() == 0
+                {
                     // `prepare_clean_reload`: upload each database's final
                     // position, and keep its file.
                     let open: Vec<_> = p.replicas.keys().cloned().collect();
@@ -111,7 +138,7 @@ impl World {
                 }
             }
         }
-        self.work(node, SHUTDOWN_POLL_MS, Work::ShutdownPoll);
+        self.work(node, SHUTDOWN_POLL_MS, Work::Shutdown(ShutdownWork::Poll));
     }
 
     /// The process exits. With a clean-reload marker, the files of every

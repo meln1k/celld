@@ -102,7 +102,51 @@ impl Waiter {
     }
 }
 
+/// The replicator's work for one process.
+pub(super) enum ReplicaWork {
+    /// The bucket confirmed an upload of `len` writes.
+    Uploaded {
+        cell: String,
+        epoch: Epoch,
+        len: usize,
+    },
+    /// An upload failed, or its answer was lost.
+    UploadFailed { cell: String, epoch: Epoch },
+    /// Upload whatever the bucket does not have yet.
+    Upload { cell: String, epoch: Epoch },
+    /// The replicator gives up on a proof, or on a stop's final upload.
+    ProofDeadline {
+        cell: String,
+        epoch: Epoch,
+        op: OpId,
+    },
+    /// The bucket answered a restore's chain read.
+    ChainRead {
+        op: OpId,
+        cell: String,
+        epoch: Epoch,
+        chain: Option<Vec<WriteId>>,
+    },
+}
+
 impl World {
+    pub(super) fn replica_work(&mut self, node: usize, work: ReplicaWork) {
+        match work {
+            ReplicaWork::Uploaded { cell, epoch, len } => self.uploaded(node, cell, epoch, len),
+            ReplicaWork::UploadFailed { cell, epoch } => self.upload_failed(node, cell, epoch),
+            ReplicaWork::Upload { cell, epoch } => self.upload(node, &cell, epoch),
+            ReplicaWork::ProofDeadline { cell, epoch, op } => {
+                self.proof_deadline(node, cell, epoch, op)
+            }
+            ReplicaWork::ChainRead {
+                op,
+                cell,
+                epoch,
+                chain,
+            } => self.chain_read(node, op, cell, epoch, chain),
+        }
+    }
+
     /// The databases on the node's disk, as the startup scan reports them.
     pub(super) fn local_cells(&self, node: usize) -> Vec<LocalCell> {
         self.machines[node]
@@ -155,7 +199,7 @@ impl World {
                 self.work(
                     node,
                     OPERATION_DEADLINE_MS,
-                    Work::ProofDeadline { cell, epoch, op },
+                    Work::Replica(ReplicaWork::ProofDeadline { cell, epoch, op }),
                 );
             }
             self.settle_proofs(node, &key.0, epoch);
@@ -384,11 +428,11 @@ impl World {
         };
         let op = waiter.op();
         replica.waiters.push(waiter);
-        let deadline = Work::ProofDeadline {
+        let deadline = Work::Replica(ReplicaWork::ProofDeadline {
             cell: cell.to_string(),
             epoch,
             op,
-        };
+        });
         // A gate's deadline only ever moves later, so its first wake is at
         // the earliest it can be: one budget from now.
         let key = self.work(node, PROOF_BUDGET_MS, deadline);
@@ -422,11 +466,11 @@ impl World {
                 };
                 let deadline = proof_deadline(wait, &progress);
                 if mono < deadline {
-                    let work = Work::ProofDeadline {
+                    let work = Work::Replica(ReplicaWork::ProofDeadline {
                         cell: cell.clone(),
                         epoch,
                         op,
-                    };
+                    });
                     let delay = self.agenda_ms(deadline - mono);
                     let key = self.work(node, delay, work);
                     self.replica_mut(node, &cell, epoch)
@@ -481,7 +525,11 @@ impl World {
         {
             replica.uploading = false;
             let delay = self.net_rng.range(50, 300);
-            self.work(node, delay, Work::Upload { cell, epoch });
+            self.work(
+                node,
+                delay,
+                Work::Replica(ReplicaWork::Upload { cell, epoch }),
+            );
         }
     }
 

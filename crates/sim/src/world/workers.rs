@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 
 use celld_logic::{Event, RequestId, WorkerRoute};
 
-use super::{Work, World};
+use super::{Pending, Work, World};
 
 /// How long a Worker runs.
 const WORKER_RUN_MS: (u64, u64) = (1, 30);
@@ -21,9 +21,7 @@ impl World {
             // A preserving actor sends it to the pool without asking.
             return;
         }
-        let request = self.next_request;
-        self.next_request += 1;
-        self.machines[node].proc_mut().workers.insert(request);
+        let request = self.pend(node, Pending::Worker);
         self.drive(node, Event::WorkerRequest { request });
     }
 
@@ -37,7 +35,7 @@ impl World {
         route: Option<WorkerRoute>,
         immediate: &mut VecDeque<Event>,
     ) {
-        let waiting = self.machines[node].proc_mut().workers.remove(&request);
+        let waiting = self.machines[node].proc_mut().take_worker(request);
         let Some(WorkerRoute { cell, epoch }) = route else {
             return;
         };

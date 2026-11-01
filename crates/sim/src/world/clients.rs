@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route, WebSocketId};
 
 use super::faults::Partition;
-use super::{Item, Time, Work, World, OPERATION_DEADLINE_MS};
+use super::{Item, Pending, Time, Work, World, OPERATION_DEADLINE_MS};
 use crate::{Mutation, WriteId};
 
 /// When clients start sending. Nodes need a few round trips for their
@@ -211,7 +211,29 @@ pub(super) struct Req {
     seen: Vec<WriteId>,
 }
 
+/// The client side's work for one process: its handlers, and the ingress
+/// resolving a route again.
+pub(super) enum ClientWork {
+    /// A handler commits its write.
+    Commit { request: RequestId },
+    /// A handler calls out to a third party.
+    Effect { request: RequestId },
+    /// A handler returns its response.
+    End { request: RequestId },
+    /// The ingress resolves a forwarded request's route again.
+    Redispatch { op: u64 },
+}
+
 impl World {
+    pub(super) fn client_work(&mut self, node: usize, work: ClientWork) {
+        match work {
+            ClientWork::Commit { request } => self.handler_commit(node, request),
+            ClientWork::Effect { request } => self.handler_effect(node, request),
+            ClientWork::End { request } => self.handler_end(node, request),
+            ClientWork::Redispatch { op } => self.redispatch(op),
+        }
+    }
+
     pub(super) fn start_clients(&mut self) {
         self.after(CLIENTS_START_MS, Item::ClientNew);
     }
@@ -371,8 +393,6 @@ impl World {
             // messages; a preserving actor refuses every request.
             return self.settle(op, false);
         }
-        let request = self.next_request;
-        self.next_request += 1;
         let req = Req {
             op,
             cell: cell.clone(),
@@ -386,7 +406,7 @@ impl World {
             alarm: None,
             seen: Vec::new(),
         };
-        self.machines[node].proc_mut().requests.insert(request, req);
+        let request = self.pend(node, Pending::Client(req));
         let event = if via == Via::Capacity {
             Event::CapacityRequestAt {
                 request,
@@ -419,7 +439,7 @@ impl World {
         result: Result<Route, RequestError>,
         immediate: &mut VecDeque<Event>,
     ) {
-        let Some(req) = self.machines[node].proc().requests.get(&request) else {
+        let Some(req) = self.machines[node].proc().client(request) else {
             // Its caller is gone. A local route nobody takes still holds the
             // cell active, so production finishes the activity at once.
             if result == Ok(Route::Local) {
@@ -433,7 +453,7 @@ impl World {
             Ok(Route::Remote {
                 node: owner, epoch, ..
             }) => {
-                self.machines[node].proc_mut().requests.remove(&request);
+                self.machines[node].proc_mut().take_client(request);
                 match via {
                     Via::Client => self.forward(op, owner, epoch),
                     // The ingress forwarded here, but this node routes the
@@ -443,11 +463,11 @@ impl World {
             }
             Err(RequestError::CapacityExhausted) if via != Via::Client => {
                 // The peer has no room: the same `409 stale route`.
-                self.machines[node].proc_mut().requests.remove(&request);
+                self.machines[node].proc_mut().take_client(request);
                 self.bounce(op, Bounce::Stale);
             }
             Err(_) => {
-                self.machines[node].proc_mut().requests.remove(&request);
+                self.machines[node].proc_mut().take_client(request);
                 self.settle(op, false);
             }
         }
@@ -514,7 +534,7 @@ impl World {
     /// first, the request already failed with it.
     fn redispatch_after(&mut self, op: u64, wait: u64) {
         let ingress = self.ops[&op].ingress;
-        self.work(ingress, wait, Work::Redispatch { op });
+        self.work(ingress, wait, Work::Client(ClientWork::Redispatch { op }));
     }
 
     /// Retire the failed route in the ingress's core and resolve again.
@@ -560,14 +580,14 @@ impl World {
     pub(super) fn abort_requests(&mut self, node: usize, requests: Vec<RequestId>) {
         for request in requests {
             let p = self.machines[node].proc_mut();
-            let Some(req) = p.requests.get(&request) else {
+            let Some(req) = p.client(request) else {
                 continue;
             };
             if req.answered {
                 continue;
             }
             let routed = req.epoch.is_some();
-            let req = p.requests.remove(&request).unwrap();
+            let req = p.take_client(request).unwrap();
             self.settle(req.op, false);
             let delay = self.net_rng.range(0, 3);
             if routed {
@@ -598,13 +618,15 @@ impl World {
                 continue;
             };
             let waiting: Vec<RequestId> = p
-                .requests
+                .pending
                 .iter()
-                .filter(|(_, req)| req.op == op && req.epoch.is_none())
-                .map(|(request, _)| *request)
+                .filter_map(|(request, pending)| match pending {
+                    Pending::Client(req) if req.op == op && req.epoch.is_none() => Some(*request),
+                    _ => None,
+                })
                 .collect();
             for request in waiting {
-                self.machines[node].proc_mut().requests.remove(&request);
+                self.machines[node].proc_mut().take_client(request);
                 let delay = self.net_rng.range(0, 3);
                 self.deliver(node, delay, Event::Cancel { request });
             }
@@ -614,21 +636,20 @@ impl World {
     /// The request runs here: maybe commit a write after a while, then
     /// answer.
     fn run_handler(&mut self, node: usize, request: RequestId) {
-        let req = &self.machines[node].proc().requests[&request];
+        let req = self.machines[node].proc().client(request).unwrap();
         let (op, cell, write) = (req.op, req.cell.clone(), req.write);
         let epoch = self.machines[node].proc().published.get(&cell).copied();
         let name = self.machines[node].name.clone();
         self.checker
             .routed_local(self.t, &name, &cell, epoch.is_some());
         let Some(epoch) = epoch else {
-            self.machines[node].proc_mut().requests.remove(&request);
+            self.machines[node].proc_mut().take_client(request);
             self.settle(op, false);
             return;
         };
         self.machines[node]
             .proc_mut()
-            .requests
-            .get_mut(&request)
+            .client_mut(request)
             .unwrap()
             .epoch = Some(epoch);
         let commit = self.work_rng.range(0, 10);
@@ -639,18 +660,17 @@ impl World {
                 let alarm = self.draw_alarm();
                 self.machines[node]
                     .proc_mut()
-                    .requests
-                    .get_mut(&request)
+                    .client_mut(request)
                     .unwrap()
                     .alarm = alarm;
             }
-            self.work(node, commit, Work::HandlerCommit { request });
+            self.work(node, commit, Work::Client(ClientWork::Commit { request }));
         }
         if self.work_rng.chance(self.config.effect_probability) {
             let at = self.work_rng.range(commit, end);
-            self.work(node, at, Work::HandlerEffect { request });
+            self.work(node, at, Work::Client(ClientWork::Effect { request }));
         }
-        self.work(node, end, Work::HandlerEnd { request });
+        self.work(node, end, Work::Client(ClientWork::End { request }));
     }
 
     /// The handler calls out to a third party. The call can reveal what it
@@ -658,7 +678,7 @@ impl World {
     /// request for the cell (`GateRequestAt`), then holds the call as an
     /// output until the core releases it.
     pub(super) fn handler_effect(&mut self, node: usize, request: RequestId) {
-        let Some(req) = self.machines[node].proc().requests.get(&request) else {
+        let Some(req) = self.machines[node].proc().client(request) else {
             return;
         };
         let (cell, epoch, committed, sent_at) = (
@@ -676,8 +696,6 @@ impl World {
         };
         let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
         let seen = self.seen(node, &cell, epoch).unwrap().to_vec();
-        let gate = self.next_request;
-        self.next_request += 1;
         let held = Gate {
             cell: cell.clone(),
             epoch,
@@ -687,7 +705,7 @@ impl World {
             position,
             observed,
         };
-        self.machines[node].proc_mut().gates.insert(gate, held);
+        let gate = self.pend(node, Pending::Gate(held));
         let event = Event::GateRequestAt {
             request: gate,
             cell,
@@ -696,19 +714,17 @@ impl World {
         self.drive(node, event);
     }
 
-    /// The core routed a gate request. Returns false when the request is
-    /// not a gate. Routed here, the held call becomes an output; routed
-    /// anywhere else, the cell left mid-call and the call fails closed.
+    /// The core routed a gate request. Routed here, the held call becomes
+    /// an output; routed anywhere else, the cell left mid-call and the call
+    /// fails closed.
     pub(super) fn gate_routed(
         &mut self,
         node: usize,
         request: RequestId,
         result: &Result<Route, RequestError>,
-    ) -> bool {
+    ) {
         let p = self.machines[node].proc_mut();
-        let Some(gate) = p.gates.get(&request) else {
-            return false;
-        };
+        let gate = p.gate(request).expect("a gate request");
         let delay = self.net_rng.range(0, 2);
         match result {
             Ok(Route::Local) => {
@@ -723,14 +739,13 @@ impl World {
                 self.deliver(node, delay, event);
             }
             Ok(Route::Remote { .. }) => {
-                p.gates.remove(&request);
+                p.pending.remove(&request);
                 self.deliver(node, delay, Event::ActivityFinished { request });
             }
             Err(_) => {
-                p.gates.remove(&request);
+                p.pending.remove(&request);
             }
         }
-        true
     }
 
     /// The handler's write goes into the open database, and the replicator
@@ -738,17 +753,13 @@ impl World {
     /// If the runtime was stopped under it, the database is closed and the
     /// handler fails instead.
     pub(super) fn handler_commit(&mut self, node: usize, request: RequestId) {
-        let Some(req) = self.machines[node].proc().requests.get(&request) else {
+        let Some(req) = self.machines[node].proc().client(request) else {
             return;
         };
         let (cell, epoch, alarm) = (req.cell.clone(), req.epoch.unwrap(), req.alarm);
         match self.commit_write(node, &cell, epoch) {
             Some(committed) => {
-                let req = self.machines[node]
-                    .proc_mut()
-                    .requests
-                    .get_mut(&request)
-                    .unwrap();
+                let req = self.machines[node].proc_mut().client_mut(request).unwrap();
                 req.committed = Some(committed);
                 if let Some(ahead_ms) = alarm {
                     // The write sets or clears the alarm, and the runtime's
@@ -771,11 +782,7 @@ impl World {
 
     /// The handler threw: the request fails and its activity ends.
     fn handler_failed(&mut self, node: usize, request: RequestId) {
-        let req = self.machines[node]
-            .proc_mut()
-            .requests
-            .remove(&request)
-            .unwrap();
+        let req = self.machines[node].proc_mut().take_client(request).unwrap();
         self.settle(req.op, false);
         self.activity_done(node, request, &req.cell);
     }
@@ -784,7 +791,7 @@ impl World {
     /// holds it until every write it could reveal is durable; then the
     /// handler's activity is over.
     pub(super) fn handler_end(&mut self, node: usize, request: RequestId) {
-        let Some(req) = self.machines[node].proc().requests.get(&request) else {
+        let Some(req) = self.machines[node].proc().client(request) else {
             return;
         };
         let cell = req.cell.clone();
@@ -802,11 +809,7 @@ impl World {
         };
         let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
         let seen = self.seen(node, &cell, req.epoch.unwrap()).unwrap().to_vec();
-        let req = self.machines[node]
-            .proc_mut()
-            .requests
-            .get_mut(&request)
-            .unwrap();
+        let req = self.machines[node].proc_mut().client_mut(request).unwrap();
         req.seen = seen;
         req.answered = true;
         if req.upgrade {
@@ -839,7 +842,7 @@ impl World {
             return self.gate_released(node, request, result);
         }
         assert_eq!(channel, Channel::Response, "handlers answer or fetch");
-        let Some(req) = self.machines[node].proc_mut().requests.remove(&request) else {
+        let Some(req) = self.machines[node].proc_mut().take_client(request) else {
             return;
         };
         if result.is_err() || !self.ops.contains_key(&req.op) {
@@ -870,7 +873,7 @@ impl World {
     /// revealed what its handler had seen, so the oracle judges it as it
     /// judges a response. Either way the gate's pin on the cell ends.
     fn gate_released(&mut self, node: usize, request: RequestId, result: Result<(), RequestError>) {
-        let Some(gate) = self.machines[node].proc_mut().gates.remove(&request) else {
+        let Some(gate) = self.machines[node].proc_mut().take_gate(request) else {
             return;
         };
         if result.is_ok() {

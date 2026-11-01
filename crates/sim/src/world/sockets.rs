@@ -26,7 +26,22 @@ pub(super) struct Socket {
     kind: WebSocketKind,
 }
 
+/// A client's work on its socket.
+pub(super) enum SocketWork {
+    /// The client sends on its WebSocket.
+    Message { websocket: WebSocketId },
+    /// The client closes its WebSocket.
+    Closed { websocket: WebSocketId },
+}
+
 impl World {
+    pub(super) fn socket_work(&mut self, node: usize, work: SocketWork) {
+        match work {
+            SocketWork::Message { websocket } => self.socket_message(node, websocket),
+            SocketWork::Closed { websocket } => self.socket_closed(node, websocket),
+        }
+    }
+
     /// A handler upgrades its request: open a socket of a drawn kind for
     /// its cell.
     pub(super) fn open_socket(&mut self, node: usize, cell: String) {
@@ -57,14 +72,18 @@ impl World {
         self.drive(node, event);
         let (lo, hi) = SOCKET_LIFETIME_MS;
         let lifetime = self.work_rng.range(lo, hi);
-        self.work(node, lifetime, Work::SocketClosed { websocket });
+        self.work(
+            node,
+            lifetime,
+            Work::Socket(SocketWork::Closed { websocket }),
+        );
         self.next_message(node, websocket);
     }
 
     fn next_message(&mut self, node: usize, websocket: WebSocketId) {
         let (lo, hi) = MESSAGE_GAP_MS;
         let gap = self.work_rng.range(lo, hi);
-        self.work(node, gap, Work::SocketMessage { websocket });
+        self.work(node, gap, Work::Socket(SocketWork::Message { websocket }));
     }
 
     /// The client sends on its socket: a request for the socket's cell, on

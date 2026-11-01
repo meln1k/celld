@@ -8,8 +8,10 @@ use celld_logic::{
     CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, StopCause, Timer,
 };
 
+use super::alarms::AlarmWork;
 use super::faults::Partition;
-use super::{Item, Work, World};
+use super::replicator::ReplicaWork;
+use super::{Item, Pending, Work, World};
 use crate::store::Load;
 use crate::{Mutation, WriteId};
 
@@ -269,10 +271,10 @@ impl World {
                 immediate.push_back(Event::Published { op, result: Ok(()) });
             }
             Effect::Complete { request, result } => {
-                if !self.offer_routed(node, request, &result, immediate)
-                    && !self.gate_routed(node, request, &result)
-                {
-                    self.complete(node, request, result, immediate)
+                match self.machines[node].proc().pending.get(&request) {
+                    Some(Pending::Offer(_)) => self.offer_routed(node, request, &result, immediate),
+                    Some(Pending::Gate(_)) => self.gate_routed(node, request, &result),
+                    _ => self.complete(node, request, result, immediate),
                 }
             }
             Effect::CompleteWorker { request, route } => {
@@ -524,10 +526,10 @@ impl World {
                 op: *op,
                 result: Err(failure),
             }),
-            StoreReq::Upload { cell, epoch, .. } => Work::UploadFailed {
+            StoreReq::Upload { cell, epoch, .. } => Work::Replica(ReplicaWork::UploadFailed {
                 cell: cell.clone(),
                 epoch: *epoch,
-            },
+            }),
             // Production reports every failed restore as definite
             // (`Effect::Restore` in `actor.rs`): nothing was opened.
             StoreReq::ReadChain { op, .. } => core(Event::RestoreCompleted {
@@ -638,18 +640,18 @@ impl World {
                 self.store.put(&cell, epoch, &content);
                 let held = self.store.prefix(&cell, epoch).len();
                 self.checker.prefix_grew(self.t, &cell, epoch, held);
-                Work::Uploaded {
+                Work::Replica(ReplicaWork::Uploaded {
                     cell,
                     epoch,
                     len: content.len(),
-                }
+                })
             }
-            StoreReq::ReadChain { op, cell, epoch } => Work::ChainRead {
+            StoreReq::ReadChain { op, cell, epoch } => Work::Replica(ReplicaWork::ChainRead {
                 op,
                 chain: self.store.read_chain(&cell, epoch),
                 cell,
                 epoch,
-            },
+            }),
             StoreReq::Wake {
                 cell,
                 alarm,
@@ -663,11 +665,11 @@ impl World {
                 {
                     self.store.retire_wake(&cell, retirement);
                 }
-                Work::WakeMaintained {
+                Work::Alarm(AlarmWork::Maintained {
                     cell,
                     alarm,
                     report,
-                }
+                })
             }
         };
         // The answer goes back to the process that asked. If it has died

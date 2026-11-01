@@ -25,7 +25,7 @@
 //!   hints the core (`WakeHintAt`). The elected waker, here the lowest live
 //!   node, also hints cells whose owner is dead or absent.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use celld_logic::wake::{
     elected_hint_needed, AlarmSnapshot, AlarmSource, PublicationId, Retirement,
@@ -46,7 +46,42 @@ const WAKE_TICK_MS: u64 = 1_000;
 /// fired by then.
 pub(super) const ALARM_SLACK_MS: u64 = 10_000;
 
+/// What one process knows of its cells' alarms.
+#[derive(Default)]
+pub(super) struct ProcAlarms {
+    /// Alarm installations whose wake entry this process saw land.
+    covered: BTreeSet<(String, PublicationId)>,
+    /// Alarm handlers running: the cell and epoch each fires on.
+    firing: BTreeMap<OpId, (String, Epoch)>,
+}
+
+/// The alarm work of one process.
+pub(super) enum AlarmWork {
+    /// An alarm handler finishes.
+    Run { op: OpId },
+    /// A wake entry write landed.
+    Maintained {
+        cell: String,
+        alarm: AlarmSnapshot,
+        report: bool,
+    },
+    /// The process lists the bucket's due wake entries.
+    Scan,
+}
+
 impl World {
+    pub(super) fn alarm_work(&mut self, node: usize, work: AlarmWork) {
+        match work {
+            AlarmWork::Run { op } => self.alarm_run(node, op),
+            AlarmWork::Maintained {
+                cell,
+                alarm,
+                report,
+            } => self.wake_maintained(node, cell, alarm, report),
+            AlarmWork::Scan => self.wake_scan(node),
+        }
+    }
+
     /// The alarm a database opened at `epoch` holds: what its last alarm
     /// write left, identified by the open epoch and the number of alarm
     /// writes, sampled at the database's position. A database no alarm
@@ -115,7 +150,7 @@ impl World {
         let epoch = p.published.get(cell)?;
         let alarm = self.reported(self.alarm_of(self.seen(node, cell, *epoch)?, *epoch));
         let covered = match (alarm.at_ms(), alarm.source()) {
-            (Some(_), Some(source)) => p.covered.contains(&(cell.to_string(), source.id)),
+            (Some(_), Some(source)) => p.alarms.covered.contains(&(cell.to_string(), source.id)),
             _ => true,
         };
         Some((alarm, covered))
@@ -204,7 +239,7 @@ impl World {
     ) {
         if let (Some(_), Some(source)) = (alarm.at_ms(), alarm.source()) {
             let p = self.machines[node].proc_mut();
-            p.covered.insert((cell.clone(), source.id));
+            p.alarms.covered.insert((cell.clone(), source.id));
         }
         if report {
             if let Some((alarm, covered)) = self.observation(node, &cell) {
@@ -252,17 +287,18 @@ impl World {
         self.checker.routed_local(self.t, &name, &cell, published);
         self.machines[node]
             .proc_mut()
+            .alarms
             .firing
             .insert(op, (cell, epoch));
         let (lo, hi) = ALARM_RUN_MS;
         let run = self.work_rng.range(lo, hi);
-        self.work(node, run, Work::AlarmRun { op });
+        self.work(node, run, Work::Alarm(AlarmWork::Run { op }));
     }
 
     /// The alarm handler ran. If the alarm was due, it consumed it, or
     /// re-armed it, with one write.
     pub(super) fn alarm_run(&mut self, node: usize, op: OpId) {
-        let Some((cell, epoch)) = self.machines[node].proc_mut().firing.remove(&op) else {
+        let Some((cell, epoch)) = self.machines[node].proc_mut().alarms.firing.remove(&op) else {
             return;
         };
         let now = self.wall(node) as i64;
@@ -306,7 +342,7 @@ impl World {
 
     /// A handoff aborted the alarm handler before it ran to the end.
     pub(super) fn abort_alarm(&mut self, node: usize, op: OpId) {
-        if let Some((cell, epoch)) = self.machines[node].proc_mut().firing.remove(&op) {
+        if let Some((cell, epoch)) = self.machines[node].proc_mut().alarms.firing.remove(&op) {
             let event = Event::AlarmFinished {
                 op,
                 cell,
@@ -322,12 +358,12 @@ impl World {
     /// Start the process's periodic wake scan.
     pub(super) fn start_wake_scans(&mut self, node: usize) {
         let delay = self.net_rng.range(1, WAKE_TICK_MS);
-        self.work(node, delay, Work::WakeScan);
+        self.work(node, delay, Work::Alarm(AlarmWork::Scan));
     }
 
     /// List the due wake entries and hint the core about each.
     pub(super) fn wake_scan(&mut self, node: usize) {
-        self.work(node, WAKE_TICK_MS, Work::WakeScan);
+        self.work(node, WAKE_TICK_MS, Work::Alarm(AlarmWork::Scan));
         let p = self.machines[node].proc();
         if self.machines[node].partition.is_some()
             || !p.state.node_authoritative()

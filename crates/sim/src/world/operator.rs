@@ -7,10 +7,11 @@
 //! Each act arrives at its own rate per simulated minute across the fleet,
 //! on a random node that is up, while clients are sending.
 
-use celld_logic::{EvictError, EvictSuccess, EvictionAdmission, RequestId};
+use celld_logic::{Event, EvictError, EvictSuccess, EvictionAdmission, RequestId};
 
 use super::clients::CLIENTS_STOP_BEFORE_END_MS;
-use super::{Item, Mode, Work, World};
+use super::shutdown::{Mode, ShutdownWork};
+use super::{Item, Pending, Work, World};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Act {
@@ -30,7 +31,37 @@ pub(super) enum Act {
     Deploy,
 }
 
+/// An act reaching the process it was aimed at.
+pub(super) enum OperatorWork {
+    /// An operator's eviction reaches the core.
+    Evict { cell: String },
+    /// The log tier asks the core to renew its lease now.
+    Nudge,
+    /// The balancer asks the core to give some idle cells away.
+    Rebalance { cells: usize },
+    /// The node adopts a new application generation.
+    Deploy { max_age_ms: u64 },
+}
+
 impl World {
+    pub(super) fn operator_work(&mut self, node: usize, work: OperatorWork) {
+        match work {
+            // A preserving actor ignores the balancer, and refuses evictions.
+            OperatorWork::Rebalance { .. } | OperatorWork::Evict { .. }
+                if self.preserving(node) => {}
+            OperatorWork::Evict { cell } => self.evict(node, cell),
+            OperatorWork::Nudge => {
+                let event = Event::NudgeNodeLease {
+                    now_ms: 0,
+                    now_mono_ms: 0,
+                };
+                self.drive(node, event)
+            }
+            OperatorWork::Rebalance { cells } => self.drive(node, Event::Rebalance { cells }),
+            OperatorWork::Deploy { max_age_ms } => self.deploy(node, max_age_ms),
+        }
+    }
+
     pub(super) fn start_operator(&mut self) {
         for act in [
             Act::Evict,
@@ -75,17 +106,17 @@ impl World {
             let work = match act {
                 Act::Evict => {
                     let cell = format!("c{}", self.op_rng.below(self.config.cells as u64));
-                    Work::Evict { cell }
+                    Work::Operator(OperatorWork::Evict { cell })
                 }
-                Act::Nudge => Work::Nudge,
-                Act::Drain => Work::Shutdown(Mode::Drain),
-                Act::Preserve => Work::Shutdown(Mode::Preserve),
-                Act::Rebalance => Work::Rebalance {
+                Act::Nudge => Work::Operator(OperatorWork::Nudge),
+                Act::Drain => Work::Shutdown(ShutdownWork::Begin(Mode::Drain)),
+                Act::Preserve => Work::Shutdown(ShutdownWork::Begin(Mode::Preserve)),
+                Act::Rebalance => Work::Operator(OperatorWork::Rebalance {
                     cells: self.op_rng.range(1, 3) as usize,
-                },
-                Act::Deploy => Work::Deploy {
+                }),
+                Act::Deploy => Work::Operator(OperatorWork::Deploy {
                     max_age_ms: *self.op_rng.pick(&[0, 1_000, 10_000]).unwrap(),
-                },
+                }),
             };
             // Through the process's queue, so a pause holds it back.
             self.work(node, 0, work);
@@ -96,12 +127,9 @@ impl World {
 
     /// The operator's eviction reaches the core.
     pub(super) fn evict(&mut self, node: usize, cell: String) {
-        let request = self.next_request;
-        self.next_request += 1;
         self.stats.evictions += 1;
-        let p = self.machines[node].proc_mut();
-        p.evictions.insert(request, cell.clone());
-        let event = celld_logic::Event::EvictRequested {
+        let request = self.pend(node, Pending::Eviction(cell.clone()));
+        let event = Event::EvictRequested {
             request,
             cell,
             now_mono_ms: 0,
@@ -115,7 +143,7 @@ impl World {
         self.stats.deploys += 1;
         let p = self.machines[node].proc_mut();
         p.generation += 1;
-        let event = celld_logic::Event::GenerationChanged {
+        let event = Event::GenerationChanged {
             generation: p.generation,
             now_mono_ms: 0,
             max_age_ms,
@@ -132,7 +160,7 @@ impl World {
         result: Result<EvictionAdmission, EvictError>,
     ) {
         if result != Ok(EvictionAdmission::Pending) {
-            self.machines[node].proc_mut().evictions.remove(&request);
+            self.machines[node].proc_mut().take_eviction(request);
         }
     }
 
@@ -145,7 +173,7 @@ impl World {
         result: Result<EvictSuccess, EvictError>,
     ) {
         let p = self.machines[node].proc_mut();
-        let Some(cell) = p.evictions.remove(&request) else {
+        let Some(cell) = p.take_eviction(request) else {
             return;
         };
         if result == Ok(EvictSuccess::Evicted) {

@@ -41,11 +41,10 @@ mod shutdown;
 mod sockets;
 mod workers;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use celld_logic::wake::{AlarmSnapshot, PublicationId};
 use celld_logic::{
     on_event, pressure, Config, Epoch, Event, NodeLeaseSpec, OpId, OwnershipOnEvict, RequestId,
     State, Timer, WebSocketId,
@@ -55,15 +54,16 @@ use crate::checks::Checker;
 use crate::store::Store;
 use crate::{Mutation, Outcome, Rng, SimConfig, Stats, WriteId};
 
-use clients::{Bounce, Gate, Op, Req, Via};
+use alarms::{AlarmWork, ProcAlarms};
+use clients::{Bounce, ClientWork, Gate, Op, Req, Via};
 use faults::{Fault, Partition};
-use handoff::{Adoption, Answer, Offer};
+use handoff::{Adoption, Answer, HandoffWork, Offer};
 use liveness::Goal;
-use operator::Act;
-use replicator::{Disk, Replica};
+use operator::{Act, OperatorWork};
+use replicator::{Disk, Replica, ReplicaWork};
 use shell::{Slot, StoreReq};
-use shutdown::{Mode, Shutdown};
-use sockets::Socket;
+use shutdown::{Shutdown, ShutdownWork};
+use sockets::{Socket, SocketWork};
 
 type Time = u64;
 /// An item's place on the agenda, to cancel it by.
@@ -124,82 +124,35 @@ enum Item {
     End,
 }
 
-/// What a process does later.
+/// What a process does later. Each feature module schedules and runs its
+/// own kind; only what several modules share is listed here.
 enum Work {
     /// A completion the shell reports some time after the effect started.
     Deliver(Event),
     /// A timer the core armed. `ordinal` tells a live arm from one that a
     /// later `ScheduleTimer` for the same slot replaced.
-    Timer { slot: Slot, ordinal: u64 },
-    /// The bucket confirmed an upload of `len` writes.
-    Uploaded {
-        cell: String,
-        epoch: Epoch,
-        len: usize,
-    },
-    /// An upload failed, or its answer was lost.
-    UploadFailed { cell: String, epoch: Epoch },
-    /// Upload whatever the bucket does not have yet.
-    Upload { cell: String, epoch: Epoch },
-    /// The replicator gives up on a proof, or on a stop's final upload.
-    ProofDeadline {
-        cell: String,
-        epoch: Epoch,
-        op: OpId,
-    },
-    /// The bucket answered a restore's chain read.
-    ChainRead {
-        op: OpId,
-        cell: String,
-        epoch: Epoch,
-        chain: Option<Vec<WriteId>>,
+    Timer {
+        slot: Slot,
+        ordinal: u64,
     },
     /// The process samples its load and tells its core.
     LoadSample,
-    /// A handler commits its write.
-    HandlerCommit { request: RequestId },
-    /// A handler returns its response.
-    HandlerEnd { request: RequestId },
-    /// The ingress resolves a forwarded request's route again.
-    Redispatch { op: u64 },
-    /// An operator's eviction reaches the core.
-    Evict { cell: String },
-    /// The log tier asks the core to renew its lease now.
-    Nudge,
-    /// The operator starts a graceful shutdown.
-    Shutdown(Mode),
-    /// Has the shutdown finished?
-    ShutdownPoll,
-    /// The balancer asks the core to give some idle cells away.
-    Rebalance { cells: usize },
-    /// The node adopts a new application generation.
-    Deploy { max_age_ms: u64 },
-    /// The donor looks for peers to offer a released cell to.
-    AdoptSearch { op: OpId },
-    /// A peer answered the donor's offer.
-    OfferAnswered { op: OpId, answer: Answer },
-    /// A handler calls out to a third party.
-    HandlerEffect { request: RequestId },
+    /// An activity on the cell ends: report its alarm, then finish it.
+    ActivityDone {
+        request: RequestId,
+        cell: String,
+    },
     /// A top-level Worker request reaches the node.
     WorkerRequest,
-    /// A client sends on its WebSocket.
-    SocketMessage { websocket: WebSocketId },
-    /// A client closes its WebSocket.
-    SocketClosed { websocket: WebSocketId },
-    /// An activity on the cell ends: report its alarm, then finish it.
-    ActivityDone { request: RequestId, cell: String },
-    /// An alarm handler finishes.
-    AlarmRun { op: OpId },
-    /// A wake entry write landed.
-    WakeMaintained {
-        cell: String,
-        alarm: AlarmSnapshot,
-        report: bool,
-    },
-    /// The process lists the bucket's due wake entries.
-    WakeScan,
     /// Nothing: a failure nobody waits for.
     Nothing,
+    Replica(ReplicaWork),
+    Client(ClientWork),
+    Operator(OperatorWork),
+    Shutdown(ShutdownWork),
+    Handoff(HandoffWork),
+    Socket(SocketWork),
+    Alarm(AlarmWork),
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -249,17 +202,6 @@ impl Machine {
     }
 }
 
-impl World {
-    /// The process on `node` is up and preserving: it refuses every new
-    /// request.
-    fn preserving(&self, node: usize) -> bool {
-        self.machines[node].proc.as_ref().is_some_and(|p| {
-            p.shutdown
-                .is_some_and(|s| matches!(s.mode, Mode::Preserve | Mode::Closing))
-        })
-    }
-}
-
 /// The process running on a machine: one incarnation, with a fresh core,
 /// fresh clocks and no memory of the last one.
 struct Process {
@@ -282,27 +224,18 @@ struct Process {
     node_proof_ms: u64,
     /// The runtime registry: cells this process serves, at which epoch.
     published: BTreeMap<String, Epoch>,
-    requests: BTreeMap<RequestId, Req>,
-    /// Operator evictions the core has not answered yet, and their cells.
-    evictions: BTreeMap<RequestId, String>,
+    /// What each request id this process minted stands for.
+    pending: BTreeMap<RequestId, Pending>,
     /// A graceful shutdown under way.
     shutdown: Option<Shutdown>,
     /// Released cells this process is finding a successor for.
     adoptions: BTreeMap<OpId, Adoption>,
-    /// Offers from donors this process's core is deciding on.
-    offers: BTreeMap<RequestId, Offer>,
     /// The WebSockets this process holds open.
     sockets: BTreeMap<WebSocketId, Socket>,
     /// The application generation this process runs new isolates on.
     generation: u64,
-    /// Handlers' calls held at the output gate, by gate request.
-    gates: BTreeMap<RequestId, Gate>,
-    /// Worker requests waiting for the core to pick an isolate.
-    workers: BTreeSet<RequestId>,
-    /// Alarm installations whose wake entry this process saw land.
-    covered: BTreeSet<(String, PublicationId)>,
-    /// Alarm handlers running: the cell and epoch each fires on.
-    firing: BTreeMap<OpId, (String, Epoch)>,
+    /// What this process knows of its cells' alarms.
+    alarms: ProcAlarms,
 }
 
 impl Process {
@@ -318,18 +251,103 @@ impl Process {
             replicas: BTreeMap::new(),
             node_proof_ms: 0,
             published: BTreeMap::new(),
-            requests: BTreeMap::new(),
-            evictions: BTreeMap::new(),
+            pending: BTreeMap::new(),
             shutdown: None,
             adoptions: BTreeMap::new(),
-            offers: BTreeMap::new(),
             sockets: BTreeMap::new(),
             generation: 0,
-            gates: BTreeMap::new(),
-            workers: BTreeSet::new(),
-            covered: BTreeSet::new(),
-            firing: BTreeMap::new(),
+            alarms: ProcAlarms::default(),
         }
+    }
+}
+
+/// What a request id stands for. One counter mints every id a process
+/// gives its core, so one map holds them, and a completion finds its kind by
+/// one lookup.
+enum Pending {
+    /// A client's request, or a forward of one.
+    Client(Req),
+    /// A handler's call to a third party, held at the output gate.
+    Gate(Gate),
+    /// A donor's offer the core is deciding on.
+    Offer(Offer),
+    /// An operator eviction the core has not answered yet, and its cell.
+    Eviction(String),
+    /// A Worker request waiting for the core to pick an isolate.
+    Worker,
+}
+
+impl Process {
+    fn client(&self, request: RequestId) -> Option<&Req> {
+        match self.pending.get(&request)? {
+            Pending::Client(req) => Some(req),
+            _ => None,
+        }
+    }
+
+    fn client_mut(&mut self, request: RequestId) -> Option<&mut Req> {
+        match self.pending.get_mut(&request)? {
+            Pending::Client(req) => Some(req),
+            _ => None,
+        }
+    }
+
+    fn take_client(&mut self, request: RequestId) -> Option<Req> {
+        self.client(request)?;
+        match self.pending.remove(&request) {
+            Some(Pending::Client(req)) => Some(req),
+            _ => unreachable!(),
+        }
+    }
+
+    fn gate(&self, request: RequestId) -> Option<&Gate> {
+        match self.pending.get(&request)? {
+            Pending::Gate(gate) => Some(gate),
+            _ => None,
+        }
+    }
+
+    fn take_gate(&mut self, request: RequestId) -> Option<Gate> {
+        self.gate(request)?;
+        match self.pending.remove(&request) {
+            Some(Pending::Gate(gate)) => Some(gate),
+            _ => unreachable!(),
+        }
+    }
+
+    fn offers(&self) -> impl Iterator<Item = (RequestId, &Offer)> {
+        self.pending.iter().filter_map(|(request, p)| match p {
+            Pending::Offer(offer) => Some((*request, offer)),
+            _ => None,
+        })
+    }
+
+    fn take_offer(&mut self, request: RequestId) -> Option<Offer> {
+        match self.pending.get(&request)? {
+            Pending::Offer(_) => match self.pending.remove(&request) {
+                Some(Pending::Offer(offer)) => Some(offer),
+                _ => unreachable!(),
+            },
+            _ => None,
+        }
+    }
+
+    fn take_eviction(&mut self, request: RequestId) -> Option<String> {
+        match self.pending.get(&request)? {
+            Pending::Eviction(_) => match self.pending.remove(&request) {
+                Some(Pending::Eviction(cell)) => Some(cell),
+                _ => unreachable!(),
+            },
+            _ => None,
+        }
+    }
+
+    fn take_worker(&mut self, request: RequestId) -> bool {
+        let worker = matches!(self.pending.get(&request), Some(Pending::Worker));
+        if worker {
+            self.pending.remove(&request);
+        }
+        worker
     }
 }
 
@@ -429,6 +447,17 @@ impl World {
     fn work(&mut self, node: usize, delay: u64, work: Work) -> AgendaKey {
         let inc = self.machines[node].inc;
         self.after(delay, Item::Proc { node, inc, work })
+    }
+
+    /// Mint a request id on `node`'s process, and hold `pending` under it.
+    fn pend(&mut self, node: usize, pending: Pending) -> RequestId {
+        let request = self.next_request;
+        self.next_request += 1;
+        self.machines[node]
+            .proc_mut()
+            .pending
+            .insert(request, pending);
+        request
     }
 
     fn deliver(&mut self, node: usize, delay: u64, event: Event) {
@@ -533,49 +562,17 @@ impl World {
         match work {
             Work::Deliver(event) => self.drive(node, event),
             Work::Timer { slot, ordinal } => self.timer(node, slot, ordinal),
-            Work::Uploaded { cell, epoch, len } => self.uploaded(node, cell, epoch, len),
-            Work::UploadFailed { cell, epoch } => self.upload_failed(node, cell, epoch),
-            Work::Upload { cell, epoch } => self.upload(node, &cell, epoch),
-            Work::ProofDeadline { cell, epoch, op } => self.proof_deadline(node, cell, epoch, op),
-            Work::ChainRead {
-                op,
-                cell,
-                epoch,
-                chain,
-            } => self.chain_read(node, op, cell, epoch, chain),
             Work::LoadSample => self.sample_load(node),
-            Work::HandlerCommit { request } => self.handler_commit(node, request),
-            Work::HandlerEnd { request } => self.handler_end(node, request),
-            Work::Redispatch { op } => self.redispatch(op),
-            // A preserving actor ignores the balancer, and refuses evictions.
-            Work::Rebalance { .. } | Work::Evict { .. } if self.preserving(node) => {}
-            Work::Evict { cell } => self.evict(node, cell),
-            Work::Shutdown(mode) => self.shut_down(node, mode),
-            Work::ShutdownPoll => self.shutdown_poll(node),
-            Work::Rebalance { cells } => self.drive(node, Event::Rebalance { cells }),
-            Work::Deploy { max_age_ms } => self.deploy(node, max_age_ms),
-            Work::AdoptSearch { op } => self.adopt_search(node, op),
-            Work::OfferAnswered { op, answer } => self.offer_answered(node, op, answer),
-            Work::HandlerEffect { request } => self.handler_effect(node, request),
-            Work::WorkerRequest => self.worker_request(node),
-            Work::SocketMessage { websocket } => self.socket_message(node, websocket),
-            Work::SocketClosed { websocket } => self.socket_closed(node, websocket),
             Work::ActivityDone { request, cell } => self.activity_done(node, request, &cell),
-            Work::AlarmRun { op } => self.alarm_run(node, op),
-            Work::WakeMaintained {
-                cell,
-                alarm,
-                report,
-            } => self.wake_maintained(node, cell, alarm, report),
-            Work::WakeScan => self.wake_scan(node),
+            Work::WorkerRequest => self.worker_request(node),
             Work::Nothing => {}
-            Work::Nudge => self.drive(
-                node,
-                Event::NudgeNodeLease {
-                    now_ms: 0,
-                    now_mono_ms: 0,
-                },
-            ),
+            Work::Replica(work) => self.replica_work(node, work),
+            Work::Client(work) => self.client_work(node, work),
+            Work::Operator(work) => self.operator_work(node, work),
+            Work::Shutdown(work) => self.shutdown_work(node, work),
+            Work::Handoff(work) => self.handoff_work(node, work),
+            Work::Socket(work) => self.socket_work(node, work),
+            Work::Alarm(work) => self.alarm_work(node, work),
         }
     }
 
@@ -653,9 +650,19 @@ impl World {
         if wipe {
             self.machines[node].disk = Disk::default();
         }
-        self.fail_requests(node, dead.requests);
+        let (mut requests, mut offers) = (BTreeMap::new(), Vec::new());
+        for (request, pending) in dead.pending {
+            match pending {
+                Pending::Client(req) => {
+                    requests.insert(request, req);
+                }
+                Pending::Offer(offer) => offers.push(offer),
+                Pending::Gate(_) | Pending::Eviction(_) | Pending::Worker => {}
+            }
+        }
+        self.fail_requests(node, requests);
         // Each donor waiting on this process sees its connection drop.
-        for offer in dead.offers.into_values() {
+        for offer in offers {
             let delay = self.net_rng.range(1, 5);
             self.answer_offer(offer, Answer::Failed, delay);
         }
@@ -689,7 +696,7 @@ impl World {
             if self.machines[node]
                 .proc
                 .as_ref()
-                .is_some_and(|p| !p.offers.is_empty())
+                .is_some_and(|p| p.offers().next().is_some())
             {
                 self.settle_offers(node);
             }

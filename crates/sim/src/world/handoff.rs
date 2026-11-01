@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, VecDeque};
 use celld_logic::{AdoptedCell, Epoch, Event, Failure, OpId, RequestId, Route};
 
 use super::faults::Partition;
-use super::{Item, Time, Work, World, OPERATION_DEADLINE_MS, PEER_PROTOCOL};
+use super::{Item, Pending, Time, Work, World, OPERATION_DEADLINE_MS, PEER_PROTOCOL};
 
 /// How long the donor waits before searching again when no peer took a
 /// cell (`HANDOFF_RETRY_DELAY`).
@@ -55,7 +55,22 @@ pub(super) enum Answer {
     Failed,
 }
 
+/// A donor's work in handing a cell off.
+pub(super) enum HandoffWork {
+    /// The donor looks for peers to offer a released cell to.
+    AdoptSearch { op: OpId },
+    /// A peer answered the donor's offer.
+    OfferAnswered { op: OpId, answer: Answer },
+}
+
 impl World {
+    pub(super) fn handoff_work(&mut self, node: usize, work: HandoffWork) {
+        match work {
+            HandoffWork::AdoptSearch { op } => self.adopt_search(node, op),
+            HandoffWork::OfferAnswered { op, answer } => self.offer_answered(node, op, answer),
+        }
+    }
+
     /// The core released a cell and wants a successor to acquire it.
     pub(super) fn adopt_released(
         &mut self,
@@ -77,7 +92,7 @@ impl World {
             .proc_mut()
             .adoptions
             .insert(op, adoption);
-        self.work(node, 0, Work::AdoptSearch { op });
+        self.work(node, 0, Work::Handoff(HandoffWork::AdoptSearch { op }));
     }
 
     /// Rank the peers that can take the cell, from the fleet's leases, and
@@ -142,7 +157,8 @@ impl World {
                 return self.drive(node, Event::SuccessorAdopted { op, result });
             }
             // Nobody can take it yet; search again.
-            self.work(node, HANDOFF_RETRY_MS, Work::AdoptSearch { op });
+            let work = Work::Handoff(HandoffWork::AdoptSearch { op });
+            self.work(node, HANDOFF_RETRY_MS, work);
             return;
         };
         let (cell, released_epoch) = (a.cell.clone(), a.released_epoch);
@@ -188,10 +204,8 @@ impl World {
             let delay = self.net_rng.range(1, 5);
             return self.answer_offer(offer, Answer::Failed, delay);
         }
-        let request = self.next_request;
-        self.next_request += 1;
         let cell = offer.cell.clone();
-        self.machines[node].proc_mut().offers.insert(request, offer);
+        let request = self.pend(node, Pending::Offer(offer));
         let event = Event::HandoffRequestAt {
             request,
             cell,
@@ -208,13 +222,12 @@ impl World {
             return;
         };
         let accepted: Vec<(RequestId, Epoch)> = p
-            .offers
-            .iter()
+            .offers()
             .filter_map(|(request, offer)| {
                 p.state
                     .accepted_epoch(&offer.cell)
                     .filter(|epoch| *epoch > offer.released_epoch)
-                    .map(|epoch| (*request, epoch))
+                    .map(|epoch| (request, epoch))
             })
             .collect();
         for (request, epoch) in accepted {
@@ -224,17 +237,16 @@ impl World {
     }
 
     /// The core routed a handoff request before it acquired the cell.
-    /// Returns false when the request is not an offer.
     pub(super) fn offer_routed(
         &mut self,
         node: usize,
         request: RequestId,
         result: &Result<Route, celld_logic::RequestError>,
         immediate: &mut VecDeque<Event>,
-    ) -> bool {
+    ) {
         let p = self.machines[node].proc();
-        let Some(offer) = p.offers.get(&request) else {
-            return false;
+        let Some(Pending::Offer(offer)) = p.pending.get(&request) else {
+            unreachable!("an offer request");
         };
         let answer = match result {
             Ok(Route::Local) => {
@@ -253,17 +265,12 @@ impl World {
             Err(_) => Answer::Failed,
         };
         self.finish_offer(node, request, answer);
-        true
     }
 
     /// The offer is decided: answer the donor and retire the request, as
     /// `accept_handoff` does with `Message::CancelRoute`.
     fn finish_offer(&mut self, node: usize, request: RequestId, answer: Answer) {
-        let offer = self.machines[node]
-            .proc_mut()
-            .offers
-            .remove(&request)
-            .unwrap();
+        let offer = self.machines[node].proc_mut().take_offer(request).unwrap();
         let delay = self.net_rng.range(1, 5);
         self.answer_offer(offer, answer, delay);
         let delay = self.net_rng.range(0, 3);
@@ -283,7 +290,7 @@ impl World {
     /// Send the peer's answer back to the donor process that asked.
     pub(super) fn answer_offer(&mut self, offer: Offer, answer: Answer, delay: u64) {
         let (node, inc, op) = (offer.donor, offer.donor_inc, offer.op);
-        let work = Work::OfferAnswered { op, answer };
+        let work = Work::Handoff(HandoffWork::OfferAnswered { op, answer });
         self.after(delay, Item::Proc { node, inc, work });
     }
 
