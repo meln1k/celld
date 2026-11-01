@@ -31,6 +31,11 @@ pub struct Load {
     pub resident: usize,
     pub owned: usize,
     pub sampled_ms: u64,
+    /// The memory the node last measured, whether it is shedding, and
+    /// whether that measurement left headroom below every resume line.
+    pub memory: u64,
+    pub pressured: bool,
+    pub memory_headroom: bool,
 }
 
 #[derive(Default)]
@@ -130,10 +135,10 @@ impl Store {
                 bucket_format: Some(BUCKET_FORMAT),
                 resident_cells: load.resident,
                 host_websockets: 0,
-                rss_bytes: 0,
-                in_use_bytes: Some(0),
-                pressured: false,
-                memory_headroom: Some(true),
+                rss_bytes: load.memory,
+                in_use_bytes: Some(load.memory),
+                pressured: load.pressured,
+                memory_headroom: Some(load.memory_headroom),
                 restoring: 0,
                 paced_handoff: true,
                 rebalance_paused: false,

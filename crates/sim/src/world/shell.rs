@@ -172,12 +172,15 @@ impl World {
                 // writes it, whatever the core believed (`stamped_log_state`).
                 record.log_state = self.log_slot(node);
                 // The lease body carries the node's load, sampled now.
-                let state = &self.machines[node].proc().state;
+                let p = self.machines[node].proc();
                 let load = Load {
                     // Activating cells hold a slot too, as production reports.
-                    resident: state.occupied(),
-                    owned: state.owned_cells(),
+                    resident: p.state.occupied(),
+                    owned: p.state.owned_cells(),
                     sampled_ms: self.wall(node),
+                    memory: p.memory,
+                    pressured: p.state.shedding(),
+                    memory_headroom: p.state.memory_headroom(),
                 };
                 // A renewal must come back while authority remains, so the
                 // shell bounds it to half of what is left, as production

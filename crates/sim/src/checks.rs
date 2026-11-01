@@ -192,6 +192,18 @@ impl Checker {
         );
     }
 
+    /// Watched: **memory pressure is relieved.** A node over its memory
+    /// ceiling (`CELLD_MAX_RSS_MB`) sheds cells until it is back below its
+    /// resume line, and admits cells again.
+    pub fn memory_kept(&mut self, t: u64, who: &str, bytes: u64, shedding_ms: u64) {
+        self.watch(
+            t,
+            "memory-not-relieved",
+            who.to_string(),
+            format!("{who} has shed for {shedding_ms} ms and still holds {bytes} bytes"),
+        );
+    }
+
     /// Watched: **an outbound socket closes when its cell moves**
     /// (`docs/limitations.md`): none stays open on a process whose runtime
     /// of the cell has stopped.

@@ -10,7 +10,7 @@
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
 
-use celld_sim::{run, Mutation, SimConfig};
+use celld_sim::{run, Memory, Mutation, SimConfig};
 
 fn main() {
     let mut seed = 0;
@@ -19,6 +19,7 @@ fn main() {
     let (mut swarm, mut trace, mut fleet) = (false, false, false);
     let mut mutation = None;
     let mut coverage = false;
+    let mut memory = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -44,6 +45,11 @@ fn main() {
             // The fleet posture for a fixed configuration; a swarm seed
             // draws its own.
             "--fleet" => fleet = true,
+            // A memory model whose ceiling lets about ROOM cells stay open.
+            "--memory" => {
+                let room = args.next().and_then(|s| s.parse().ok());
+                memory = Some(Memory::with_room(room.expect("--memory ROOM")));
+            }
             "--chaos" => config = SimConfig::chaos(),
             "--crashes" => {
                 let rate = args.next().and_then(|s| s.parse().ok());
@@ -62,6 +68,7 @@ fn main() {
             trace,
             mutation,
             fleet: base.fleet || fleet,
+            memory: memory.or(base.memory),
             ..base
         }
     };
@@ -148,7 +155,8 @@ fn main() {
          databases resumed {}, websockets {}\n\
          handler calls released {}, worker requests {} ({} on a resident), deploys {}\n\
          alarms set {}, alarms fired {}, wake hints {}\n\
-         fleet proofs {}, logs recovered {}, writes lost to a declared loss {}",
+         fleet proofs {}, logs recovered {}, writes lost to a declared loss {}\n\
+         load samples shedding on memory {}",
         stats.evictions,
         stats.evicted,
         stats.drains,
@@ -165,7 +173,8 @@ fn main() {
         stats.wake_hints,
         stats.fleet_proofs,
         stats.log_recoveries,
-        stats.fleet_losses
+        stats.fleet_losses,
+        stats.shedding_samples
     );
     for w in &outcome.watched {
         println!("WATCH t={} {}: {}", w.at_ms, w.kind, w.detail);

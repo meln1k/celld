@@ -128,6 +128,15 @@ Half of the swarm seeds run the fleet posture (`CELLD_DURABILITY=fleet`,
   times out, or applies with its answer lost, as a bucket call does.
 - A graceful exit whose writes are all in the bucket seals its own log.
 
+Half of the swarm seeds also model memory (`--memory ROOM`, `Memory` in
+`crates/sim/src/lib.rs`). A process holds a fixed base plus a fixed amount
+for each database it has open, and each load sample reports that to the
+core, as it is sampled before the first lease and every second after. The
+machine is sized so that the core's ceiling (`from_limits`: 80% of the
+machine) is crossed a little above ROOM open cells and its resume line sits
+just above ROOM. A node over the ceiling sheds, and its lease tells peers it
+is pressured and whether it has headroom.
+
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
 residency caps, the eviction policy, and which faults happen. The faults are
@@ -210,21 +219,30 @@ core, not to the simulator or to the property itself.
   stayed resident long past its idle limit.
 - **socket-outlives-runtime**: an outbound WebSocket stayed open after its
   cell's runtime stopped.
+- **memory-not-relieved**: a node with no socket open stayed latched on
+  memory pressure for over 10 s.
 
-The last three judge only once the fleet is quiet, and 15 s after the faults
+The last four judge only once the fleet is quiet, and 15 s after the faults
 end, so that a bucket call lost just before the end has timed out. A planted
-bug makes each of the six fire. In 100,000 swarm seeds:
+bug makes each of the first six fire; the core's walk-down wedge below makes
+the seventh fire. In 100,000 swarm seeds:
 
-- 206 seeds claimed during a preserve, never during a drain. An eviction
+- 1,183 seeds kept an idle cell resident, 1,150 of them on a node whose
+  walk-down had wedged: the core evicts idle cells only while it is not
+  shedding.
+- 299 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
   cell, though `begin_preserve` retires cold work.
-- 50 seeds resumed a superseded epoch: after faulty clocks, the slow clean
+- 47 seeds resumed a superseded epoch: after faulty clocks, the slow clean
   reload below, or a claim during a preserve.
 
-The simulator does not yet model V8, eviction snapshots, memory pressure, the
-waker election (the lowest live node stands in for it), or, in the fleet log,
-bundles, the recovery claim, and reconfiguring a session when a follower dies
-(its acks fall back to the bucket).
+The simulator does not yet model V8, eviction snapshots, the waker election
+(the lowest live node stands in for it), or, in the fleet log, bundles, the
+recovery claim, and reconfiguring a session when a follower dies (its acks
+fall back to the bucket). Its memory has no allocator slack, cgroup or
+containers, no noise between samples, and returns a cell's whole share when
+the cell goes. It places no cell on an isolate, which the walk-down treats
+as production's one shared heap for a node below 32 cells.
 
 The core on `main` fails some seeds.
 
@@ -278,21 +296,32 @@ The core on `main` fails some seeds.
     `prune_stale_live`.
   - `activation waiter … is queued twice`: the same scan, for a cell that
     a request is also waiting on.
+- **A memory walk-down that wedges.** A node latches on pressure while a cell
+  is still activating: the cell counts as occupied but holds no memory yet.
+  The walk-down evicts one cell, the activating cell's memory lands, and the
+  next sample is unchanged. The futility stop
+  (`shedding_can_reach_resume_line`) reads that as zero yield per eviction
+  and stops shedding with the latch held, so the node refuses every new cell
+  and never evicts an idle one. Nothing measures differently again, so it
+  stays that way (**memory-not-relieved**, and **liveness** or
+  **alarm-not-fired** when the cells it refuses have nowhere else to go).
 - **A capacity livelock.** When every node is at its residency cap, a new
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-In 100,000 swarm seeds, 9,706 failed in a debug build: 9,258 on the
-invariants (2,986 of them on live transports, 2,491 on alarms firing while
-not resident), 413 on stale reads, 34 on liveness, and 1 on the fleet
-posture's slow clean reload. With validation compiled out, 642 failed: 499
-on stale reads, 100 on `evicted-pinned` (the core goes on to evict a cell
-whose live transport the invariant would have caught), 39 on liveness, and 4
-on lost or late acks. One of those (swarm 54632) is not yet traced: the core
-claims a cell at a new epoch while its restore of the previous one is still
-in flight, and a clean reload later resumes the older database. Between
-them, the seeds entered every phase through 96 distinct transitions, and 1,514
-seeds saw a log recovery fail and be retried. The test suite allows only the
+In 100,000 swarm seeds, 12,763 failed in a debug build: 9,712 on the
+invariants (2,995 of them on live transports, 2,455 on alarms firing while
+not resident), 2,636 on liveness or `alarm-not-fired`, and 415 on stale
+reads. All but 37 of the liveness and alarm failures are seeds where a node's
+memory walk-down wedged; 3,999 seeds wedged in all. With validation compiled
+out, 3,690 failed: 3,066 on liveness or `alarm-not-fired` (3,025 of them
+wedged), 507 on stale reads, 113 on `evicted-pinned` (the core goes on to
+evict a cell whose live transport the invariant would have caught), and 4 on
+lost or late acks after a slow clean reload. One of those (swarm 54632) is
+not yet traced: the core claims a cell at a new epoch while its restore of
+the previous one is still in flight, and a clean reload later resumes the
+older database. Between them, the seeds entered every phase through 95
+distinct transitions. The test suite allows only the
 known failures, by name.
 
 ```

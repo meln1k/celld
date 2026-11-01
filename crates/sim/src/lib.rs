@@ -71,10 +71,44 @@ pub struct SimConfig {
     /// writes to followers on other machines and acknowledges once they all
     /// hold them, and flushes to the bucket only every couple of seconds.
     pub fleet: bool,
+    /// The memory each process holds, and the machine it has. `None`
+    /// reports no memory, so the core never sheds on pressure.
+    pub memory: Option<Memory>,
     /// A bug planted in the simulated shell or bucket.
     pub mutation: Option<Mutation>,
     /// Keep a human-readable line for every event and effect.
     pub trace: bool,
+}
+
+/// What a process's memory costs, in bytes. Its in-use memory is `base`
+/// plus `cell` for every database it holds open: a cell's runtime and its
+/// heap. The machine has `total`, so the core's ceiling is 80% of it and its
+/// absolute cap 95% (`PressureConfig::from_limits`). A process's RSS is its
+/// in-use memory: no allocator slack, no cgroup and no containers.
+#[derive(Clone, Copy, Debug)]
+pub struct Memory {
+    pub total: u64,
+    pub base: u64,
+    pub cell: u64,
+}
+
+impl Memory {
+    const MB: u64 = 1 << 20;
+
+    /// A machine whose ceiling a process crosses with somewhat more than
+    /// `room` cells open, and whose shedding brings it back to `room`.
+    pub fn with_room(room: u64) -> Self {
+        let (base, cell) = (256 * Self::MB, 128 * Self::MB);
+        // The low watermark, 80% of the ceiling, sits half a cell above
+        // `room` cells.
+        let low = base + cell * room + cell / 2;
+        let ceiling = low * 5 / 4;
+        Self {
+            total: ceiling * 5 / 4,
+            base,
+            cell,
+        }
+    }
 }
 
 /// A known bug planted in the simulated shell or bucket, never in the core.
@@ -254,6 +288,7 @@ impl SimConfig {
             sticky_eviction: false,
             idle_evict_ms: None,
             fleet: false,
+            memory: None,
             mutation: None,
             trace: false,
         }
@@ -343,6 +378,7 @@ impl SimConfig {
             alarm_probability: *r.pick(&[0.0, 0.05, 0.2]).unwrap(),
             operator: Operator::draw(r),
             fleet: r.chance(0.5),
+            memory: r.chance(0.5).then(|| Memory::with_room(r.range(1, 4))),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
         }
@@ -461,6 +497,8 @@ pub struct Stats {
     pub fleet_proofs: u64,
     pub log_recoveries: u64,
     pub fleet_losses: u64,
+    /// Load samples after which a node was shedding on memory pressure.
+    pub shedding_samples: u64,
 }
 
 /// What a run produced.

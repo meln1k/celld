@@ -81,6 +81,8 @@ type AgendaKey = (Time, u64);
 const OPERATION_DEADLINE_MS: u64 = 15_000;
 /// How often a process samples its load (`LOAD_SAMPLE_PERIOD`, main.rs).
 const LOAD_SAMPLE_MS: u64 = 1_000;
+/// How long a quiet node may stay over its memory ceiling.
+const MEMORY_RELIEF_MS: u64 = 10_000;
 
 /// Simulated time zero on the wall clock.
 const WALL_EPOCH_MS: u64 = 1_800_000_000_000;
@@ -260,6 +262,10 @@ struct Process {
     touched: BTreeMap<String, Time>,
     /// The log this process leads, in the fleet posture.
     log: Option<Log>,
+    /// The memory the last load sample measured, and since when the core
+    /// has been shedding without a break.
+    memory: u64,
+    shedding_since: Option<Time>,
 }
 
 impl Process {
@@ -285,6 +291,8 @@ impl Process {
             runtime_generations: BTreeMap::new(),
             touched: BTreeMap::new(),
             log: None,
+            memory: 0,
+            shedding_since: None,
         }
     }
 }
@@ -661,6 +669,9 @@ impl World {
             resume_generation,
             ttl_ms: self.config.ttl_ms,
         };
+        // Production folds a sample before the first lease, so the lease
+        // reports the node's memory headroom (`State::memory_headroom`).
+        self.fold_load_sample(node);
         let event = Event::StartNodeLease {
             now_ms: 0,
             now_mono_ms: 0,
@@ -725,15 +736,26 @@ impl World {
         }
     }
 
-    /// Production's periodic sampler. The simulation has no memory to
-    /// measure, so only the cell count varies, and the node never reads as
-    /// pressured; the sample still drives idle eviction.
+    /// Production's periodic sampler.
     fn sample_load(&mut self, node: usize) {
         self.judge_idle(node);
+        self.fold_load_sample(node);
+        self.work(node, LOAD_SAMPLE_MS, Work::LoadSample);
+    }
+
+    /// Measure the process's memory (`SimConfig::memory`) and hand the
+    /// sample to its core. Without a memory model it measures nothing, and
+    /// only the cell count varies; the sample still drives idle eviction.
+    fn fold_load_sample(&mut self, node: usize) {
+        let memory = self.config.memory.map_or(0, |m| {
+            let open = self.machines[node].proc().replicas.len() as u64;
+            m.base + m.cell * open
+        });
+        self.machines[node].proc_mut().memory = memory;
         let load = pressure::Load {
             resident_cells: self.machines[node].proc().state.occupied(),
-            rss_bytes: 0,
-            in_use_bytes: 0,
+            rss_bytes: memory,
+            in_use_bytes: memory,
             cgroup_working_set_bytes: None,
             cgroup_current_bytes: None,
             container_reserved_bytes: 0,
@@ -743,7 +765,34 @@ impl World {
             now_mono_ms: 0,
         };
         self.drive(node, event);
-        self.work(node, LOAD_SAMPLE_MS, Work::LoadSample);
+        let Some(p) = self.machines[node].proc.as_ref() else {
+            return;
+        };
+        if p.state.shedding() {
+            self.stats.shedding_samples += 1;
+        }
+        self.judge_memory(node);
+    }
+
+    /// Watched: in a quiet fleet, a node that latched on memory pressure
+    /// sheds down to its resume line, 80% of the ceiling, and releases the
+    /// latch within a few samples. Shedding cuts a tenth of the residents
+    /// per sample (`release_target`), and here every cell's memory comes
+    /// back when it goes, so 10 s is plenty. A node holding a socket is
+    /// excused: a socket can pin its cell resident.
+    fn judge_memory(&mut self, node: usize) {
+        let t = self.t;
+        let p = self.machines[node].proc_mut();
+        if !p.state.shedding() || !p.sockets.is_empty() {
+            p.shedding_since = None;
+            return;
+        }
+        let since = *p.shedding_since.get_or_insert(t);
+        let memory = p.memory;
+        if t >= self.settled_from() + MEMORY_RELIEF_MS && t - since > MEMORY_RELIEF_MS {
+            let who = self.who(node);
+            self.checker.memory_kept(t, &who, memory, t - since);
+        }
     }
 
     /// The process on `node` dies. Its open databases stay on disk as it
@@ -911,7 +960,7 @@ fn core_config(config: &SimConfig) -> Config {
         // evicted behind a wake entry, so a scan must find them.
         alarm_resident_ms: 1_000,
         idle_evict_ms: config.idle_evict_ms,
-        pressure: pressure::PressureConfig::from_limits(None, None),
+        pressure: pressure::PressureConfig::from_limits(config.memory.map(|m| m.total), None),
     }
 }
 
