@@ -10,7 +10,11 @@
 //!
 //! - Installing an alarm also writes its wake entry to the bucket (the arm
 //!   gate). Until that lands, the alarm is not *covered*: a node that gave
-//!   the cell up now could leave nobody to wake it.
+//!   the cell up now could leave nobody to wake it. The response of the
+//!   handler that set it waits for the write, and fails if the write fails
+//!   (`send_answer_after_arm_gates` in `js.rs`), so an alarm a client was
+//!   told was set is always covered. An alarm handler's own re-arm has no
+//!   client waiting.
 //! - Every activity reports the cell's alarm before it finishes
 //!   (`AlarmObserved`, then `ActivityFinished`), as the activity guard does.
 //! - The core arms a timer, and when it fires on a resident cell asks the
@@ -64,7 +68,10 @@ pub(super) enum AlarmWork {
         cell: String,
         alarm: AlarmSnapshot,
         report: bool,
+        gate: Option<RequestId>,
     },
+    /// The wake entry write a response's arm gate waits on failed.
+    GateFailed { request: RequestId },
     /// The process lists the bucket's due wake entries.
     Scan,
 }
@@ -77,7 +84,14 @@ impl World {
                 cell,
                 alarm,
                 report,
-            } => self.wake_maintained(node, cell, alarm, report),
+                gate,
+            } => {
+                self.wake_maintained(node, cell, alarm, report);
+                if let Some(request) = gate {
+                    self.arm_gate_settled(node, request, true);
+                }
+            }
+            AlarmWork::GateFailed { request } => self.arm_gate_settled(node, request, false),
             AlarmWork::Scan => self.wake_scan(node),
         }
     }
@@ -103,7 +117,8 @@ impl World {
     }
 
     /// Record that `write`, committed at `epoch`, sets the cell's alarm
-    /// `ahead_ms` from now (or clears it), and start its arm gate.
+    /// `ahead_ms` from now (or clears it), and start its arm gate: the wake
+    /// entry write that the response of request `gate`, if any, waits on.
     pub(super) fn alarm_written(
         &mut self,
         node: usize,
@@ -111,6 +126,7 @@ impl World {
         epoch: Epoch,
         write: WriteId,
         ahead_ms: Option<u64>,
+        gate: Option<RequestId>,
     ) -> AlarmSnapshot {
         let at_ms = ahead_ms.map(|ahead| (self.wall(node) + ahead) as i64);
         self.alarm_writes.insert(write, at_ms);
@@ -120,7 +136,7 @@ impl World {
         let content = self.seen(node, cell, epoch).expect("an open database");
         let alarm = self.alarm_of(content, epoch);
         if at_ms.is_some() {
-            self.publish_wake(node, cell, alarm, false);
+            self.publish_wake(node, cell, alarm, false, gate);
         }
         alarm
     }
@@ -205,19 +221,22 @@ impl World {
     }
 
     /// Write the wake entry for an alarm. When `report` is set, tell the
-    /// core the coverage once it lands, as a handoff's refresh does.
+    /// core the coverage once it lands, as a handoff's refresh does. When
+    /// `gate` is set, that request's response waits for the write.
     pub(super) fn publish_wake(
         &mut self,
         node: usize,
         cell: &str,
         alarm: AlarmSnapshot,
         report: bool,
+        gate: Option<RequestId>,
     ) {
         let req = StoreReq::Wake {
             cell: cell.to_string(),
             alarm,
             report,
             retire: false,
+            gate,
         };
         self.store_call(node, req);
     }
@@ -230,6 +249,7 @@ impl World {
             alarm,
             report: false,
             retire: true,
+            gate: None,
         };
         self.store_call(node, req);
     }
@@ -295,7 +315,7 @@ impl World {
         if covered || alarm.at_ms().is_none() {
             immediate.push_back(observed(cell, alarm, covered));
         } else {
-            self.publish_wake(node, cell, alarm, true);
+            self.publish_wake(node, cell, alarm, true, None);
         }
     }
 
@@ -338,7 +358,7 @@ impl World {
                     let (write, position) = self
                         .commit_write(node, &cell, epoch)
                         .expect("open database");
-                    let alarm = self.alarm_written(node, &cell, epoch, write, rearm);
+                    let alarm = self.alarm_written(node, &cell, epoch, write, rearm, None);
                     let alarm = self.reported(alarm);
                     self.stats.alarms_fired += 1;
                     Ok((alarm, rearm.is_none(), Some(position)))

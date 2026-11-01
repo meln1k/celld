@@ -179,15 +179,15 @@ The last three judge only once the fleet is quiet, and 15 s after the faults
 end, so that a bucket call lost just before the end has timed out. A planted
 bug makes each of the seven fire. In 100,000 swarm seeds:
 
-- 158 seeds claimed during a preserve, never during a drain. An eviction
+- 161 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
   cell, though `begin_preserve` retires cold work.
-- 65 seeds resumed a superseded epoch, 61 of them with faulty clocks. The
+- 64 seeds resumed a superseded epoch, 60 of them with faulty clocks. The
   rest are the slow clean reload below, or a resume after a claim during a
   preserve.
-- 6 seeds hit crash-uncovered-alarm. The simulator does not model the arm
-  gate: production's shell holds a response until the alarm's wake entry
-  lands, and the simulator releases it at once.
+- No seed hit crash-uncovered-alarm. As in production, a handler that sets
+  an alarm answers only once the alarm's wake entry lands, and fails if
+  that write fails. Before the simulator modelled this, 6 seeds hit it.
 
 The simulator does not yet model V8, the fleet log and fleet proofs, eviction
 snapshots, memory pressure, or the waker election (the lowest live node
@@ -243,9 +243,9 @@ The core on `main` fails some seeds.
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-In 100,000 swarm seeds, 10,223 failed in a debug build: 9,558 on the
-invariants (5,167 of them on live transports), 625 on stale reads and 40 on
-liveness. With validation compiled out, 960 failed: 735 on stale reads, 180
+In 100,000 swarm seeds, 10,212 failed in a debug build: 9,548 on the
+invariants (5,159 of them on live transports), 624 on stale reads and 40 on
+liveness. With validation compiled out, 959 failed: 734 on stale reads, 180
 on `evicted-pinned` (the core goes on to evict a cell whose live transport
 the invariant would have caught), 44 on liveness and one on an alarm that a
 livelocked cell never fired. The test suite allows only the known failures,

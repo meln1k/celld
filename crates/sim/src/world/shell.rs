@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 
 use celld_logic::wake::AlarmSnapshot;
 use celld_logic::{
-    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, StopCause, Timer,
+    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, RequestId,
+    StopCause, Timer,
 };
 
 use super::alarms::AlarmWork;
@@ -126,6 +127,8 @@ pub(super) enum StoreReq {
         alarm: AlarmSnapshot,
         report: bool,
         retire: bool,
+        /// The request whose response waits for this write (the arm gate).
+        gate: Option<RequestId>,
     },
 }
 
@@ -547,8 +550,13 @@ impl World {
                 op: *op,
                 result: Err(Failure::Definite),
             }),
+            // The arm gate turns its response into a failure.
+            StoreReq::Wake {
+                gate: Some(request),
+                ..
+            } => Work::Alarm(AlarmWork::GateFailed { request: *request }),
             // Logged and left for a later scan or reconcile.
-            StoreReq::Wake { .. } => Work::Nothing,
+            StoreReq::Wake { gate: None, .. } => Work::Nothing,
         }
     }
 
@@ -680,6 +688,7 @@ impl World {
                 alarm,
                 report,
                 retire,
+                gate,
             } => {
                 self.store.publish_wake(&cell, alarm);
                 if let Some(retirement) = retire
@@ -692,6 +701,7 @@ impl World {
                     cell,
                     alarm,
                     report,
+                    gate,
                 })
             }
         };
