@@ -240,6 +240,10 @@ struct Process {
     generation: u64,
     /// What this process knows of its cells' alarms.
     alarms: ProcAlarms,
+    /// The generation each cell's runtime last started on, and when
+    /// anything last used the cell here: for the watched properties.
+    runtime_generations: BTreeMap<String, u64>,
+    touched: BTreeMap<String, Time>,
 }
 
 impl Process {
@@ -261,6 +265,8 @@ impl Process {
             sockets: BTreeMap::new(),
             generation: 0,
             alarms: ProcAlarms::default(),
+            runtime_generations: BTreeMap::new(),
+            touched: BTreeMap::new(),
         }
     }
 }
@@ -386,6 +392,9 @@ pub struct World {
     goals: Vec<Goal>,
     /// When the last fault, and the last restart one caused, is over.
     quiet_from: Time,
+    /// Cells whose runtime a step stopped, for good: judged once the step
+    /// is over, when every socket it closed has closed.
+    stopped: Vec<(usize, String)>,
     panic: Option<String>,
 }
 
@@ -431,6 +440,7 @@ impl World {
             halts: Vec::new(),
             goals: Vec::new(),
             quiet_from: 0,
+            stopped: Vec::new(),
             panic: None,
         }
     }
@@ -506,10 +516,10 @@ impl World {
         self.start_operator();
         self.start_liveness();
         while let Some(((t, _), item)) = self.agenda.pop_first() {
+            self.t = t;
             if matches!(item, Item::End) {
                 break;
             }
-            self.t = t;
             // A panic anywhere in the step, in a core or in the simulated
             // shell, ends the run and is reported with its seed and time.
             // `on_event` runs `State::validate` after every event in builds
@@ -625,10 +635,64 @@ impl World {
         self.start_wake_scans(node);
     }
 
+    /// Record that something used `cell` on `node` just now.
+    fn touch(&mut self, node: usize, cell: &str) {
+        let t = self.t;
+        self.machines[node]
+            .proc_mut()
+            .touched
+            .insert(cell.to_string(), t);
+    }
+
+    /// Watched: in a quiet fleet, a cell nothing has used for well over
+    /// `idle_evict_ms` has been given back. The allowance covers a refused
+    /// eviction, which waits out another idle period, and the sampling
+    /// period. A cell with work in flight here is not idle: a request
+    /// routed to it, or an output of its handler held at the gate. A cell
+    /// with a socket open or an armed alarm is excused: the core may keep
+    /// either resident.
+    fn judge_idle(&mut self, node: usize) {
+        let Some(idle_ms) = self.config.idle_evict_ms else {
+            return;
+        };
+        // The whole allowance must have passed in a quiet fleet: a process
+        // that just woke from a pause has had no chance to evict.
+        let allowance = 2 * idle_ms + 2 * LOAD_SAMPLE_MS + 2_000;
+        let p = self.machines[node].proc();
+        if self.t < self.settled_from() + allowance || p.shutdown.is_some() {
+            return;
+        }
+        let kept: Vec<(String, u64)> = p
+            .published
+            .iter()
+            .filter(|(cell, _)| !p.sockets.values().any(|s| s.cell == **cell))
+            .filter(|(cell, _)| {
+                !p.pending.values().any(|pending| match pending {
+                    Pending::Client(req) => req.cell == **cell && req.epoch.is_some(),
+                    Pending::Gate(gate) => gate.reveal.cell == **cell,
+                    _ => false,
+                })
+            })
+            .filter(|(cell, epoch)| {
+                self.seen(node, cell, **epoch)
+                    .is_some_and(|content| self.alarm_of(content, **epoch).at_ms().is_none())
+            })
+            .filter_map(|(cell, _)| {
+                let idle = self.t - p.touched.get(cell).copied().unwrap_or(0);
+                (idle > allowance).then(|| (cell.clone(), idle))
+            })
+            .collect();
+        let who = self.who(node);
+        for (cell, idle) in kept {
+            self.checker.idle_kept(self.t, &who, &cell, idle);
+        }
+    }
+
     /// Production's periodic sampler. The simulation has no memory to
     /// measure, so only the cell count varies, and the node never reads as
     /// pressured; the sample still drives idle eviction.
     fn sample_load(&mut self, node: usize) {
+        self.judge_idle(node);
         let load = pressure::Load {
             resident_cells: self.machines[node].proc().state.occupied(),
             rss_bytes: 0,
@@ -651,9 +715,11 @@ impl World {
     /// machine is retired.
     fn crash(&mut self, node: usize, wipe: bool) {
         let who = self.who(node);
-        let Some(dead) = self.machines[node].proc.take() else {
+        if !self.machines[node].up() {
             return;
-        };
+        }
+        self.judge_death(node);
+        let dead = self.machines[node].proc.take().expect("up");
         self.note(|| format!("crash {who}{}", if wipe { " (disk wiped)" } else { "" }));
         self.close_replicas(node, dead.replicas);
         if wipe {
@@ -716,6 +782,8 @@ impl World {
             self.halts.push(self.who(node));
             self.crash(node, false);
         }
+        // After the halt: a process that exits closes every socket it held.
+        self.judge_stopped(node);
     }
 
     // -----------------------------------------------------------------------
@@ -742,6 +810,7 @@ impl World {
         // A run that panicked stopped early: its goals prove nothing.
         if self.panic.is_none() {
             self.judge_goals();
+            self.judge_alarms(true);
         }
         let authoritative = self
             .machines
@@ -761,6 +830,7 @@ impl World {
             trace: self.trace,
             panic: self.panic,
             violations: self.checker.violations,
+            watched: self.checker.watched,
             stats: self.stats,
         }
     }

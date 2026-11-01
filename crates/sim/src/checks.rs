@@ -5,6 +5,11 @@
 //! checker keeps the few records it needs (ghost state no node can see) and
 //! tests each property when its fact arrives. The shell never decides
 //! whether something is a violation; every property lives in this file.
+//!
+//! Some properties are only *watched*: a hit is recorded in
+//! `Outcome::watched` but never fails a run. A property starts there, and is
+//! enforced only once every hit a sweep finds traces to a bug in the core
+//! rather than in the simulation or in the property itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,6 +73,9 @@ pub struct Checker {
     /// it at a cell epoch: (process, cell, epoch).
     verified_at: BTreeMap<(String, String, Epoch), u64>,
     pub violations: Vec<Violation>,
+    /// Hits on watched properties, the first per kind and subject.
+    pub watched: Vec<Violation>,
+    watched_keys: BTreeSet<(&'static str, String)>,
 }
 
 impl Checker {
@@ -77,6 +85,114 @@ impl Checker {
             kind,
             detail,
         });
+    }
+
+    /// Record a hit on a watched property, once per `subject`.
+    fn watch(&mut self, at_ms: u64, kind: &'static str, subject: String, detail: String) {
+        if self.watched_keys.insert((kind, subject)) {
+            self.watched.push(Violation {
+                at_ms,
+                kind,
+                detail,
+            });
+        }
+    }
+
+    /// Whether a client was told `write` of `cell` succeeded, at any epoch.
+    pub fn acknowledged(&self, cell: &str, write: WriteId) -> bool {
+        self.acked
+            .range((cell.to_string(), 0, 0)..=(cell.to_string(), Epoch::MAX, WriteId::MAX))
+            .any(|(_, _, w)| *w == write)
+    }
+
+    /// Watched: **a resume never follows a takeover.** A clean reload opens
+    /// its predecessor's file without reading the owner record
+    /// (`docs/guarantees.md`). That is safe only while the record still
+    /// names this node at the file's epoch.
+    pub fn resumed(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch, owner: String) {
+        self.watch(
+            t,
+            "resumed-superseded",
+            format!("{who} {cell}"),
+            format!("{who} resumed {cell} epoch {epoch} while the owner record names {owner}"),
+        );
+    }
+
+    /// Watched: **an acknowledged alarm outlives its process.** The arm
+    /// gate holds a response until a wake entry covers the alarm (README),
+    /// so when a process dies, every alarm a client was told was set must
+    /// have a wake entry due by its time.
+    pub fn died_uncovered(&mut self, t: u64, who: &str, cell: &str, write: WriteId) {
+        self.watch(
+            t,
+            "crash-uncovered-alarm",
+            format!("{who} {cell}"),
+            format!(
+                "{who} died holding {cell}'s alarm, set by acknowledged write {write}, with no \
+                 wake entry due by then"
+            ),
+        );
+    }
+
+    /// Watched: **alarms survive the fleet.** After the audit's full
+    /// restart, the fresh node must still fire every overdue durable alarm:
+    /// the waker wakes cells whose owner has stopped (README).
+    pub fn audit_alarm_unfired(&mut self, t: u64, cell: &str, overdue_ms: i64) {
+        self.watch(
+            t,
+            "audit-alarm-not-fired",
+            cell.to_string(),
+            format!("{cell}'s durable alarm is still armed {overdue_ms} ms after it came due"),
+        );
+    }
+
+    /// Watched: **a draining node claims nothing.** A draining ingress
+    /// refuses new ownership of an unowned cell or another node's
+    /// (`docs/guarantees.md`). Judged when the claim applies, for a claim
+    /// sent once the shutdown had begun: one sent before can land after.
+    pub fn claimed_during_shutdown(&mut self, t: u64, who: &str, cell: &str, detail: String) {
+        self.watch(
+            t,
+            "claim-during-shutdown",
+            format!("{who} {cell}"),
+            format!("{who} took {cell} with a claim sent while {detail}"),
+        );
+    }
+
+    /// Watched: **a deploy finishes.** After `max_age_ms`, celld forces a
+    /// resident cell onto the new generation (README).
+    pub fn deploy_stuck(&mut self, t: u64, who: &str, cell: &str, detail: String) {
+        self.watch(
+            t,
+            "deploy-stuck",
+            format!("{who} {cell}"),
+            format!("{who} still runs {cell} {detail}"),
+        );
+    }
+
+    /// Watched: **an idle cell is given back.** celld removes a cell from
+    /// memory after `CELLD_IDLE_EVICT_S` without use (README).
+    pub fn idle_kept(&mut self, t: u64, who: &str, cell: &str, idle_ms: u64) {
+        self.watch(
+            t,
+            "idle-not-evicted",
+            format!("{who} {cell}"),
+            format!("{who} still holds {cell}, unused for {idle_ms} ms"),
+        );
+    }
+
+    /// Watched: **an outbound socket closes when its cell moves**
+    /// (`docs/limitations.md`): none stays open on a process whose runtime
+    /// of the cell has stopped.
+    pub fn socket_outlived(&mut self, t: u64, who: &str, cell: &str, websocket: u64) {
+        self.watch(
+            t,
+            "socket-outlives-runtime",
+            format!("{who} {websocket}"),
+            format!(
+                "{who} keeps outbound socket {websocket} of {cell} open after its runtime stopped"
+            ),
+        );
     }
 
     /// An owner compare-and-swap applied at the bucket. Recorded when it

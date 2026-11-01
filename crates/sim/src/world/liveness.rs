@@ -16,6 +16,7 @@
 //! A phase is a set of goals: one per cell, retried until it is served or
 //! its deadline passes. A goal that is never served is a violation.
 
+use super::shell::STORE_TIMEOUT_MS;
 use super::{Item, Machine, Time, World};
 
 /// How long every cell has to take a write once the probe starts.
@@ -45,6 +46,19 @@ impl World {
         self.quiet_from = self.quiet_from.max(until);
     }
 
+    /// Whether nothing a fault started can still be under way: the faults,
+    /// the restarts they caused, and a bucket call lost before the chaos
+    /// ended, which its caller waits out for a whole timeout. The watched
+    /// properties that need a quiet fleet judge only after this.
+    pub(super) fn settled(&self) -> bool {
+        self.t >= self.settled_from()
+    }
+
+    /// The instant `settled` turns true, as far as the faults so far tell.
+    pub(super) fn settled_from(&self) -> Time {
+        self.quiet_from.max(self.config.chaos_ms + STORE_TIMEOUT_MS)
+    }
+
     fn audit_window(&self) -> u64 {
         4 * self.config.ttl_ms + PROBE_WINDOW_MS
     }
@@ -66,7 +80,7 @@ impl World {
 
     pub(super) fn audit(&mut self) {
         // The probe is over: every alarm due well before now has fired.
-        self.judge_alarms();
+        self.judge_alarms(false);
         self.note(|| "audit: the fleet dies; a fresh node restores every cell".into());
         for node in 0..self.machines.len() {
             self.machines[node].retired = true;

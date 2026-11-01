@@ -23,7 +23,7 @@ const MESSAGE_GAP_MS: (u64, u64) = (20, 500);
 
 /// One open socket, on the node whose process holds it.
 pub(super) struct Socket {
-    cell: String,
+    pub(super) cell: String,
     kind: WebSocketKind,
 }
 
@@ -94,6 +94,7 @@ impl World {
             return;
         };
         let cell = socket.cell.clone();
+        self.touch(node, &cell);
         let write = self.work_rng.chance(self.config.write_probability);
         self.send_on_socket(cell, write, node, websocket);
         self.next_message(node, websocket);
@@ -128,6 +129,33 @@ impl World {
                 cell: cell.to_string(),
                 websocket,
             });
+        }
+    }
+
+    /// The step is over: no cell whose runtime it stopped, and that it did
+    /// not start again, may keep an outbound socket open here.
+    pub(super) fn judge_stopped(&mut self, node: usize) {
+        let (mine, rest) = std::mem::take(&mut self.stopped)
+            .into_iter()
+            .partition(|(n, _)| *n == node);
+        self.stopped = rest;
+        let Some(p) = self.machines[node].proc.as_ref() else {
+            return;
+        };
+        let mut hits = Vec::new();
+        for (_, cell) in mine {
+            if p.published.contains_key(&cell) {
+                continue;
+            }
+            for (websocket, socket) in &p.sockets {
+                if socket.cell == cell && socket.kind == WebSocketKind::Outbound {
+                    hits.push((cell.clone(), *websocket));
+                }
+            }
+        }
+        let who = self.who(node);
+        for (cell, websocket) in hits {
+            self.checker.socket_outlived(self.t, &who, &cell, websocket);
         }
     }
 

@@ -16,7 +16,7 @@ use crate::store::Load;
 use crate::{Mutation, WriteId};
 
 /// The bucket client's timeout for one attempt (`bucket.rs`).
-const STORE_TIMEOUT_MS: u64 = 15_000;
+pub(super) const STORE_TIMEOUT_MS: u64 = 15_000;
 
 /// Which armed timer a new arm replaces. This follows `TimerSlot` in
 /// `crates/celld/actor.rs`: the lease timers coalesce, and the rest are
@@ -91,6 +91,8 @@ pub(super) enum StoreReq {
         cell: String,
         guard: CasGuard,
         epoch: Epoch,
+        /// The shutdown its process was in when it sent the claim.
+        shutting_down: Option<&'static str>,
     },
     /// Publish the cell as unowned, keeping its epoch, if this node still
     /// owns it at `epoch`.
@@ -211,15 +213,17 @@ impl World {
                 guard,
                 epoch,
                 ..
-            } => self.store_call(
-                node,
-                StoreReq::CasOwner {
+            } => {
+                let shutting_down = self.shutdown_phase(node);
+                let req = StoreReq::CasOwner {
                     op,
                     cell,
                     guard,
                     epoch,
-                },
-            ),
+                    shutting_down,
+                };
+                self.store_call(node, req)
+            }
             Effect::Restore { op, cell, spec } => self.restore(node, op, cell, spec),
             Effect::StopRuntime {
                 op,
@@ -237,12 +241,17 @@ impl World {
                 if !(evict && self.config.mutation == Some(Mutation::StaleRegistry)) {
                     self.machines[node].proc_mut().published.remove(&cell);
                 }
+                if cause != StopCause::Swap {
+                    self.stopped.push((node, cell.clone()));
+                }
                 self.stop_runtime(node, op, cell, epoch, cause, bounded);
             }
             Effect::StartRuntime { op, cell, epoch } => {
                 let (name, who) = (self.machines[node].name.clone(), self.who(node));
                 self.checker
                     .runtime_started(self.t, &name, &who, &cell, epoch);
+                let p = self.machines[node].proc_mut();
+                p.runtime_generations.insert(cell.clone(), p.generation);
                 let result = if self.machines[node]
                     .proc()
                     .replicas
@@ -266,7 +275,9 @@ impl World {
             Effect::Publish { op, cell, epoch } => {
                 // Production inserts into its registry inside the same step.
                 if self.config.mutation != Some(Mutation::SkipPublish) {
-                    self.machines[node].proc_mut().published.insert(cell, epoch);
+                    let p = self.machines[node].proc_mut();
+                    p.touched.insert(cell.clone(), self.t);
+                    p.published.insert(cell, epoch);
                 }
                 immediate.push_back(Event::Published { op, result: Ok(()) });
             }
@@ -598,7 +609,12 @@ impl World {
                 cell,
                 guard,
                 epoch,
+                shutting_down,
             } => {
+                let prior = self
+                    .store
+                    .owner(&cell)
+                    .and_then(|(owner, _)| owner.map(str::to_string));
                 let outcome = self.store.cas_owner(&cell, &guard, epoch, &name);
                 // The oracle believes the bucket, not the answer: a claim
                 // is the epoch the record names this node at afterwards.
@@ -608,6 +624,13 @@ impl World {
                 };
                 if let (CasOutcome::Applied, Some(epoch)) = (outcome, installed) {
                     self.checker.claim_applied(self.t, &cell, epoch, &name);
+                    // Reclaiming a cell the record named this node for is
+                    // not new ownership.
+                    if let Some(phase) = shutting_down.filter(|_| prior.as_ref() != Some(&name)) {
+                        let detail = format!("{phase}: epoch {epoch} over {prior:?}");
+                        self.checker
+                            .claimed_during_shutdown(self.t, &sender, &cell, detail);
+                    }
                 }
                 core(Event::OwnerCasCompleted {
                     op,

@@ -156,6 +156,39 @@ Each check has a planted bug (`Mutation` in `crates/sim/src/lib.rs`) in the
 simulated shell or bucket. A test requires every check to catch its bug, so a
 check cannot go blind without a test failing.
 
+Some properties are only watched. A hit is printed (`WATCH`) but never fails a
+run. A property is enforced only once every hit a sweep finds traces to the
+core, not to the simulator or to the property itself.
+
+- **resumed-superseded**: a clean reload resumed a database while the owner
+  record named another node or a newer epoch.
+- **crash-uncovered-alarm**: a process died holding an alarm that a client
+  was told was set, with no wake entry due by its time.
+- **audit-alarm-not-fired**: when the audit ends, a cell's newest durable
+  database still holds an alarm that came due more than 10 s earlier.
+- **claim-during-shutdown**: a claim sent while its node was draining or
+  preserving took a cell that the record did not name that node for.
+- **deploy-stuck**: 10 s after a deploy's maximum age, a cell still runs on an
+  older generation.
+- **idle-not-evicted**: a cell with nothing in flight, no socket and no alarm
+  stayed resident long past its idle limit.
+- **socket-outlives-runtime**: an outbound WebSocket stayed open after its
+  cell's runtime stopped.
+
+The last three judge only once the fleet is quiet, and 15 s after the faults
+end, so that a bucket call lost just before the end has timed out. A planted
+bug makes each of the seven fire. In 100,000 swarm seeds:
+
+- 158 seeds claimed during a preserve, never during a drain. An eviction
+  already in flight finishes, or an owner read lands, and the core claims the
+  cell, though `begin_preserve` retires cold work.
+- 65 seeds resumed a superseded epoch, 61 of them with faulty clocks. The
+  rest are the slow clean reload below, or a resume after a claim during a
+  preserve.
+- 6 seeds hit crash-uncovered-alarm. The simulator does not model the arm
+  gate: production's shell holds a response until the alarm's wake entry
+  lands, and the simulator releases it at once.
+
 The simulator does not yet model V8, the fleet log and fleet proofs, eviction
 snapshots, memory pressure, or the waker election (the lowest live node
 stands in for it).

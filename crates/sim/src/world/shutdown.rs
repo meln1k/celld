@@ -73,6 +73,16 @@ impl World {
         })
     }
 
+    /// The shutdown the process on `node` is in, if any, by name.
+    pub(super) fn shutdown_phase(&self, node: usize) -> Option<&'static str> {
+        let shutdown = self.machines[node].proc().shutdown?;
+        Some(match shutdown.phase {
+            Phase::Draining => "draining",
+            Phase::Preserving => "preserving",
+            Phase::Closing => "closing",
+        })
+    }
+
     fn shut_down(&mut self, node: usize, mode: Mode) {
         let p = self.machines[node].proc_mut();
         if p.shutdown.is_some() {

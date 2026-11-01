@@ -13,6 +13,9 @@ use super::clients::CLIENTS_STOP_BEFORE_END_MS;
 use super::shutdown::{Mode, ShutdownWork};
 use super::{Item, Pending, Work, World};
 
+/// How long after a deploy's `max_age_ms` its forced moves may still take.
+const DEPLOY_SLACK_MS: u64 = 10_000;
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Act {
     /// `POST /evict/<cell>` on one node: `Message::Evict` in `actor.rs`.
@@ -41,6 +44,8 @@ pub(super) enum OperatorWork {
     Rebalance { cells: usize },
     /// The node adopts a new application generation.
     Deploy { max_age_ms: u64 },
+    /// A deploy's forced moves should all be done.
+    DeployDue { generation: u64, max_age_ms: u64 },
 }
 
 impl World {
@@ -59,6 +64,10 @@ impl World {
             }
             OperatorWork::Rebalance { cells } => self.drive(node, Event::Rebalance { cells }),
             OperatorWork::Deploy { max_age_ms } => self.deploy(node, max_age_ms),
+            OperatorWork::DeployDue {
+                generation,
+                max_age_ms,
+            } => self.judge_deploy(node, generation, max_age_ms),
         }
     }
 
@@ -143,13 +152,48 @@ impl World {
         self.stats.deploys += 1;
         let p = self.machines[node].proc_mut();
         p.generation += 1;
+        let generation = p.generation;
         let event = Event::GenerationChanged {
-            generation: p.generation,
+            generation,
             now_mono_ms: 0,
             max_age_ms,
             eager_classes: Vec::new(),
         };
         self.drive(node, event);
+        // Watched only for a deploy in a quiet fleet: a fault can hold a
+        // move back for as long as it lasts.
+        if self.settled() {
+            let work = OperatorWork::DeployDue {
+                generation,
+                max_age_ms,
+            };
+            self.work(node, max_age_ms + DEPLOY_SLACK_MS, Work::Operator(work));
+        }
+    }
+
+    /// Every runtime of a cell still served here must have moved to the
+    /// deploy's generation, unless a later deploy has superseded it.
+    fn judge_deploy(&mut self, node: usize, generation: u64, max_age_ms: u64) {
+        let p = self.machines[node].proc();
+        if p.generation != generation || p.shutdown.is_some() {
+            return;
+        }
+        let stuck: Vec<(String, u64)> = p
+            .published
+            .keys()
+            .filter_map(|cell| {
+                let on = p.runtime_generations.get(cell).copied().unwrap_or(0);
+                (on < generation).then(|| (cell.clone(), on))
+            })
+            .collect();
+        let who = self.who(node);
+        for (cell, on) in stuck {
+            let detail = format!(
+                "on generation {on}, {DEPLOY_SLACK_MS} ms after generation {generation}'s \
+                 max age of {max_age_ms} ms"
+            );
+            self.checker.deploy_stuck(self.t, &who, &cell, detail);
+        }
     }
 
     /// The core admitted an eviction, or refused it at once.

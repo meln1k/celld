@@ -168,8 +168,36 @@ impl World {
                 .is_some_and(|at_ms| !self.store.wake_covers(cell, at_ms))
     }
 
+    /// The process on `node` is about to die: every alarm a client was told
+    /// was set must be covered by a wake entry.
+    pub(super) fn judge_death(&mut self, node: usize) {
+        let who = self.who(node);
+        let published: Vec<(String, Epoch)> = self.machines[node]
+            .proc()
+            .published
+            .iter()
+            .map(|(cell, epoch)| (cell.clone(), *epoch))
+            .collect();
+        for (cell, epoch) in published {
+            if !self.alarm_uncovered(node, &cell, epoch) {
+                continue;
+            }
+            let content = self.seen(node, &cell, epoch).expect("uncovered: open");
+            let last = content
+                .iter()
+                .rev()
+                .find(|w| self.alarm_writes.contains_key(w))
+                .copied()
+                .expect("uncovered: armed");
+            if self.checker.acknowledged(&cell, last) {
+                self.checker.died_uncovered(self.t, &who, &cell, last);
+            }
+        }
+    }
+
     /// An activity on the cell is over: report its alarm, then finish it.
     pub(super) fn activity_done(&mut self, node: usize, request: RequestId, cell: &str) {
+        self.touch(node, cell);
         if let Some((alarm, covered)) = self.observation(node, cell) {
             self.drive(node, observed(cell, alarm, covered));
         }
@@ -293,6 +321,7 @@ impl World {
         let Some((cell, epoch)) = self.machines[node].proc_mut().alarms.firing.remove(&op) else {
             return;
         };
+        self.touch(node, &cell);
         let now = self.wall(node) as i64;
         let result = match self.seen(node, &cell, epoch) {
             None => Err(Failure::Definite),
@@ -405,7 +434,8 @@ impl World {
 
     /// **Every durable alarm fires.** When the probe ends, no cell's newest
     /// durable database may still hold an alarm that came due long before.
-    pub(super) fn judge_alarms(&mut self) {
+    /// When the audit ends, the same is watched.
+    pub(super) fn judge_alarms(&mut self, audit: bool) {
         let now = (WALL_EPOCH_MS + self.t) as i64;
         for cell in 0..self.config.cells {
             let cell = format!("c{cell}");
@@ -414,7 +444,11 @@ impl World {
             };
             let at_ms = self.alarm_of(content, epoch).at_ms();
             if let Some(at_ms) = at_ms.filter(|at| *at + (ALARM_SLACK_MS as i64) < now) {
-                self.checker.alarm_unfired(self.t, &cell, now - at_ms);
+                if audit {
+                    self.checker.audit_alarm_unfired(self.t, &cell, now - at_ms);
+                } else {
+                    self.checker.alarm_unfired(self.t, &cell, now - at_ms);
+                }
             }
         }
     }

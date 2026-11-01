@@ -456,6 +456,9 @@ pub struct Outcome {
     /// with its seed and time. A failed `State::validate` is one.
     pub panic: Option<String>,
     pub violations: Vec<Violation>,
+    /// Hits on properties that are watched, not enforced: they never fail
+    /// a run. See `checks.rs`.
+    pub watched: Vec<Violation>,
     pub stats: Stats,
 }
 

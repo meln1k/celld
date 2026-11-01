@@ -2,7 +2,8 @@
 //! [--mutation NAME] [--trace]`
 //!
 //! One seed prints what happened. A range prints one line per failing seed,
-//! with its first violation or panic, then a count. `--swarm` draws each
+//! with its first violation or panic, and one line per watched property a
+//! seed hit, then counts. Watched hits never fail a seed. `--swarm` draws each
 //! seed's configuration from the seed itself. `--mutation` plants a known
 //! bug, named as in `Mutation`, to watch a check catch it.
 
@@ -59,8 +60,16 @@ fn main() {
         // would also print each one to stderr.
         std::panic::set_hook(Box::new(|_| {}));
         let (total, mut failed) = (seeds.end - seeds.start, 0);
+        let mut watched = std::collections::BTreeMap::<&str, u64>::new();
         for seed in seeds {
             let outcome = run(seed, &config_for(seed));
+            let mut kinds = std::collections::BTreeSet::new();
+            for w in &outcome.watched {
+                if kinds.insert(w.kind) {
+                    *watched.entry(w.kind).or_default() += 1;
+                    println!("WATCH {seed}: t={} {}: {}", w.at_ms, w.kind, w.detail);
+                }
+            }
             let first = outcome.panic.clone().or_else(|| {
                 let v = outcome.violations.first()?;
                 Some(format!("t={} {}: {}", v.at_ms, v.kind, v.detail))
@@ -69,6 +78,9 @@ fn main() {
                 failed += 1;
                 println!("FAIL {seed}: {first}");
             }
+        }
+        for (kind, seeds) in &watched {
+            println!("{seeds} of {total} seeds hit watched {kind}");
         }
         println!("{failed} of {total} seeds failed");
         std::process::exit(i32::from(failed > 0));
@@ -121,6 +133,9 @@ fn main() {
         stats.alarms_fired,
         stats.wake_hints
     );
+    for w in &outcome.watched {
+        println!("WATCH t={} {}: {}", w.at_ms, w.kind, w.detail);
+    }
     for v in &outcome.violations {
         println!("VIOLATION t={} {}: {}", v.at_ms, v.kind, v.detail);
     }

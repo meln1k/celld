@@ -28,7 +28,7 @@ pub(super) struct Egress {
 /// A handler's call to a third party, held at the gate: what it can
 /// reveal, sampled when the handler raised it.
 pub(super) struct Gate {
-    reveal: Reveal,
+    pub(super) reveal: Reveal,
     position: Option<u64>,
     observed: Option<u64>,
 }
