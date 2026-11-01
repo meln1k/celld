@@ -100,7 +100,9 @@ cell's alarm, which lives in the database like any other write, with its
 installation id: opening the database at a new epoch moves the id into that
 epoch, as production's wake record does. Its wake
 entry goes to the bucket, a timer fires it on the owner, and each node scans
-the due wake entries every second to wake cells nobody holds.
+the due wake entries every second to wake cells nobody holds. Old entries
+go only below a retirement certificate, which an owner raises once it has
+proven its current alarm durable and its ownership current.
 
 The simulated shell carries out every effect the core can return, and sends
 every event production sends, in its timed form.
@@ -163,13 +165,15 @@ The core on `main` fails some seeds.
 
 - **Stale reads.** A clean read is released without a read of the owner
   record, so it is only as fresh as its node's belief that it still owns the
-  cell. A peer whose wall clock runs a few hundred milliseconds ahead can
-  judge a lease expired while its holder's late renewal is still in flight.
+  cell. A peer whose wall clock runs ahead by a large part of a lease (in
+  one seed a 1.3 s step against a 2 s lease) can judge a lease expired
+  while its holder's late renewal is still in flight.
   The renewal then lands, the holder keeps its lease, and nothing tells it
   that the peer took its cells. It answers reads of them from the old epoch
   until a write fails its ownership read, 8 s later in one seed. A VM
   suspend, which `CLOCK_MONOTONIC` does not count, does the same. Writes
-  stay safe.
+  stay safe. The test suite excuses a stale read only in a run with skewed,
+  stepped or suspended clocks, and runs chaos with true clocks too.
 - **Ten `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.

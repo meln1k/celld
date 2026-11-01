@@ -115,11 +115,13 @@ pub(super) enum StoreReq {
         cell: String,
         epoch: Epoch,
     },
-    /// Bring the cell's wake entries into line with its alarm.
+    /// Publish the wake entry of the cell's alarm. With `retire`, then
+    /// retire the entries it makes obsolete, as `maintain_wake_entry` does.
     Wake {
         cell: String,
         alarm: AlarmSnapshot,
         report: bool,
+        retire: bool,
     },
 }
 
@@ -223,8 +225,7 @@ impl World {
                     let uncovered = current
                         && self
                             .seen(node, &cell, epoch)
-                            .and_then(|content| self.alarm_of(content, epoch))
-                            .and_then(|alarm| alarm.at_ms())
+                            .and_then(|content| self.alarm_of(content, epoch).at_ms())
                             .is_some_and(|at_ms| !self.store.wake_covers(&cell, at_ms));
                     self.checker
                         .evicting(self.t, &who, &cell, pinned, uncovered);
@@ -317,9 +318,7 @@ impl World {
             Effect::FireAlarm {
                 op, cell, epoch, ..
             } => self.fire_alarm(node, op, cell, epoch),
-            Effect::ReconcileWakeEntry { cell, alarm } => {
-                self.maintain_wake(node, &cell, alarm, false)
-            }
+            Effect::ReconcileWakeEntry { cell, alarm } => self.reconcile_wake(node, &cell, alarm),
             Effect::CloseWebSocket { cell, websocket } => {
                 self.close_sockets(node, &cell, vec![websocket], immediate)
             }
@@ -655,12 +654,15 @@ impl World {
                 cell,
                 alarm,
                 report,
+                retire,
             } => {
-                let frontier = self
-                    .store
-                    .newest(&cell)
-                    .and_then(|(epoch, db)| self.alarm_of(db, epoch));
-                self.store.maintain_wake(&cell, alarm, frontier);
+                self.store.publish_wake(&cell, alarm);
+                if let Some(retirement) = retire
+                    .then(|| self.retirement_proven(node, inc, &cell, alarm))
+                    .flatten()
+                {
+                    self.store.retire_wake(&cell, retirement);
+                }
                 Work::WakeMaintained {
                     cell,
                     alarm,

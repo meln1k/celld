@@ -192,11 +192,17 @@ const KNOWN_CORE_PANICS: [&str; 10] = [
 /// monotonic clock must count a VM suspend (Linux's `CLOCK_MONOTONIC`, which
 /// `Instant` reads, does not). The swarm breaks both, and a node then answers
 /// reads from an epoch a peer has already superseded. Writes stay safe.
-const KNOWN_CORE_VIOLATIONS: [&str; 1] = ["stale-read"];
+///
+/// So a stale read is known only in a run whose clocks were faulty: skewed,
+/// stepped, or suspended. Anywhere else it is a new failure.
+fn stale_read_is_known(config: &SimConfig) -> bool {
+    let f = &config.faults;
+    f.max_skew_ms > 0 || f.clock_steps > 0.0 || (f.pauses > 0.0 && f.suspend_probability > 0.0)
+}
 
 /// The run passed but for known core bugs: it stopped on a known panic, or
 /// broke only a property the core is known to break.
-fn passed_but_for_known_bugs(outcome: &Outcome) -> bool {
+fn passed_but_for_known_bugs(config: &SimConfig, outcome: &Outcome) -> bool {
     let known = outcome
         .panic
         .as_ref()
@@ -205,23 +211,39 @@ fn passed_but_for_known_bugs(outcome: &Outcome) -> bool {
         && outcome
             .violations
             .iter()
-            .all(|v| KNOWN_CORE_VIOLATIONS.contains(&v.kind))
+            .all(|v| v.kind == "stale-read" && stale_read_is_known(config))
+}
+
+/// Chaos with true clocks: no skew, no steps, no suspends.
+fn chaos_with_true_clocks() -> SimConfig {
+    let chaos = SimConfig::chaos();
+    SimConfig {
+        faults: Faults {
+            max_skew_ms: 0,
+            clock_steps: 0.0,
+            suspend_probability: 0.0,
+            ..chaos.faults.clone()
+        },
+        ..chaos
+    }
 }
 
 #[test]
 fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
-    // Chaos runs every fault together; the swarm draws a different mix and
-    // fleet shape per seed. Both must break no property, and the faults
-    // must actually have happened, or the runs proved nothing.
+    // Chaos runs every fault together, and once more with true clocks, so
+    // no stale read is excused; the swarm draws a different mix and fleet
+    // shape per seed. All must break no property, and the faults must
+    // actually have happened, or the runs proved nothing.
     let configs = (0..20)
         .map(|seed| (seed, SimConfig::chaos()))
+        .chain((0..10).map(|seed| (seed, chaos_with_true_clocks())))
         .chain((0..40).map(|seed| (seed, SimConfig::swarm(seed))));
     let (mut clean, mut total) = (0, 0);
     let mut faulted = celld_sim::Stats::default();
     for (seed, config) in configs {
         let outcome = run(seed, &config);
         assert!(
-            passed_but_for_known_bugs(&outcome),
+            passed_but_for_known_bugs(&config, &outcome),
             "seed {seed}: {:?} {:?}",
             outcome.panic,
             outcome.violations

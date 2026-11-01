@@ -373,9 +373,10 @@ impl Checker {
     /// the same promise.
     ///
     /// **A restore is a real state.** What it opens with must be a state
-    /// some database of an earlier epoch, or of this one before a clean
-    /// reload, actually held: a prefix of one of its lineages. A hole, a
-    /// reordering or a foreign write is not.
+    /// some database of an earlier epoch actually held: a prefix of one of
+    /// its lineages. A hole, a reordering or a foreign write is not. Only a
+    /// clean reload, which `resumed` the predecessor's file, may open with a
+    /// state of this same epoch.
     ///
     /// Returns the lineage this database starts, for `committed`.
     pub fn replica_opened(
@@ -385,11 +386,13 @@ impl Checker {
         cell: &str,
         epoch: Epoch,
         content: &[WriteId],
+        resumed: bool,
     ) -> usize {
+        let below = epoch + u64::from(resumed);
         let real = content.is_empty()
             || self
                 .lineages
-                .range((cell.to_string(), 0)..=(cell.to_string(), epoch))
+                .range((cell.to_string(), 0)..(cell.to_string(), below))
                 .flat_map(|(_, lineages)| lineages)
                 .any(|lineage| lineage.starts_with(content));
         if !real {

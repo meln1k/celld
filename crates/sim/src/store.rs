@@ -5,7 +5,7 @@
 //! consistency. Each operation applies atomically at one simulated instant.
 //! Latency and loss around that instant belong to the world, not here.
 //!
-//! It holds three kinds of object:
+//! It holds four kinds of object:
 //!
 //! - node leases, `nodes/<node>.json`;
 //! - ownership records, `cells/<cell>/own.json`;
@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use celld_logic::wake::{AlarmSnapshot, PublicationId};
+use celld_logic::wake::{AlarmSnapshot, PublicationId, Retirement};
 use celld_logic::{
     format::BUCKET_FORMAT, CapacityPeer, CasGuard, CasOutcome, Epoch, LeaseCasOutcome,
     NodeLeaseRecord, OwnerRecord,
@@ -48,6 +48,10 @@ pub struct Store {
     prefixes: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// Wake entries: (cell, installation) → when it is due, wall clock ms.
     wake: BTreeMap<(String, PublicationId), i64>,
+    /// Each cell's retirement certificate, `wake/retired/<cell>`: the newest
+    /// installation an owner proved durable, below which every wake entry is
+    /// obsolete.
+    retirements: BTreeMap<String, Retirement>,
 }
 
 impl Store {
@@ -228,33 +232,35 @@ impl Store {
         self.newest_below(cell, Epoch::MAX)
     }
 
-    /// `maintain_wake_entry`: write the wake entry of an armed alarm, then
-    /// delete every entry the retirement frontier retires. The frontier is
-    /// the alarm in the cell's newest durable database (`Retirement`): an
-    /// installation older than it, or it once consumed, is gone for good,
-    /// while a newer one that is not durable yet could still be lost.
-    pub fn maintain_wake(
-        &mut self,
-        cell: &str,
-        alarm: AlarmSnapshot,
-        frontier: Option<AlarmSnapshot>,
-    ) {
+    /// `WakeFlusher::publish`: write the wake entry of an armed alarm.
+    pub fn publish_wake(&mut self, cell: &str, alarm: AlarmSnapshot) {
         if let (Some(at_ms), Some(source)) = (alarm.at_ms(), alarm.source()) {
             if self.mutation != Some(Mutation::LostWakeEntry) {
                 self.wake.insert((cell.to_string(), source.id), at_ms);
             }
         }
-        let Some(durable) = frontier.and_then(AlarmSnapshot::source) else {
-            return;
-        };
-        let consumed = frontier.and_then(AlarmSnapshot::at_ms).is_none();
-        let retired = |id: PublicationId| id < durable.id || (id == durable.id && consumed);
-        self.wake.retain(|(c, id), _| c != cell || !retired(*id));
     }
 
-    /// Whether a scan will wake `cell` by `at_ms`: some wake entry for it,
-    /// of any installation, is due by then. The woken owner reads the alarm
-    /// its database really holds.
+    /// `publish_retirement` and the collector: raise the cell's certificate
+    /// to `retirement` unless it is already newer, then delete every entry
+    /// the certificate retires.
+    pub fn retire_wake(&mut self, cell: &str, retirement: Retirement) {
+        let certificate = self
+            .retirements
+            .entry(cell.to_string())
+            .or_insert(retirement);
+        if certificate.id < retirement.id {
+            *certificate = retirement;
+        }
+        let certificate = *certificate;
+        self.wake
+            .retain(|(c, id), _| c != cell || !certificate.retires(*id));
+    }
+
+    /// Whether a scan will wake `cell` by `at_ms`: some wake entry for it, of
+    /// any installation, is due by then. The woken owner reads the alarm its
+    /// database really holds. Only a certificate deletes an entry, and only
+    /// once a newer installation is published and durable.
     pub fn wake_covers(&self, cell: &str, at_ms: i64) -> bool {
         self.wake
             .iter()

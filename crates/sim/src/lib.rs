@@ -34,7 +34,8 @@ pub struct SimConfig {
     pub ttl_ms: u64,
     /// Simulated time the run lasts.
     pub duration_ms: u64,
-    /// Faults happen only before this instant.
+    /// Faults begin only before this instant. A clock step, like a node's
+    /// skew, lasts: the clock it moved stays where it put it.
     pub chaos_ms: u64,
     pub faults: Faults,
     /// One-way latency to the bucket, drawn per request and per response.

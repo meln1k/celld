@@ -206,13 +206,13 @@ impl World {
                 return self.deliver(node, delay, Event::RestoreCompleted { op, result });
             };
             self.stats.resumed += 1;
-            self.open_replica(node, cell.clone(), spec.epoch, content);
+            self.open_replica(node, cell.clone(), spec.epoch, content, true);
             let event = self.restore_completed(node, op, &cell, spec.epoch, false);
             return self.deliver(node, delay, event);
         }
         if spec.fresh {
             // Epoch one of a new cell: there is nothing to restore.
-            self.open_replica(node, cell.clone(), spec.epoch, Vec::new());
+            self.open_replica(node, cell.clone(), spec.epoch, Vec::new(), false);
             let delay = self.net_rng.range(1, 5);
             let event = self.restore_completed(node, op, &cell, spec.epoch, false);
             self.deliver(node, delay, event);
@@ -235,18 +235,28 @@ impl World {
     ) {
         let restored = chain.is_some();
         self.stats.restored += 1;
-        self.open_replica(node, cell.clone(), epoch, chain.unwrap_or_default());
+        let chain = chain.unwrap_or_default();
+        self.open_replica(node, cell.clone(), epoch, chain, false);
         let event = self.restore_completed(node, op, &cell, epoch, restored);
         self.drive(node, event);
     }
 
-    fn open_replica(&mut self, node: usize, cell: String, epoch: Epoch, content: Vec<WriteId>) {
+    /// Open `cell` at `epoch` with `content`: read from the bucket, or
+    /// `resumed` from the predecessor's file by a clean reload.
+    fn open_replica(
+        &mut self,
+        node: usize,
+        cell: String,
+        epoch: Epoch,
+        content: Vec<WriteId>,
+        resumed: bool,
+    ) {
         // Opening an epoch replaces any file a dead process left for it.
         self.machines[node].disk.live.remove(&(cell.clone(), epoch));
         let name = self.machines[node].name.clone();
         let lineage = self
             .checker
-            .replica_opened(self.t, &name, &cell, epoch, &content);
+            .replica_opened(self.t, &name, &cell, epoch, &content, resumed);
         let len = content.len();
         let replica = Replica {
             content,
@@ -549,8 +559,9 @@ impl World {
 
 impl World {
     /// A restore opened `cell` at `epoch`: report it with the alarm its
-    /// database holds armed, covered only if this process saw its wake
-    /// entry land.
+    /// database holds armed. Never covered, as in production: the open moved
+    /// the alarm into this epoch, and no wake entry of this epoch can have
+    /// landed yet.
     fn restore_completed(
         &self,
         node: usize,
@@ -561,15 +572,10 @@ impl World {
     ) -> Event {
         let alarm = self
             .seen(node, cell, epoch)
-            .and_then(|content| self.alarm_of(content, epoch))
-            .and_then(|alarm| {
-                let at_ms = self.reported(alarm).at_ms()?;
-                let id = alarm.source()?.id;
-                let covered = self.machines[node]
-                    .proc()
-                    .covered
-                    .contains(&(cell.to_string(), id));
-                Some(RestoredAlarm { at_ms, covered })
+            .and_then(|content| self.reported(self.alarm_of(content, epoch)).at_ms())
+            .map(|at_ms| RestoredAlarm {
+                at_ms,
+                covered: false,
             });
         Event::RestoreCompleted {
             op,

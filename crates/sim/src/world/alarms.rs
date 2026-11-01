@@ -16,15 +16,20 @@
 //! - The core arms a timer, and when it fires on a resident cell asks the
 //!   shell to run the handler (`FireAlarm`). The handler consumes the alarm,
 //!   or re-arms it, with one write, and reports where (`AlarmFinished`).
-//! - `ReconcileWakeEntry` brings the bucket's wake entries into line with
-//!   the alarm the core settled on.
+//! - `ReconcileWakeEntry` writes the wake entry of the alarm the core
+//!   settled on. Once that alarm is proven durable and owned, it raises the
+//!   cell's retirement certificate to it, and every entry below goes. Only
+//!   a certificate deletes entries, so an old one wakes the cell until a
+//!   newer installation is safely published.
 //! - Each process scans the bucket's due wake entries every second and
 //!   hints the core (`WakeHintAt`). The elected waker, here the lowest live
 //!   node, also hints cells whose owner is dead or absent.
 
 use std::collections::VecDeque;
 
-use celld_logic::wake::{elected_hint_needed, AlarmSnapshot, AlarmSource, PublicationId};
+use celld_logic::wake::{
+    elected_hint_needed, AlarmSnapshot, AlarmSource, PublicationId, Retirement,
+};
 use celld_logic::{Epoch, Event, Failure, OpId, RequestId, WakeHintScope};
 
 use super::shell::StoreReq;
@@ -44,19 +49,22 @@ pub(super) const ALARM_SLACK_MS: u64 = 10_000;
 impl World {
     /// The alarm a database opened at `epoch` holds: what its last alarm
     /// write left, identified by the open epoch and the number of alarm
-    /// writes, sampled at the database's position. `None` when no write ever
-    /// touched the alarm.
-    pub(super) fn alarm_of(&self, content: &[WriteId], epoch: Epoch) -> Option<AlarmSnapshot> {
-        let mut writes = content.iter().filter_map(|w| self.alarm_writes.get(w));
-        let at_ms = *writes.next_back()?;
+    /// writes, sampled at the database's position. A database no alarm
+    /// write touched holds none, at sequence 0, as `wake_record::initialize`
+    /// leaves it.
+    pub(super) fn alarm_of(&self, content: &[WriteId], epoch: Epoch) -> AlarmSnapshot {
+        let writes: Vec<Option<i64>> = content
+            .iter()
+            .filter_map(|w| self.alarm_writes.get(w).copied())
+            .collect();
         let source = AlarmSource {
             id: PublicationId {
                 epoch,
-                sequence: writes.count() as u64 + 1,
+                sequence: writes.len() as u64,
             },
             position: content.len() as u64,
         };
-        Some(AlarmSnapshot::committed(at_ms, source))
+        AlarmSnapshot::committed(writes.last().copied().flatten(), source)
     }
 
     /// Record that `write`, committed at `epoch`, sets the cell's alarm
@@ -75,9 +83,9 @@ impl World {
             self.stats.alarms_set += 1;
         }
         let content = self.seen(node, cell, epoch).expect("an open database");
-        let alarm = self.alarm_of(content, epoch).expect("just written");
+        let alarm = self.alarm_of(content, epoch);
         if at_ms.is_some() {
-            self.maintain_wake(node, cell, alarm, false);
+            self.publish_wake(node, cell, alarm, false);
         }
         alarm
     }
@@ -105,10 +113,7 @@ impl World {
     fn observation(&self, node: usize, cell: &str) -> Option<(AlarmSnapshot, bool)> {
         let p = self.machines[node].proc();
         let epoch = p.published.get(cell)?;
-        let alarm = self
-            .alarm_of(self.seen(node, cell, *epoch)?, *epoch)
-            .map(|alarm| self.reported(alarm))
-            .unwrap_or(AlarmSnapshot::without_wake(None));
+        let alarm = self.reported(self.alarm_of(self.seen(node, cell, *epoch)?, *epoch));
         let covered = match (alarm.at_ms(), alarm.source()) {
             (Some(_), Some(source)) => p.covered.contains(&(cell.to_string(), source.id)),
             _ => true,
@@ -131,10 +136,9 @@ impl World {
         self.drive(node, Event::ActivityFinished { request });
     }
 
-    /// Write the wake entry for an alarm, or retire old ones. When `report`
-    /// is set, tell the core the coverage once it lands, as a handoff's
-    /// refresh does.
-    pub(super) fn maintain_wake(
+    /// Write the wake entry for an alarm. When `report` is set, tell the
+    /// core the coverage once it lands, as a handoff's refresh does.
+    pub(super) fn publish_wake(
         &mut self,
         node: usize,
         cell: &str,
@@ -145,8 +149,49 @@ impl World {
             cell: cell.to_string(),
             alarm,
             report,
+            retire: false,
         };
         self.store_call(node, req);
+    }
+
+    /// `ReconcileWakeEntry`: write the alarm's wake entry, then retire the
+    /// entries it makes obsolete, if this owner can prove it may.
+    pub(super) fn reconcile_wake(&mut self, node: usize, cell: &str, alarm: AlarmSnapshot) {
+        let req = StoreReq::Wake {
+            cell: cell.to_string(),
+            alarm,
+            report: false,
+            retire: true,
+        };
+        self.store_call(node, req);
+    }
+
+    /// The certificate `WakeFlusher::maintain` may publish for `alarm`, or
+    /// `None` if one of its proofs fails: the alarm is still the one the
+    /// process's open database holds, the bucket holds it durably, and the
+    /// owner record names this node at its epoch. The sim checks all three
+    /// at the instant the bucket applies the request.
+    pub(super) fn retirement_proven(
+        &self,
+        node: usize,
+        inc: u64,
+        cell: &str,
+        alarm: AlarmSnapshot,
+    ) -> Option<Retirement> {
+        let source = alarm.source()?;
+        let epoch = source.id.epoch;
+        let m = &self.machines[node];
+        let current = m.up()
+            && m.inc == inc
+            && self
+                .seen(node, cell, epoch)
+                .is_some_and(|content| self.alarm_of(content, epoch).same_installation(alarm));
+        let durable = self.store.durable_len(cell, epoch) as u64 >= source.position;
+        let owned = self.store.owner(cell) == Some((Some(m.name.as_str()), epoch));
+        (current && durable && owned).then_some(Retirement {
+            id: source.id,
+            at_ms: alarm.at_ms(),
+        })
     }
 
     /// A wake entry write landed and its answer came back.
@@ -195,7 +240,7 @@ impl World {
                 now_mono_ms: 0,
             });
         } else {
-            self.maintain_wake(node, cell, alarm, true);
+            self.publish_wake(node, cell, alarm, true);
         }
     }
 
@@ -224,9 +269,9 @@ impl World {
         let result = match self.seen(node, &cell, epoch) {
             None => Err(Failure::Definite),
             Some(content) => {
-                let current = self.alarm_of(content, epoch);
-                let due = current
-                    .and_then(AlarmSnapshot::at_ms)
+                let due = self
+                    .alarm_of(content, epoch)
+                    .at_ms()
                     .is_some_and(|at| at <= now);
                 if due {
                     let rearm = self
@@ -336,7 +381,7 @@ impl World {
             let Some((epoch, content)) = self.store.newest(&cell) else {
                 continue;
             };
-            let at_ms = self.alarm_of(content, epoch).and_then(AlarmSnapshot::at_ms);
+            let at_ms = self.alarm_of(content, epoch).at_ms();
             if let Some(at_ms) = at_ms.filter(|at| *at + (ALARM_SLACK_MS as i64) < now) {
                 self.checker.alarm_unfired(self.t, &cell, now - at_ms);
             }
