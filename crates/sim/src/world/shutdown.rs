@@ -180,6 +180,8 @@ impl World {
                 .collect();
             self.machines[node].disk.prune_except(&keep);
         }
+        // The graceful drain point: seal the log if the bucket has it all.
+        self.seal_own_log(node);
         self.machines[node].reload = marker;
         self.crash(node, false);
     }

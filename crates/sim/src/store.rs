@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 
+use celld_logic::log_tier::LogState;
 use celld_logic::wake::{AlarmSnapshot, PublicationId, Retirement};
 use celld_logic::{
     format::BUCKET_FORMAT, CapacityPeer, CasGuard, CasOutcome, Epoch, LeaseCasOutcome,
@@ -92,6 +93,23 @@ impl Store {
         LeaseCasOutcome::Applied {
             etag: etag.to_string(),
         }
+    }
+
+    /// Recovery, or a graceful shutdown, seals the log folded into `node`'s
+    /// lease body, if the lease still names session `generation`. A write
+    /// like any other: the etag moves, so the session's own next renewal
+    /// fails. Returns whether it sealed.
+    pub fn seal_log(&mut self, node: &str, generation: &str) -> bool {
+        let etag = self.etag();
+        let Some((record, current, _)) = self.leases.get_mut(node) else {
+            return false;
+        };
+        if record.generation != generation {
+            return false;
+        }
+        record.log_state = Some(LogState::Sealed);
+        *current = etag;
+        true
     }
 
     /// Every node's lease with its load, scanned at this instant. Production

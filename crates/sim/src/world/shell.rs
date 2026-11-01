@@ -10,6 +10,7 @@ use celld_logic::{
 
 use super::alarms::{AlarmWork, Waiter};
 use super::faults::Partition;
+use super::node_log::LogWork;
 use super::replicator::ReplicaWork;
 use super::{Item, Pending, Work, World};
 use crate::store::Load;
@@ -113,11 +114,13 @@ pub(super) enum StoreReq {
         epoch: Epoch,
         content: Vec<WriteId>,
     },
-    /// A restore reads the newest chain below its epoch.
+    /// A restore reads the newest chain below its epoch, after folding the
+    /// cell's retained tails into the bucket (`fold_cell`).
     ReadChain {
         op: OpId,
         cell: String,
         epoch: Epoch,
+        fold: Vec<(Epoch, Vec<WriteId>)>,
     },
     /// Publish the wake entry of the cell's alarm. With `retire`, then
     /// retire the entries it makes obsolete, as `maintain_wake_entry` does.
@@ -162,9 +165,12 @@ impl World {
             Effect::CasNodeLease {
                 op,
                 guard,
-                record,
+                mut record,
                 authority_expires_ms,
             } => {
+                // The shell stamps the body with its own log slot when it
+                // writes it, whatever the core believed (`stamped_log_state`).
+                record.log_state = self.log_slot(node);
                 // The lease body carries the node's load, sampled now.
                 let state = &self.machines[node].proc().state;
                 let load = Load {
@@ -198,10 +204,10 @@ impl World {
                 let delay = self.net_rng.range(1, 5);
                 self.deliver(node, delay, Event::LocalCellsRead { result: Ok(cells) });
             }
-            Effect::RecoverNodeLog { op, .. } => {
-                // No fleet log in this model: a lease never carries log
-                // state, so a dead owner never leaves a tail to recover.
-                immediate.push_back(Event::NodeLogRecovered { op, result: Ok(()) });
+            Effect::RecoverNodeLog { op, owner, .. } => {
+                // One round trip to the bucket and the followers.
+                let delay = self.net_rng.range(1, 20);
+                self.work(node, delay, Work::Log(LogWork::Recover { op, owner }));
             }
             Effect::ReadOwner { op, cell } => {
                 self.store_call(node, StoreReq::ReadOwner { op, cell })
@@ -506,11 +512,11 @@ impl World {
                 now_mono_ms: 0,
                 result: Err(failure),
             }),
-            StoreReq::CasLease { op, .. } => core(Event::NodeLeaseCasCompleted {
+            StoreReq::CasLease { op, record, .. } => core(Event::NodeLeaseCasCompleted {
                 op: *op,
                 now_mono_ms: 0,
                 result: Err(failure),
-                stamped_log_state: None,
+                stamped_log_state: record.log_state,
             }),
             StoreReq::ReadCapacityPeers { op } => core(Event::CapacityPeersRead {
                 op: *op,
@@ -587,13 +593,12 @@ impl World {
                 guard,
                 record,
                 load,
-            } => core(Event::NodeLeaseCasCompleted {
+            } => Work::Log(LogWork::LeaseWritten(Event::NodeLeaseCasCompleted {
                 op,
                 now_mono_ms: 0,
                 result: Ok(self.store.cas_lease(&guard, &record, load)),
-                // The bucket posture: lease bodies carry no node-log state.
-                stamped_log_state: None,
-            }),
+                stamped_log_state: record.log_state,
+            })),
             StoreReq::ReadOwner { op, cell } => core(Event::OwnerRead {
                 op,
                 now_ms: 0,
@@ -675,12 +680,25 @@ impl World {
                     len: content.len(),
                 })
             }
-            StoreReq::ReadChain { op, cell, epoch } => Work::Replica(ReplicaWork::ChainRead {
+            StoreReq::ReadChain {
                 op,
-                chain: self.store.read_chain(&cell, epoch),
                 cell,
                 epoch,
-            }),
+                fold,
+            } => {
+                for (ended, content) in fold {
+                    self.checker.upload_applied(self.t, &sender, &cell, ended);
+                    self.store.put(&cell, ended, &content);
+                    let held = self.store.prefix(&cell, ended).len();
+                    self.checker.prefix_grew(self.t, &cell, ended, held);
+                }
+                Work::Replica(ReplicaWork::ChainRead {
+                    op,
+                    chain: self.store.read_chain(&cell, epoch),
+                    cell,
+                    epoch,
+                })
+            }
             StoreReq::Wake {
                 cell,
                 alarm,

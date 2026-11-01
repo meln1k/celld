@@ -52,21 +52,26 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
 fn crashes_and_pauses_lose_no_acknowledged_write() {
     // Processes die, some with their disks, or stall past their leases, and
     // other nodes take their cells over and restore them from the bucket.
-    // Every restore must hold every write a client was told succeeded.
-    let mut restored = 0;
-    for seed in 0..20 {
-        let outcome = run(seed, &crashing_and_pausing());
+    // Every restore must hold every write a client was told succeeded,
+    // whether the bucket proved it or, in the fleet posture, the followers.
+    let (mut restored, mut fleet_proofs, mut log_recoveries) = (0, 0, 0);
+    for (seed, fleet) in (0..20).flat_map(|seed| [(seed, false), (seed, true)]) {
+        let config = SimConfig {
+            fleet,
+            ..crashing_and_pausing()
+        };
+        let outcome = run(seed, &config);
         if let Some(panic) = &outcome.panic {
             // A known core invariant can end a run early, before it broke
             // any property: see `crashing_and_pausing`.
             let known = KNOWN_CORE_PANICS.iter().any(|bug| panic.contains(bug));
             assert!(
                 known && outcome.violations.is_empty(),
-                "seed {seed}: {outcome:?}"
+                "seed {seed} (fleet {fleet}): {outcome:?}"
             );
             continue;
         }
-        assert!(outcome.passed(), "seed {seed}: {outcome:?}");
+        assert!(outcome.passed(), "seed {seed} (fleet {fleet}): {outcome:?}");
         assert!(
             outcome.stats.crashes > 0,
             "seed {seed}: {:?}",
@@ -78,9 +83,14 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
             outcome.stats
         );
         restored += outcome.stats.restored;
+        fleet_proofs += outcome.stats.fleet_proofs;
+        log_recoveries += outcome.stats.log_recoveries;
     }
-    // Takeovers happened, so the lost-write check had restores to judge.
+    // Takeovers happened, so the lost-write check had restores to judge;
+    // followers proved writes, and dead leaders' logs were recovered.
     assert!(restored > 100, "only {restored} restores from the bucket");
+    assert!(fleet_proofs > 1_000, "only {fleet_proofs} fleet proofs");
+    assert!(log_recoveries > 20, "only {log_recoveries} log recoveries");
 }
 
 #[test]
@@ -339,6 +349,8 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::PhantomSocketClose => &["evicted-pinned"],
             Mutation::LostWakeEntry => &["uncovered-alarm", "crash-uncovered-alarm"],
             Mutation::AlarmsUnreported => &["alarm-not-fired"],
+            Mutation::SkipLogRecovery => &["lost-write"],
+            Mutation::FollowerIgnoresSeal => &["late-ack"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -349,6 +361,11 @@ fn every_planted_bug_is_caught_by_its_check() {
                     ..SimConfig::calm().operator
                 },
                 ..SimConfig::calm()
+            },
+            // Only the fleet posture has a log to recover or seal.
+            Mutation::SkipLogRecovery | Mutation::FollowerIgnoresSeal => SimConfig {
+                fleet: true,
+                ..crashing_and_pausing()
             },
             _ => crashing_and_pausing(),
         };

@@ -1,5 +1,5 @@
 //! `celld-sim [--seed N | --seeds A..B] [--crashes PER_MINUTE | --chaos | --swarm]
-//! [--mutation NAME] [--trace]`
+//! [--fleet] [--mutation NAME] [--trace]`
 //!
 //! One seed prints what happened. A range prints one line per failing seed,
 //! with its first violation or panic, and one line per watched property a
@@ -16,7 +16,7 @@ fn main() {
     let mut seed = 0;
     let mut seeds = None;
     let mut config = SimConfig::calm();
-    let (mut swarm, mut trace) = (false, false);
+    let (mut swarm, mut trace, mut fleet) = (false, false, false);
     let mut mutation = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -38,6 +38,9 @@ fn main() {
             }
             "--trace" => trace = true,
             "--swarm" => swarm = true,
+            // The fleet posture for a fixed configuration; a swarm seed
+            // draws its own.
+            "--fleet" => fleet = true,
             "--chaos" => config = SimConfig::chaos(),
             "--crashes" => {
                 let rate = args.next().and_then(|s| s.parse().ok());
@@ -46,13 +49,17 @@ fn main() {
             other => panic!("unknown argument {other}"),
         }
     }
-    let config_for = |seed| SimConfig {
-        trace,
-        mutation,
-        ..if swarm {
+    let config_for = |seed| {
+        let base = if swarm {
             SimConfig::swarm(seed)
         } else {
             config.clone()
+        };
+        SimConfig {
+            trace,
+            mutation,
+            fleet: base.fleet || fleet,
+            ..base
         }
     };
     if let Some(seeds) = seeds {
@@ -117,7 +124,8 @@ fn main() {
         "evictions asked {}, evicted {}, drains {}, cells handed off {}, preserves {}, \
          databases resumed {}, websockets {}\n\
          handler calls released {}, worker requests {} ({} on a resident), deploys {}\n\
-         alarms set {}, alarms fired {}, wake hints {}",
+         alarms set {}, alarms fired {}, wake hints {}\n\
+         fleet proofs {}, logs recovered {}, writes lost to a declared loss {}",
         stats.evictions,
         stats.evicted,
         stats.drains,
@@ -131,7 +139,10 @@ fn main() {
         stats.deploys,
         stats.alarms_set,
         stats.alarms_fired,
-        stats.wake_hints
+        stats.wake_hints,
+        stats.fleet_proofs,
+        stats.log_recoveries,
+        stats.fleet_losses
     );
     for w in &outcome.watched {
         println!("WATCH t={} {}: {}", w.at_ms, w.kind, w.detail);

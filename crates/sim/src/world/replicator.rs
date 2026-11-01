@@ -17,6 +17,7 @@ use celld_logic::{
     RestoredAlarm, StopCause,
 };
 
+use super::node_log::FollowerDisk;
 use super::shell::StoreReq;
 use super::{AgendaKey, Work, World, OPERATION_DEADLINE_MS};
 use crate::{Mutation, WriteId};
@@ -30,6 +31,8 @@ const PROOF_BUDGET_MS: u64 = 10_000;
 #[derive(Default)]
 pub(super) struct Disk {
     live: BTreeMap<(String, Epoch), Vec<WriteId>>,
+    /// What this machine keeps as a follower of other nodes' logs.
+    pub(super) log: FollowerDisk,
 }
 
 impl Disk {
@@ -48,6 +51,8 @@ pub(super) struct Replica {
     start_len: usize,
     /// Length the bucket is known to hold for this epoch.
     uploaded: usize,
+    /// Length every follower of the process's log confirmed holding.
+    fleet: usize,
     uploading: bool,
     /// The longest upload begun so far, and when it began on the monotonic
     /// clock: production's `capture_seq` and `capture_started_ms`.
@@ -88,12 +93,13 @@ impl Waiter {
 
     /// The event that answers this proof.
     fn answer(&self, result: Result<u64, Failure>) -> Event {
+        self.answer_from(result, ProofSource::Bucket)
+    }
+
+    /// The event that answers this proof, proved by `source`.
+    fn answer_from(&self, result: Result<u64, Failure>, source: ProofSource) -> Event {
         match *self {
-            Waiter::Gate { op, .. } => Event::DurableReached {
-                op,
-                result,
-                source: ProofSource::Bucket,
-            },
+            Waiter::Gate { op, .. } => Event::DurableReached { op, result, source },
             Waiter::Evict { op, .. } => Event::DurabilityChecked {
                 op,
                 result: result.map(|_| ()),
@@ -220,6 +226,16 @@ impl World {
             for deadline in replica.deadlines.values() {
                 self.cancel(*deadline);
             }
+            // What the followers confirmed may be acknowledged
+            // and is not in the bucket yet: keep it as a tail
+            // (`note_undrained_tail`).
+            if replica.fleet > replica.uploaded {
+                let tail = replica.content[..replica.fleet].to_vec();
+                self.machines[node]
+                    .proc_mut()
+                    .tails
+                    .insert(key.clone(), tail);
+            }
             match cause {
                 // The node lost its authority: close in place, with no
                 // final upload. The file stays on disk.
@@ -271,7 +287,17 @@ impl World {
             // No eviction snapshots yet, so nothing on disk is ever a safe
             // source: always read the chain from the bucket.
             let epoch = spec.epoch;
-            self.store_call(node, StoreReq::ReadChain { op, cell, epoch });
+            let fold = (self.machines[node].proc().tails.iter())
+                .filter(|((c, _), _)| *c == cell)
+                .map(|((_, ended), content)| (*ended, content.clone()))
+                .collect();
+            let req = StoreReq::ReadChain {
+                op,
+                cell,
+                epoch,
+                fold,
+            };
+            self.store_call(node, req);
         }
     }
 
@@ -284,6 +310,8 @@ impl World {
         epoch: Epoch,
         chain: Option<Vec<WriteId>>,
     ) {
+        // The fold applied with the read.
+        (self.machines[node].proc_mut().tails).retain(|(c, _), _| *c != cell);
         let restored = chain.is_some();
         self.stats.restored += 1;
         let chain = chain.unwrap_or_default();
@@ -315,6 +343,7 @@ impl World {
             start_len: len,
             // What it opened with is already in the bucket, below this epoch.
             uploaded: len,
+            fleet: 0,
             uploading: false,
             capture_len: 0,
             capture_started_ms: 0,
@@ -346,7 +375,10 @@ impl World {
         let position = replica.content.len() as u64;
         let lineage = replica.lineage;
         self.checker.committed(cell, epoch, lineage, write);
-        self.upload(node, cell, epoch);
+        self.ship(node, cell, epoch);
+        if !self.paced(node) {
+            self.upload(node, cell, epoch);
+        }
         Some((write, position))
     }
 
@@ -424,6 +456,9 @@ impl World {
     }
 
     fn wait_for_upload(&mut self, node: usize, cell: &str, epoch: Epoch, waiter: Waiter) {
+        // A gate in the fleet posture waits for the fleet or the next flush;
+        // an eviction kicks the flush (`handoff_wait`).
+        let kick = !self.paced(node) || matches!(waiter, Waiter::Evict { .. });
         let Some(replica) = self.machines[node]
             .proc_mut()
             .replicas
@@ -447,7 +482,18 @@ impl World {
             .deadlines
             .insert(op, key);
         self.settle_proofs(node, cell, epoch);
-        self.upload(node, cell, epoch);
+        if kick {
+            self.upload(node, cell, epoch);
+        }
+    }
+
+    /// Every follower now holds `fleet` writes of the cell epoch.
+    pub(super) fn fleet_reached(&mut self, node: usize, cell: &str, epoch: Epoch, fleet: usize) {
+        let key = (cell.to_string(), epoch);
+        if let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) {
+            replica.fleet = replica.fleet.max(fleet);
+            self.settle_proofs(node, cell, epoch);
+        }
     }
 
     /// A proof, or a stop's final upload, ran out of time.
@@ -546,6 +592,10 @@ impl World {
         let mono = self.mono(node);
         let p = self.machines[node].proc_mut();
         p.node_proof_ms = p.node_proof_ms.max(mono);
+        let key = (cell.clone(), epoch);
+        if p.tails.get(&key).is_some_and(|tail| tail.len() <= len) {
+            p.tails.remove(&key);
+        }
         if let Some(replica) = self.machines[node]
             .proc_mut()
             .replicas
@@ -553,8 +603,11 @@ impl World {
         {
             replica.uploading = false;
             replica.uploaded = replica.uploaded.max(len);
+            let stopping = replica.stop.is_some();
             self.settle_proofs(node, &cell, epoch);
-            self.upload(node, &cell, epoch);
+            if stopping || !self.paced(node) {
+                self.upload(node, &cell, epoch);
+            }
         }
     }
 
@@ -578,16 +631,36 @@ impl World {
             return;
         };
         let uploaded = replica.uploaded as u64;
+        let fleet = replica.fleet as u64;
         let mut answers = Vec::new();
         let mut settled = Vec::new();
+        let mut fleet_proved = false;
         replica.waiters.retain(|waiter| {
-            let covered = waiter.position() <= uploaded;
-            if covered {
-                answers.push(waiter.answer(Ok(uploaded)));
-                settled.extend(replica.deadlines.remove(&waiter.op()));
-            }
-            !covered
+            // Either proof releases it; the fleet's is preferred, as it
+            // spares the ownership read (`wait_for_durability_ticket`).
+            let answer = if waiter.position() <= fleet {
+                fleet_proved = true;
+                waiter.answer_from(Ok(fleet), ProofSource::Fleet)
+            } else if waiter.position() <= uploaded {
+                waiter.answer(Ok(uploaded))
+            } else {
+                return true;
+            };
+            answers.push(answer);
+            settled.extend(replica.deadlines.remove(&waiter.op()));
+            false
         });
+        if fleet_proved {
+            self.stats.fleet_proofs += 1;
+            if let Some(log) = self.machines[node].proc_mut().log.as_mut() {
+                log.proved = true;
+            }
+            let (who, ensemble) = (self.who(node), self.ensemble(node));
+            self.checker.fleet_proof(&who, cell, epoch, &ensemble);
+        }
+        let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
+            return;
+        };
         if let Some(op) = replica
             .stop
             .filter(|_| uploaded >= replica.content.len() as u64)

@@ -66,6 +66,10 @@ pub struct SimConfig {
     pub sticky_eviction: bool,
     /// Give back a cell nobody has used for this long.
     pub idle_evict_ms: Option<u64>,
+    /// The fleet posture (`CELLD_DURABILITY=fleet`): each process ships its
+    /// writes to followers on other machines and acknowledges once they all
+    /// hold them, and flushes to the bucket only every couple of seconds.
+    pub fleet: bool,
     /// A bug planted in the simulated shell or bucket.
     pub mutation: Option<Mutation>,
     /// Keep a human-readable line for every event and effect.
@@ -127,10 +131,18 @@ pub enum Mutation {
     /// An eviction stops the runtime but leaves it in the registry. Caught
     /// by `evicted-but-serving`.
     StaleRegistry,
+    /// `RecoverNodeLog` answers at once without recovering anything, so a
+    /// takeover restores a bucket that lacks the dead owner's fleet-acked
+    /// writes. Caught by `lost-write`.
+    SkipLogRecovery,
+    /// A follower accepts appends after recovery sealed it, so a stale
+    /// owner can still prove writes through the fleet. Caught by
+    /// `late-ack`.
+    FollowerIgnoresSeal,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 15] = [
+    pub const ALL: [Mutation; 17] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -146,6 +158,8 @@ impl Mutation {
         Mutation::PhantomSocketClose,
         Mutation::LostWakeEntry,
         Mutation::AlarmsUnreported,
+        Mutation::SkipLogRecovery,
+        Mutation::FollowerIgnoresSeal,
     ];
 }
 
@@ -238,6 +252,7 @@ impl SimConfig {
             max_activations: 4,
             sticky_eviction: false,
             idle_evict_ms: None,
+            fleet: false,
             mutation: None,
             trace: false,
         }
@@ -326,6 +341,7 @@ impl SimConfig {
             worker_probability: *r.pick(&[0.0, 0.1, 0.3]).unwrap(),
             alarm_probability: *r.pick(&[0.0, 0.05, 0.2]).unwrap(),
             operator: Operator::draw(r),
+            fleet: r.chance(0.5),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
         }
@@ -438,6 +454,12 @@ pub struct Stats {
     pub alarms_set: u64,
     pub alarms_fired: u64,
     pub wake_hints: u64,
+    /// Durability proofs the fleet gave, logs recovered after their leader
+    /// died, and acknowledged writes lost to a declared bounded loss: every
+    /// follower of a session gone with its disk.
+    pub fleet_proofs: u64,
+    pub log_recoveries: u64,
+    pub fleet_losses: u64,
 }
 
 /// What a run produced.

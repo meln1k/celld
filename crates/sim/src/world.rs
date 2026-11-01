@@ -23,6 +23,7 @@
 //! - `sockets`: WebSockets the workload opens, and the messages on them.
 //! - `workers`: top-level Worker requests, which can borrow a resident.
 //! - `alarms`: alarms in each database, their wake entries and the scan.
+//! - `node_log`: the fleet log: followers, fleet proofs and recovery.
 //! - `liveness`: the probe and the audit that end every run.
 //!
 //! A node is a [`Machine`] with a disk. The [`Process`] on it can die and
@@ -37,6 +38,7 @@ mod faults;
 mod gates;
 mod handoff;
 mod liveness;
+mod node_log;
 mod operator;
 mod replicator;
 mod shell;
@@ -63,6 +65,7 @@ use faults::{Fault, Partition};
 use gates::Gate;
 use handoff::{Adoption, Answer, HandoffWork, Offer};
 use liveness::Goal;
+use node_log::{Log, LogWork, Session};
 use operator::{Act, OperatorWork};
 use replicator::{Disk, Replica, ReplicaWork};
 use shell::{Slot, StoreReq};
@@ -157,6 +160,7 @@ enum Work {
     Handoff(HandoffWork),
     Socket(SocketWork),
     Alarm(AlarmWork),
+    Log(LogWork),
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -176,6 +180,10 @@ struct Machine {
     partition: Option<(u64, Partition)>,
     /// The clean-reload marker a preserved process left: its generation.
     reload: Option<String>,
+    /// A boot is waiting for its predecessor's log to be recovered. It
+    /// serves its follower disk meanwhile, as `recover_with_follower_listener`
+    /// does, so a fleet-wide restart cannot wait on itself.
+    booting: bool,
     proc: Option<Process>,
 }
 
@@ -189,6 +197,7 @@ impl Machine {
             disk: Disk::default(),
             partition: None,
             reload: None,
+            booting: false,
             proc: None,
         }
     }
@@ -223,6 +232,10 @@ struct Process {
     timers: BTreeMap<Slot, (u64, Timer, u64)>,
     next_ordinal: u64,
     replicas: BTreeMap<(String, Epoch), Replica>,
+    /// Fleet-confirmed writes of an epoch that ended without its final
+    /// upload (`dirty_tails`). The bundle loop still flushes them, and the
+    /// cell's next activation here folds them into the bucket first.
+    tails: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// When the last upload on this process landed, on its monotonic clock:
     /// production's `node_proof_ms`.
     node_proof_ms: u64,
@@ -244,6 +257,8 @@ struct Process {
     /// anything last used the cell here: for the watched properties.
     runtime_generations: BTreeMap<String, u64>,
     touched: BTreeMap<String, Time>,
+    /// The log this process leads, in the fleet posture.
+    log: Option<Log>,
 }
 
 impl Process {
@@ -257,6 +272,7 @@ impl Process {
             timers: BTreeMap::new(),
             next_ordinal: 0,
             replicas: BTreeMap::new(),
+            tails: BTreeMap::new(),
             node_proof_ms: 0,
             published: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -267,6 +283,7 @@ impl Process {
             alarms: ProcAlarms::default(),
             runtime_generations: BTreeMap::new(),
             touched: BTreeMap::new(),
+            log: None,
         }
     }
 }
@@ -395,6 +412,8 @@ pub struct World {
     /// Cells whose runtime a step stopped, for good: judged once the step
     /// is over, when every socket it closed has closed.
     stopped: Vec<(usize, String)>,
+    /// Every log session that opened, by its lease generation.
+    sessions: BTreeMap<String, Session>,
     panic: Option<String>,
 }
 
@@ -441,6 +460,7 @@ impl World {
             goals: Vec::new(),
             quiet_from: 0,
             stopped: Vec::new(),
+            sessions: BTreeMap::new(),
             panic: None,
         }
     }
@@ -592,6 +612,7 @@ impl World {
             Work::Handoff(work) => self.handoff_work(node, work),
             Work::Socket(work) => self.socket_work(node, work),
             Work::Alarm(work) => self.alarm_work(node, work),
+            Work::Log(work) => self.log_work(node, work),
         }
     }
 
@@ -602,6 +623,14 @@ impl World {
         if m.up() || m.retired {
             return;
         }
+        if self.recover_predecessor(node).is_err() {
+            // The boot waits until its predecessor's log is recovered.
+            self.machines[node].booting = true;
+            self.note(|| format!("boot n{node} waits for its predecessor's log"));
+            self.after(1_000, Item::Restart { node });
+            return;
+        }
+        self.machines[node].booting = false;
         // Large enough that a suspend can hold the clock back without it
         // ever reaching zero.
         let mono_base = self.net_rng.range(1_000_000_000, 2_000_000_000);
@@ -617,6 +646,7 @@ impl World {
             let (old, new) = (self.who_at(node, inc - 1), self.who(node));
             self.checker.reloaded(&old, &new);
         }
+        self.open_log(node);
         let spec = NodeLeaseSpec {
             addr: self.machines[node].name.clone(),
             peer_protocol: PEER_PROTOCOL,

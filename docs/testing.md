@@ -106,6 +106,27 @@ proven its current alarm durable and its ownership current.
 The simulated shell carries out every effect the core can return, and sends
 every event production sends, in its timed form.
 
+Half of the swarm seeds run the fleet posture (`CELLD_DURABILITY=fleet`,
+`--fleet`), modelled in `crates/sim/src/world/node_log.rs`:
+
+- Each process leads a log with up to two followers on other machines.
+  Each commit ships to them, and once both have confirmed it, the output gate
+  releases the response with no read of the owner record. The bucket gets the
+  writes every 2 s.
+- A cell epoch that ends without its final upload, after a reset or a fence,
+  keeps its confirmed writes as a tail. The tail is flushed with the rest, and
+  the cell's next activation on that process folds it into the bucket before
+  it restores.
+- Taking over a cell whose dead owner's log is not sealed, or restarting
+  after such a process, first recovers that log. Recovery seals every
+  follower that answers, so the dead leader can prove nothing more, and
+  uploads what they hold. A booting process answers for its follower disk
+  while it waits. A follower that does not answer makes recovery fail, to be
+  retried, unless its machine is gone for good. With no follower holding the
+  whole session, recovery declares a bounded loss, and the oracle forgets
+  what that loss covers.
+- A graceful exit whose writes are all in the bucket seals its own log.
+
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
 residency caps, the eviction policy, and which faults happen. The faults are
@@ -122,14 +143,16 @@ The checks, in `crates/sim/src/checks.rs`:
 - **local-without-runtime**: the core routed a request locally with no
   runtime published.
 - **ack-before-durable** and **read-before-durable**: a response left before
-  the bucket held every write its handler saw.
+  the bucket, or every follower of its node's log, held every write its
+  handler saw.
 - **lost-write**: a restore opened without an acknowledged write.
 - **torn-restore**: a restore opened with a state that no earlier database
   ever held, such as one with a hole or a reordering.
 - **late-ack**: a write was acknowledged after a later epoch had opened
   without it.
 - **unverified-ack**: a write was acknowledged with no read of the owner
-  record, naming this node at this epoch, since the bucket held the write.
+  record, naming this node at this epoch, since the bucket held the write,
+  and no fleet proof covered it.
 - **epoch-reused**: an ownership claim did not advance the cell's epoch.
 - **evicted-but-serving**: the core reported an eviction while the cell's
   runtime was still published.
@@ -181,16 +204,16 @@ The last three judge only once the fleet is quiet, and 15 s after the faults
 end, so that a bucket call lost just before the end has timed out. A planted
 bug makes each of the six fire. In 100,000 swarm seeds:
 
-- 157 seeds claimed during a preserve, never during a drain. An eviction
+- 194 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
   cell, though `begin_preserve` retires cold work.
-- 75 seeds resumed a superseded epoch, 72 of them with faulty clocks. The
-  rest are the slow clean reload below, or a resume after a claim during a
-  preserve.
+- 48 seeds resumed a superseded epoch: after faulty clocks, the slow clean
+  reload below, or a claim during a preserve.
 
-The simulator does not yet model V8, the fleet log and fleet proofs, eviction
-snapshots, memory pressure, or the waker election (the lowest live node
-stands in for it).
+The simulator does not yet model V8, eviction snapshots, memory pressure, the
+waker election (the lowest live node stands in for it), or, in the fleet log,
+bundles, the recovery claim, and reconfiguring a session when a follower dies
+(its acks fall back to the bucket).
 
 The core on `main` fails some seeds.
 
@@ -211,7 +234,12 @@ The core on `main` fails some seeds.
   after the old lease expired, a peer may already have taken a cell over
   at a newer epoch, and the replacement serves reads from the old one.
   One seed in 100,000 (swarm 30084) needs no clock fault for this; the
-  suite's seeds do not hit it, so one that did would fail.
+  suite's seeds do not hit it, so one that did would fail. In the fleet
+  posture it loses writes too (**late-ack**, **lost-write**): a fleet proof
+  needs no read of the owner record, so the replacement acknowledges writes
+  at the superseded epoch. A peer that read the predecessor's sealed lease
+  takes the cell over without recovering the replacement's log (swarm
+  55461, 56900, 79978).
 - **Eleven `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.
@@ -243,12 +271,15 @@ The core on `main` fails some seeds.
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-In 100,000 swarm seeds, 13,321 failed in a debug build: 12,673 on the
-invariants (5,035 of them on live transports, 4,069 on alarms firing while
-not resident), 609 on stale reads and 39 on liveness. With validation
-compiled out, 989 failed: 749 on stale reads, 194 on `evicted-pinned` (the
-core goes on to evict a cell whose live transport the invariant would have
-caught) and 46 on liveness. The test suite allows only the known failures,
+In 100,000 swarm seeds, 9,709 failed in a debug build: 9,254 on the
+invariants (3,010 of them on live transports, 2,487 on alarms firing while
+not resident), 419 on stale reads, 33 on liveness, and 3 on the fleet
+posture's slow clean reload. With validation compiled out, 637 failed: 494
+on stale reads, 99 on `evicted-pinned` (the core goes on to evict a cell
+whose live transport the invariant would have caught), 40 on liveness, and 4
+on lost or late acks. One of those (swarm 54632) is not yet traced: the core
+claims a cell at a new epoch while its restore of the previous one is still
+in flight, and a clean reload later resumes the older database. The test suite allows only the known failures,
 by name.
 
 ```

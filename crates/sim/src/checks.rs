@@ -72,6 +72,13 @@ pub struct Checker {
     /// The last instant a process's ownership read found the record naming
     /// it at a cell epoch: (process, cell, epoch).
     verified_at: BTreeMap<(String, String, Epoch), u64>,
+    /// The longest database of each cell epoch each follower ever fsynced
+    /// for a leader process: (leader, follower, cell, epoch).
+    fsynced: BTreeMap<(String, usize, String, Epoch), usize>,
+    /// How much of each cell epoch a process's fleet proved: every follower
+    /// of its log had fsynced that many writes when the proof was given.
+    /// (process, cell, epoch).
+    fleet_proven: BTreeMap<(String, String, Epoch), usize>,
     pub violations: Vec<Violation>,
     /// Hits on watched properties, the first per kind and subject.
     pub watched: Vec<Violation>,
@@ -192,6 +199,76 @@ impl Checker {
                 "{who} keeps outbound socket {websocket} of {cell} open after its runtime stopped"
             ),
         );
+    }
+
+    /// A follower fsynced `len` writes of a cell epoch for leader `who`.
+    pub fn follower_fsynced(
+        &mut self,
+        who: &str,
+        follower: usize,
+        cell: &str,
+        epoch: Epoch,
+        len: usize,
+    ) {
+        let key = (who.to_string(), follower, cell.to_string(), epoch);
+        let entry = self.fsynced.entry(key).or_default();
+        *entry = (*entry).max(len);
+    }
+
+    /// The fleet proved part of a cell epoch durable for process `who`,
+    /// whose log follows `ensemble`: what every member fsynced. A write
+    /// proved this way needs no ownership read, because recovery seals a
+    /// follower before any takeover restores the cell.
+    pub fn fleet_proof(&mut self, who: &str, cell: &str, epoch: Epoch, ensemble: &[usize]) {
+        let proven = ensemble
+            .iter()
+            .map(|&f| {
+                let key = (who.to_string(), f, cell.to_string(), epoch);
+                self.fsynced.get(&key).copied().unwrap_or(0)
+            })
+            .min()
+            .unwrap_or(0);
+        let key = (who.to_string(), cell.to_string(), epoch);
+        let entry = self.fleet_proven.entry(key).or_default();
+        *entry = (*entry).max(proven);
+    }
+
+    /// Whether `who`'s fleet proved the first `len` writes of a cell epoch.
+    fn fleet_covers(&self, who: &str, cell: &str, epoch: Epoch, len: u64) -> bool {
+        let key = (who.to_string(), cell.to_string(), epoch);
+        self.fleet_proven
+            .get(&key)
+            .is_some_and(|proven| *proven as u64 >= len)
+    }
+
+    /// Recovery found every follower of `who`'s log gone with its disk and
+    /// declared a bounded loss, as production may: the writes its fleet
+    /// alone proved are gone. Forget the acknowledged ones the bucket does
+    /// not hold, so no later check expects them. Returns how many.
+    pub fn declare_loss(&mut self, t: u64, who: &str, store: &Store) -> u64 {
+        let proven: BTreeSet<(String, Epoch)> = self
+            .fleet_proven
+            .keys()
+            .filter(|(w, _, _)| w == who)
+            .map(|(_, cell, epoch)| (cell.clone(), *epoch))
+            .collect();
+        let lost: Vec<(String, Epoch, WriteId)> = self
+            .acked
+            .iter()
+            .filter(|(cell, epoch, write)| {
+                proven.contains(&(cell.clone(), *epoch))
+                    && !store.prefix(cell, *epoch).contains(write)
+            })
+            .cloned()
+            .collect();
+        for (cell, epoch, write) in &lost {
+            self.acked.remove(&(cell.clone(), *epoch, *write));
+            if let Some(acks) = self.acked_at.get_mut(cell) {
+                acks.retain(|(_, w)| w != write);
+            }
+        }
+        let _ = t;
+        lost.len() as u64
     }
 
     /// An owner compare-and-swap applied at the bucket. Recorded when it
@@ -426,7 +503,7 @@ impl Checker {
                 .get(&(who.to_string(), cell.to_string(), epoch))
                 .copied();
             let fresh = matches!((durable_since, read), (Some(d), Some(r)) if r >= d);
-            if !fresh {
+            if !fresh && !self.fleet_covers(who, cell, epoch, position) {
                 self.violation(
                     t,
                     "unverified-ack",
@@ -439,8 +516,10 @@ impl Checker {
             }
         }
         let durable = store.durable_len(cell, epoch) as u64;
+        // Durable in the bucket, or on every follower of the process's log.
+        let fleet = self.fleet_covers(who, cell, epoch, saw);
         let Some((write, position)) = committed else {
-            if durable < saw {
+            if durable < saw && !fleet {
                 self.violation(
                     t,
                     "read-before-durable",
@@ -454,7 +533,7 @@ impl Checker {
         };
         let prefix = store.prefix(cell, epoch);
         let at = position.checked_sub(1).and_then(|i| prefix.get(i as usize));
-        if at != Some(&write) || durable < saw {
+        if (at != Some(&write) || durable < saw) && !fleet {
             self.violation(
                 t,
                 "ack-before-durable",
