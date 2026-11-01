@@ -375,6 +375,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::SkipLogRecovery => &["lost-write"],
             Mutation::FollowerIgnoresSeal => &["late-ack"],
             Mutation::ErrorsBypassGate => &["read-before-durable"],
+            Mutation::FollowerCorrupts => &["unverified-ack"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -387,7 +388,9 @@ fn every_planted_bug_is_caught_by_its_check() {
                 ..SimConfig::calm()
             },
             // Only the fleet posture has a log to recover or seal.
-            Mutation::SkipLogRecovery | Mutation::FollowerIgnoresSeal => SimConfig {
+            Mutation::SkipLogRecovery
+            | Mutation::FollowerIgnoresSeal
+            | Mutation::FollowerCorrupts => SimConfig {
                 fleet: true,
                 ..crashing_and_pausing()
             },

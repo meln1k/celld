@@ -655,8 +655,6 @@ impl World {
             if let Some(log) = self.machines[node].proc_mut().log.as_mut() {
                 log.proved = true;
             }
-            let (who, ensemble) = (self.who(node), self.ensemble(node));
-            self.checker.fleet_proof(&who, cell, epoch, &ensemble);
         }
         let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
             return;

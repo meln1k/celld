@@ -163,6 +163,10 @@ pub enum Mutation {
     /// The shell never tells the core about a cell's alarm: every report
     /// and every restore says there is none. Caught by `alarm-not-fired`.
     AlarmsUnreported,
+    /// A follower confirms as many writes as it was sent, but fsyncs a
+    /// different last write. Caught by `unverified-ack`, which compares
+    /// what the fleet holds write for write, not only its length.
+    FollowerCorrupts,
     /// A handler's error answer goes straight to its client, past the
     /// output gate, as it did before `FailedInTurn`. Caught by
     /// `read-before-durable`.
@@ -185,7 +189,7 @@ pub enum Mutation {
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 18] = [
+    pub const ALL: [Mutation; 19] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -204,6 +208,7 @@ impl Mutation {
         Mutation::SkipLogRecovery,
         Mutation::FollowerIgnoresSeal,
         Mutation::ErrorsBypassGate,
+        Mutation::FollowerCorrupts,
     ];
 }
 

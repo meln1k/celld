@@ -217,6 +217,8 @@ impl World {
             ensemble: ensemble.clone(),
         };
         self.sessions.insert(session.clone(), entry);
+        let who = self.who(node);
+        self.checker.log_opened(&who, &ensemble);
         self.machines[node].proc_mut().log = Some(Log {
             session,
             ensemble,
@@ -338,11 +340,15 @@ impl World {
             .or_default();
         if content.len() > copy.len() {
             *copy = content;
+            if self.config.mutation == Some(Mutation::FollowerCorrupts) {
+                *copy.last_mut().expect("longer than empty") += 1_000_000;
+            }
         }
-        let len = copy.len();
+        let held = copy.clone();
+        let len = held.len();
         let leader_who = self.who_at(leader.0, leader.1);
         self.checker
-            .follower_fsynced(&leader_who, node, &cell, epoch, len);
+            .follower_fsynced(&leader_who, node, &cell, epoch, &held);
         let work = Work::Log(LogWork::Confirmed {
             follower: node,
             cell,
@@ -388,12 +394,6 @@ impl World {
             .min()
             .unwrap_or(0);
         self.fleet_reached(node, &cell, epoch, fleet);
-    }
-
-    /// The followers of this process's log.
-    pub(super) fn ensemble(&self, node: usize) -> Vec<usize> {
-        let log = self.machines[node].proc().log.as_ref();
-        log.map_or_else(Vec::new, |log| log.ensemble.clone())
     }
 
     /// `RecoverNodeLog`, at the instant it reaches the bucket and the
@@ -454,7 +454,7 @@ impl World {
         }
         if !witnessed {
             // Every follower is gone with its disk: declare the bounded loss.
-            let lost = self.checker.declare_loss(self.t, &dead, &self.store);
+            let lost = self.checker.declare_loss(&dead, &self.store);
             self.stats.fleet_losses += lost;
         }
         let mut gathered: BTreeMap<(String, Epoch), Vec<WriteId>> = BTreeMap::new();
