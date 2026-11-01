@@ -261,6 +261,7 @@ impl World {
                 cause,
                 bounded,
             } => {
+                self.alarm_gates_closed(node, &cell, epoch);
                 let evict = matches!(cause, StopCause::Evict { .. });
                 if evict {
                     self.judge_eviction(node, &cell, epoch);
@@ -326,7 +327,10 @@ impl World {
                 cell,
                 epoch,
                 position,
-            } => self.await_durable(node, op, &cell, epoch, position),
+            } => {
+                self.alarm_gate_opened(node, op, &cell, epoch, position);
+                self.await_durable(node, op, &cell, epoch, position)
+            }
             Effect::EnsureDurable {
                 op, cell, epoch, ..
             } => self.ensure_durable(node, op, &cell, epoch),
@@ -488,6 +492,7 @@ impl World {
         self.store.put(cell, epoch, content);
         let held = self.store.prefix(cell, epoch).len();
         self.checker.prefix_grew(self.t, cell, epoch, held);
+        self.judge_discoverable(cell);
     }
 
     /// Draw the fate of one call: its latencies, then the faults that
@@ -751,6 +756,7 @@ impl World {
                 {
                     self.store.retire_wake(&cell, retirement);
                 }
+                self.judge_discoverable(&cell);
                 Work::Alarm(AlarmWork::Maintained {
                     cell,
                     alarm,

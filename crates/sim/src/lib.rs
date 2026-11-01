@@ -503,10 +503,11 @@ pub struct Stats {
     /// Worker requests, and those that ran in a resident cell's isolate.
     pub workers: u64,
     pub workers_resident: u64,
-    /// Alarms handlers set, alarms that fired and were consumed, and the
-    /// wake hints scans sent.
+    /// Alarms handlers set, alarms that fired and were consumed, handler
+    /// commits the gate proved, and the wake hints scans sent.
     pub alarms_set: u64,
     pub alarms_fired: u64,
+    pub alarms_proven: u64,
     pub wake_hints: u64,
     /// Durability proofs the fleet gave, logs recovered after their leader
     /// died, and acknowledged writes lost to a declared bounded loss: every

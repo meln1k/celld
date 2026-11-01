@@ -327,6 +327,7 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         faulted.sockets += outcome.stats.sockets;
         faulted.deploys += outcome.stats.deploys;
         faulted.alarms_fired += outcome.stats.alarms_fired;
+        faulted.alarms_proven += outcome.stats.alarms_proven;
         faulted.wake_hints += outcome.stats.wake_hints;
         faulted.shedding_samples += outcome.stats.shedding_samples;
         faulted.errors += outcome.stats.errors;
@@ -354,6 +355,12 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.sockets > 20, "{faulted:?}");
     assert!(faulted.deploys > 20, "{faulted:?}");
     assert!(faulted.alarms_fired > 100, "{faulted:?}");
+    // Most handler commits were proven, so `lost-handler-write` had
+    // something to judge.
+    assert!(
+        faulted.alarms_proven * 2 > faulted.alarms_fired,
+        "{faulted:?}"
+    );
     assert!(faulted.wake_hints > 100, "{faulted:?}");
     assert!(faulted.shedding_samples > 100, "{faulted:?}");
     assert!(faulted.errors > 100, "{faulted:?}");

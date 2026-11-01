@@ -157,7 +157,7 @@ fn main() {
         "evictions asked {}, evicted {}, drains {}, cells handed off {}, preserves {}, \
          databases resumed {}, websockets {}\n\
          handler calls released {}, worker requests {} ({} on a resident), deploys {}\n\
-         alarms set {}, alarms fired {}, wake hints {}\n\
+         alarms set {}, alarms fired {} ({} proven), wake hints {}\n\
          fleet proofs {}, logs recovered {}, writes lost to a declared loss {}\n\
          load samples shedding on memory {}",
         stats.evictions,
@@ -173,6 +173,7 @@ fn main() {
         stats.deploys,
         stats.alarms_set,
         stats.alarms_fired,
+        stats.alarms_proven,
         stats.wake_hints,
         stats.fleet_proofs,
         stats.log_recoveries,

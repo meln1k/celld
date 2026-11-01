@@ -105,6 +105,28 @@ impl World {
         }
     }
 
+    /// Watched: the bucket changed under `cell`. If the alarm a restore
+    /// would load was set by a write whose handler answered its client, a
+    /// wake entry must still be due by its time.
+    pub(super) fn judge_discoverable(&mut self, cell: &str) {
+        let Some((epoch, content)) = self.store.newest(cell) else {
+            return;
+        };
+        let Some(at_ms) = self.alarm_of(content, epoch).at_ms() else {
+            return;
+        };
+        let set_by = content
+            .iter()
+            .rev()
+            .find(|w| self.alarm_writes.contains_key(w))
+            .copied()
+            .expect("armed");
+        if self.checker.answered(cell, set_by) && !self.store.wake_covers(cell, at_ms) {
+            self.checker
+                .alarm_undiscoverable(self.t, cell, set_by, at_ms);
+        }
+    }
+
     /// Watched: a draining node claims nothing new. Reclaiming a cell the
     /// record named this node for is not new ownership.
     pub(super) fn judge_claim(

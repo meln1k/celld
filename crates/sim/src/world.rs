@@ -816,6 +816,7 @@ impl World {
             }
             shell::stamp(&mut event, self.wall(node), self.mono(node));
             self.record(node, "<-", &event);
+            self.alarm_gate_answered(node, &event);
             self.stats.events += 1;
             let before = self.phases(node);
             let effects = on_event(&mut self.machines[node].proc_mut().state, event);

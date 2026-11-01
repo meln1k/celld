@@ -61,6 +61,10 @@ pub struct Checker {
     opened: BTreeMap<(String, Epoch), BTreeSet<WriteId>>,
     /// Every write a client was told succeeded: (cell, epoch, write).
     acked: BTreeSet<(String, Epoch, WriteId)>,
+    /// Every alarm handler's commit the output gate proved: (cell, epoch,
+    /// write). No client hears of it, but the core acts on it as durable:
+    /// it settles the alarm, and deletes the consumed alarm's wake entry.
+    handler_proven: BTreeSet<(String, Epoch, WriteId)>,
     /// The acknowledged writes whose handler's own answer told its client:
     /// (cell, write). Only the answer waits for the arm gate.
     answered: BTreeSet<(String, WriteId)>,
@@ -123,6 +127,60 @@ impl Checker {
     /// succeeded. A `fetch()` the handler made may have revealed it sooner.
     pub fn answered(&self, cell: &str, write: WriteId) -> bool {
         self.answered.contains(&(cell.to_string(), write))
+    }
+
+    /// The output gate proved alarm handler `who`'s commit `write`: through
+    /// the fleet, or through the bucket and an ownership read.
+    pub fn handler_commit_proven(
+        &mut self,
+        store: &Store,
+        who: &str,
+        cell: &str,
+        epoch: Epoch,
+        write: WriteId,
+        fleet: bool,
+    ) {
+        self.handler_proven.insert((cell.to_string(), epoch, write));
+        if fleet && !store.prefix(cell, epoch).contains(&write) {
+            let key = (who.to_string(), cell.to_string(), epoch, write);
+            self.fleet_acked.insert(key);
+        }
+    }
+
+    /// Watched: **an acknowledged alarm stays discoverable.** Cleanup
+    /// deletes only older installations or a proven consumed one, and
+    /// retires an armed one only behind a confirmed replacement
+    /// (`docs/guarantees.md`). So whenever the alarm a restore would load
+    /// was set by a write whose handler answered its client, a wake entry
+    /// due by its time stands in the bucket.
+    pub fn alarm_undiscoverable(&mut self, t: u64, cell: &str, write: WriteId, at_ms: i64) {
+        self.watch(
+            t,
+            "alarm-undiscoverable",
+            format!("{cell} {write}"),
+            format!(
+                "{cell}'s durable alarm at {at_ms}, set by acknowledged write {write}, has no \
+                 wake entry due by then"
+            ),
+        );
+    }
+
+    /// Watched: **a handoff ends at a claim.** A peer answers a donor that
+    /// it accepted a cell only once its own node's claim installed the
+    /// epoch it names. Owner records name nodes, so a restarted process
+    /// holds what an earlier process on its node claimed.
+    pub fn handoff_accepted(&mut self, t: u64, who: &str, node: &str, cell: &str, epoch: Epoch) {
+        let key = (cell.to_string(), epoch, node.to_string());
+        if !self.claims.contains(&key) {
+            self.watch(
+                t,
+                "unclaimed-handoff",
+                format!("{who} {cell} {epoch}"),
+                format!(
+                    "{who} accepted a handoff of {cell} at epoch {epoch} without {node}'s claim"
+                ),
+            );
+        }
     }
 
     /// Watched: **a resume never follows a takeover.** A clean reload opens
@@ -278,6 +336,7 @@ impl Checker {
             .collect();
         for (cell, epoch, write) in &lost {
             self.acked.remove(&(cell.clone(), *epoch, *write));
+            self.handler_proven.remove(&(cell.clone(), *epoch, *write));
             if let Some(acks) = self.acked_at.get_mut(cell) {
                 acks.retain(|(_, w)| w != write);
             }
@@ -645,6 +704,27 @@ impl Checker {
                 format!(
                     "{node} opened {cell} epoch {epoch} without {} acknowledged write(s), \
                      first {first}",
+                    lost.len()
+                ),
+            );
+        }
+        // Watched: **no proven alarm commit is lost** either. Losing one
+        // runs the handler again, or brings back an alarm whose wake entry
+        // the core already deleted.
+        let lost: Vec<WriteId> = self
+            .handler_proven
+            .range((cell.to_string(), 0, 0)..=(cell.to_string(), epoch, WriteId::MAX))
+            .map(|(_, _, write)| *write)
+            .filter(|write| !content.contains(write))
+            .collect();
+        if let Some(first) = lost.first() {
+            self.watch(
+                t,
+                "lost-handler-write",
+                format!("{cell} {epoch}"),
+                format!(
+                    "{node} opened {cell} epoch {epoch} without {} proven alarm handler \
+                     write(s), first {first}",
                     lost.len()
                 ),
             );

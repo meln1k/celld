@@ -273,6 +273,10 @@ impl World {
     /// `accept_handoff` does with `Message::CancelRoute`.
     fn finish_offer(&mut self, node: usize, request: RequestId, answer: Answer) {
         let offer = self.machines[node].proc_mut().take_offer(request).unwrap();
+        if let Answer::Accepted(adopted) = &answer {
+            let (who, name) = (self.who(node), self.machines[node].name.clone());
+            (self.checker).handoff_accepted(self.t, &who, &name, &offer.cell, adopted.epoch);
+        }
         let delay = self.net_rng.range(1, 5);
         self.answer_offer(offer, answer, delay);
         let delay = self.net_rng.range(0, 3);

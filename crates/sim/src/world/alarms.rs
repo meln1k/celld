@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use celld_logic::wake::{
     elected_hint_needed, AlarmSnapshot, AlarmSource, PublicationId, Retirement,
 };
-use celld_logic::{Epoch, Event, Failure, OpId, RequestId, WakeHintScope};
+use celld_logic::{Epoch, Event, Failure, OpId, ProofSource, RequestId, Timer, WakeHintScope};
 
 use super::shell::StoreReq;
 use super::{Work, World};
@@ -62,6 +62,10 @@ pub(super) struct ProcAlarms {
     /// Alarm handlers that re-armed and finished, whose reply waits on its
     /// arm gate: the cell, the epoch, the alarm and the write's position.
     held: BTreeMap<OpId, (String, Epoch, AlarmSnapshot, u64)>,
+    /// Handler commits whose gate has not opened yet, by cell, epoch and
+    /// position; and the gates proving them, by the gate's op.
+    commits: BTreeMap<(String, Epoch, u64), WriteId>,
+    proving: BTreeMap<OpId, (String, Epoch, u64, WriteId)>,
 }
 
 /// Whose reply an arm gate holds.
@@ -382,6 +386,10 @@ impl World {
                     let (write, position) = self
                         .commit_write(node, &cell, epoch)
                         .expect("open database");
+                    let alarms = &mut self.machines[node].proc_mut().alarms;
+                    alarms
+                        .commits
+                        .insert((cell.clone(), epoch, position), write);
                     let gate = Waiter::Alarm(op);
                     let (alarm, gated) = self.alarm_written(node, &cell, epoch, write, rearm, gate);
                     let alarm = self.reported(alarm);
@@ -410,6 +418,72 @@ impl World {
             result,
         };
         self.drive(node, event);
+    }
+
+    /// `AwaitDurable`: if it proves a handler's commit, follow the gate.
+    pub(super) fn alarm_gate_opened(
+        &mut self,
+        node: usize,
+        op: OpId,
+        cell: &str,
+        epoch: Epoch,
+        position: u64,
+    ) {
+        let alarms = &mut self.machines[node].proc_mut().alarms;
+        if let Some(write) = alarms.commits.remove(&(cell.to_string(), epoch, position)) {
+            let gate = (cell.to_string(), epoch, position, write);
+            alarms.proving.insert(op, gate);
+        }
+    }
+
+    /// The core is about to take `event`. If it settles a handler
+    /// commit's gate, as `settle_gate` does, tell the oracle whether the
+    /// commit was proven: by the fleet, or by the bucket once the ownership
+    /// read confirms. A deadline fails it.
+    pub(super) fn alarm_gate_answered(&mut self, node: usize, event: &Event) {
+        let alarms = &self.machines[node].proc().alarms;
+        let (op, proven, fleet) = match event {
+            Event::DurableReached { op, result, source } => {
+                let Some((_, _, position, _)) = alarms.proving.get(op) else {
+                    return;
+                };
+                match result {
+                    Ok(durable) if durable >= position => match source {
+                        ProofSource::Fleet => (*op, true, true),
+                        // The ownership read decides.
+                        ProofSource::Bucket => return,
+                    },
+                    _ => (*op, false, false),
+                }
+            }
+            Event::OwnershipVerified { op, result } => (*op, result.is_ok(), false),
+            Event::TimerFired {
+                timer: Timer::OperationDeadline { op },
+                ..
+            } => (*op, false, false),
+            _ => return,
+        };
+        let alarms = &mut self.machines[node].proc_mut().alarms;
+        let Some((cell, epoch, _, write)) = alarms.proving.remove(&op) else {
+            return;
+        };
+        if proven {
+            self.stats.alarms_proven += 1;
+            let who = self.who(node);
+            (self.checker).handler_commit_proven(&self.store, &who, &cell, epoch, write, fleet);
+        }
+    }
+
+    /// The runtime of `cell` at `epoch` stops here. Its handler commits'
+    /// gates can no longer be proven: the core settles them unproven.
+    pub(super) fn alarm_gates_closed(&mut self, node: usize, cell: &str, epoch: Epoch) {
+        let alarms = &mut self.machines[node].proc_mut().alarms;
+        alarms
+            .commits
+            .retain(|(c, e, _), _| c != cell || *e != epoch);
+        alarms
+            .proving
+            .retain(|_, (c, e, _, _)| c != cell || *e != epoch);
     }
 
     /// A handoff aborted the alarm handler before it ran to the end. One
