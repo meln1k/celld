@@ -17,6 +17,8 @@
 //! `celld_logic::routing::Dispatcher`.
 
 use celld_logic::routing::{Attempt, Dispatcher};
+use std::collections::VecDeque;
+
 use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route};
 
 use super::faults::Partition;
@@ -27,9 +29,11 @@ use crate::{Mutation, WriteId};
 /// leases first; a request before that is refused, which proves nothing.
 const CLIENTS_START_MS: u64 = 200;
 /// When clients stop, so that requests in flight can finish before the end.
-const CLIENTS_STOP_BEFORE_END_MS: u64 = 2_000;
+pub(super) const CLIENTS_STOP_BEFORE_END_MS: u64 = 2_000;
 /// How long the ingress paces a retry after a capacity candidate refused.
 const CAPACITY_REFUSED_WAIT_MS: u64 = 25;
+/// The longest a client that gives up waits first.
+const MAX_PATIENCE_MS: u64 = 500;
 /// How long a forward waits to connect before giving up
 /// (`PEER_CONNECT_TIMEOUT` in `machine.rs`).
 const PEER_CONNECT_TIMEOUT_MS: u64 = 3_000;
@@ -239,6 +243,10 @@ impl World {
             sent_at: self.t,
         };
         self.ops.insert(op, entry);
+        if goal.is_none() && self.work_rng.chance(self.config.cancel_probability) {
+            let patience = self.work_rng.range(1, MAX_PATIENCE_MS);
+            self.after(patience, Item::GiveUp { op });
+        }
         let delay = self.net_rng.range(1, 3);
         let via = Via::Client;
         self.after(
@@ -327,8 +335,14 @@ impl World {
         node: usize,
         request: RequestId,
         result: Result<Route, RequestError>,
+        immediate: &mut VecDeque<Event>,
     ) {
         let Some(req) = self.machines[node].proc().requests.get(&request) else {
+            // Its caller is gone. A local route nobody takes still holds the
+            // cell active, so production finishes the activity at once.
+            if result == Ok(Route::Local) {
+                immediate.push_back(Event::ActivityFinished { request });
+            }
             return;
         };
         let (op, via) = (req.op, req.via);
@@ -451,6 +465,40 @@ impl World {
             .collect();
         for op in lost {
             self.settle(op, false);
+            // Their forwards lose the connection back to the ingress.
+            self.cancel_routes(op);
+        }
+    }
+
+    /// The client stops waiting. Nobody is told the request worked, or
+    /// that it failed.
+    pub(super) fn give_up(&mut self, op: u64) {
+        if self.ops.remove(&op).is_some() {
+            self.stats.cancelled += 1;
+            self.cancel_routes(op);
+        }
+    }
+
+    /// The connection a request came in on is gone. Wherever it still
+    /// waits for a route, its route future is dropped, and its
+    /// `RouteCancelGuard` tells the core (`Message::CancelRoute`). A request
+    /// already running locally runs on: its handler answers nobody.
+    fn cancel_routes(&mut self, op: u64) {
+        for node in 0..self.machines.len() {
+            let Some(p) = self.machines[node].proc.as_mut() else {
+                continue;
+            };
+            let waiting: Vec<RequestId> = p
+                .requests
+                .iter()
+                .filter(|(_, req)| req.op == op && req.epoch.is_none())
+                .map(|(request, _)| *request)
+                .collect();
+            for request in waiting {
+                self.machines[node].proc_mut().requests.remove(&request);
+                let delay = self.net_rng.range(0, 3);
+                self.deliver(node, delay, Event::Cancel { request });
+            }
         }
     }
 

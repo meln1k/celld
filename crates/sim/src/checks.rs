@@ -152,6 +152,18 @@ impl Checker {
         }
     }
 
+    /// **An eviction that evicted left nothing running.** When the core
+    /// tells an operator a cell was evicted, the node no longer serves it.
+    pub fn evicted(&mut self, t: u64, who: &str, cell: &str, serving: bool) {
+        if serving {
+            self.violation(
+                t,
+                "evicted-but-serving",
+                format!("{who} reported {cell} evicted with its runtime still published"),
+            );
+        }
+    }
+
     /// **Liveness.** Once faults have healed, the fleet must serve every
     /// cell before the deadline.
     pub fn unserved(&mut self, t: u64, phase: &str, cell: &str) {

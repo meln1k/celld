@@ -137,10 +137,17 @@ fn crashing_and_pausing() -> SimConfig {
     }
 }
 
-/// Two `State::validate` failures in this core, both fixed upstream on the
-/// `dst` branch (`ea471ee`, `e46a685`) but deliberately not here. A seed
-/// that hits one stops there; anything else is a new failure.
-const KNOWN_CORE_PANICS: [&str; 2] = ["has no owning slot", "left the owner read in Fenced"];
+/// Three `State::validate` failures in this core, deliberately not fixed
+/// here. The first two are fixed upstream on the `dst` branch (`ea471ee`,
+/// `e46a685`). The third is a cancel of the last request for a cell whose
+/// ownership a restarted node is still confirming: `cancel` drops the cell
+/// to `Inactive` without leaving the confirming set. A seed that hits one
+/// stops there; anything else is a new failure.
+const KNOWN_CORE_PANICS: [&str; 3] = [
+    "has no owning slot",
+    "left the owner read in Fenced",
+    "left the owner read in Inactive",
+];
 
 /// A clean read is released without reading the owner record, so it is
 /// only as fresh as its node's belief in its own lease. That belief rests on
@@ -221,6 +228,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::TornRestore => &["torn-restore"],
             Mutation::StaleEpoch => &["epoch-reused"],
             Mutation::SlowMonoClock => &["stale-read"],
+            Mutation::StaleRegistry => &["evicted-but-serving"],
         };
         let config = SimConfig {
             mutation: Some(mutation),

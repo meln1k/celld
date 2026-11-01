@@ -83,7 +83,9 @@ protocol variants verify that the checkers detect the faults.
 `celld-logic` cores in one thread, on one simulated clock, against one
 simulated bucket. A simulated shell carries out each effect the way
 `crates/celld/actor.rs` does. A cell is a scripted handler that can commit one
-write and answers through the output gate.
+write and answers through the output gate. Some clients give up before they
+hear back, an operator evicts cells by hand, and the log tier nudges node
+leases.
 
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
@@ -110,6 +112,8 @@ The checks, in `crates/sim/src/checks.rs`:
 - **unverified-ack**: a write was acknowledged with no read of the owner
   record, naming this node at this epoch, since the bucket held the write.
 - **epoch-reused**: an ownership claim did not advance the cell's epoch.
+- **evicted-but-serving**: the core reported an eviction while the cell's
+  runtime was still published.
 - **stale-read**: a response missed a write that a client had already been
   told succeeded when the request was sent.
 - **liveness**: once every fault is over, each cell takes a write within
@@ -138,8 +142,10 @@ The core on `main` fails some seeds.
   until a write fails its ownership read, 8 s later in one seed. A VM
   suspend, which `CLOCK_MONOTONIC` does not count, does the same. Writes
   stay safe.
-- **Two `State::validate` invariants:** `indexed cell op N has no owning
-  slot` and `confirming cell … left the owner read in Fenced`.
+- **Three `State::validate` invariants:** `indexed cell op N has no owning
+  slot`, `confirming cell … left the owner read in Fenced`, and the same in
+  `Inactive`. The last is a client giving up on the only request for a cell
+  that a restarted node is still confirming it owns.
 - **A capacity livelock.** A full fleet can pass an unowned cell between
   peers that are all at their residency cap, so the cell is never served.
 

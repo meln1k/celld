@@ -43,6 +43,10 @@ pub struct SimConfig {
     pub request_gap_ms: (u64, u64),
     /// Share of requests whose handler commits a write.
     pub write_probability: f64,
+    /// Share of requests whose client gives up before it hears back.
+    pub cancel_probability: f64,
+    /// What the operator and the rest of each node do unprompted.
+    pub operator: Operator,
     /// The core's residency cap: residents plus cells being activated.
     pub max_resident: usize,
     /// Cold activations one node runs at once.
@@ -100,10 +104,13 @@ pub enum Mutation {
     /// believes in its node lease long after peers think it expired. Caught
     /// by `stale-read`.
     SlowMonoClock,
+    /// An eviction stops the runtime but leaves it in the registry. Caught
+    /// by `evicted-but-serving`.
+    StaleRegistry,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 11] = [
+    pub const ALL: [Mutation; 12] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -115,7 +122,20 @@ impl Mutation {
         Mutation::TornRestore,
         Mutation::StaleEpoch,
         Mutation::SlowMonoClock,
+        Mutation::StaleRegistry,
     ];
+}
+
+/// What happens to a node besides its requests and its faults, and how
+/// often. Rates are per simulated minute across the whole fleet; zero turns
+/// one off.
+#[derive(Clone, Debug, Default)]
+pub struct Operator {
+    /// An operator asks a node to evict a cell (`POST /evict/<cell>`).
+    pub evictions: f64,
+    /// The node's log tier asks its core to renew the lease now
+    /// (`Message::NudgeNodeLease`).
+    pub nudges: f64,
 }
 
 /// What goes wrong, and how often. Rates are per simulated minute across
@@ -164,6 +184,11 @@ impl SimConfig {
             store_latency_ms: (2, 20),
             request_gap_ms: (5, 60),
             write_probability: 0.6,
+            cancel_probability: 0.0,
+            operator: Operator {
+                evictions: 30.0,
+                nudges: 6.0,
+            },
             max_resident: 4,
             max_activations: 4,
             sticky_eviction: false,
@@ -210,6 +235,7 @@ impl SimConfig {
                 store_spike_probability: 0.02,
                 store_spike_ms: 3_000,
             },
+            cancel_probability: 0.05,
             ..Self::crashing(3.0)
         }
     }
@@ -238,6 +264,9 @@ impl SimConfig {
             max_activations: r.range(1, 4) as usize,
             sticky_eviction: r.chance(0.5),
             idle_evict_ms: r.chance(0.3).then(|| r.range(500, 5_000)),
+            // Drawn last, so the draws above keep the shapes they had.
+            cancel_probability: *r.pick(&[0.0, 0.02, 0.1]).unwrap(),
+            operator: Operator::draw(r),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
         }
@@ -278,6 +307,25 @@ impl Faults {
     }
 }
 
+impl Operator {
+    /// An operator for one swarm seed: each act on in about half the
+    /// seeds, at a drawn rate.
+    fn draw(r: &mut Rng) -> Self {
+        let mut maybe = |lo: u64, hi: u64| {
+            let rate = r.range(lo, hi) as f64;
+            if r.chance(0.5) {
+                rate
+            } else {
+                0.0
+            }
+        };
+        Self {
+            evictions: maybe(1, 30),
+            nudges: maybe(1, 30),
+        }
+    }
+}
+
 /// Counts of what a run did. A check that never had anything to look at
 /// proves nothing, so the tests read these too.
 #[derive(Clone, Debug, Default)]
@@ -288,6 +336,8 @@ pub struct Stats {
     pub answered: u64,
     /// Requests the core refused, or whose response it refused to release.
     pub failed: u64,
+    /// Requests whose client gave up first.
+    pub cancelled: u64,
     /// Writes a client was told succeeded.
     pub acked_writes: u64,
     /// Requests an ingress forwarded to another node.
@@ -302,6 +352,9 @@ pub struct Stats {
     /// Databases restored from the bucket: each one is checked for lost
     /// writes.
     pub restored: u64,
+    /// Evictions an operator asked for, and those that evicted.
+    pub evictions: u64,
+    pub evicted: u64,
 }
 
 /// What a run produced.

@@ -15,6 +15,7 @@
 //!   the durability proofs, as `ltx_repl.rs` does.
 //! - `clients`: the workload and the scripted handler that serves it.
 //! - `faults`: what goes wrong, and the supervisor that restarts a node.
+//! - `operator`: what an operator and the rest of a node do unprompted.
 //! - `liveness`: the probe and the audit that end every run.
 //!
 //! A node is a [`Machine`] with a disk. The [`Process`] on it can die and
@@ -26,6 +27,7 @@
 mod clients;
 mod faults;
 mod liveness;
+mod operator;
 mod replicator;
 mod shell;
 
@@ -45,6 +47,7 @@ use crate::{Mutation, Outcome, Rng, SimConfig, Stats, WriteId};
 use clients::{Bounce, Op, Req, Via};
 use faults::{Fault, Partition};
 use liveness::Goal;
+use operator::Act;
 use replicator::{Disk, Replica};
 use shell::{Slot, StoreReq};
 
@@ -76,6 +79,8 @@ enum Item {
     },
     /// A client sends its next request.
     ClientNew,
+    /// A client stops waiting for its request.
+    GiveUp { op: u64 },
     /// A request reaches a node: from its client, or forwarded by the
     /// ingress. Not tied to a process: it reaches whichever
     /// process runs on the node by then, or none.
@@ -84,6 +89,8 @@ enum Item {
     Bounced { op: u64, why: Bounce },
     /// The next fault of this kind.
     Fault(Fault),
+    /// The next act of this kind.
+    Operator(Act),
     /// The supervisor starts a new process on the node.
     Restart { node: usize },
     /// A paused process runs again.
@@ -138,6 +145,10 @@ enum Work {
     HandlerEnd { request: RequestId },
     /// The ingress resolves a forwarded request's route again.
     Redispatch { op: u64 },
+    /// An operator's eviction reaches the core.
+    Evict { cell: String },
+    /// The log tier asks the core to renew its lease now.
+    Nudge,
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -207,6 +218,8 @@ struct Process {
     /// The runtime registry: cells this process serves, at which epoch.
     published: BTreeMap<String, Epoch>,
     requests: BTreeMap<RequestId, Req>,
+    /// Operator evictions the core has not answered yet, and their cells.
+    evictions: BTreeMap<RequestId, String>,
 }
 
 impl Process {
@@ -223,6 +236,7 @@ impl Process {
             node_proof_ms: 0,
             published: BTreeMap::new(),
             requests: BTreeMap::new(),
+            evictions: BTreeMap::new(),
         }
     }
 }
@@ -245,6 +259,7 @@ pub struct World {
     net_rng: Rng,
     work_rng: Rng,
     fault_rng: Rng,
+    op_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -264,6 +279,7 @@ impl World {
         let net_rng = master.fork();
         let work_rng = master.fork();
         let mut fault_rng = master.fork();
+        let op_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -287,6 +303,7 @@ impl World {
             net_rng,
             work_rng,
             fault_rng,
+            op_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             hash: Fnv(0xcbf2_9ce4_8422_2325),
@@ -350,6 +367,7 @@ impl World {
         }
         self.start_clients();
         self.start_faults();
+        self.start_operator();
         self.start_liveness();
         while let Some(((t, _), item)) = self.agenda.pop_first() {
             if matches!(item, Item::End) {
@@ -397,9 +415,11 @@ impl World {
                 answer_ms,
             } => self.store_apply(node, inc, req, answer_ms),
             Item::ClientNew => self.client_new(),
+            Item::GiveUp { op } => self.give_up(op),
             Item::Arrive { node, op, via } => self.arrive(node, op, via),
             Item::Bounced { op, why } => self.bounced(op, why),
             Item::Fault(fault) => self.fault(fault),
+            Item::Operator(act) => self.operator(act),
             Item::Restart { node } => self.restart(node),
             Item::Resume { node, inc } => self.resume(node, inc),
             Item::Heal { node, partition } => self.heal(node, partition),
@@ -428,6 +448,14 @@ impl World {
             Work::HandlerCommit { request } => self.handler_commit(node, request),
             Work::HandlerEnd { request } => self.handler_end(node, request),
             Work::Redispatch { op } => self.redispatch(op),
+            Work::Evict { cell } => self.evict(node, cell),
+            Work::Nudge => self.drive(
+                node,
+                Event::NudgeNodeLease {
+                    now_ms: 0,
+                    now_mono_ms: 0,
+                },
+            ),
         }
     }
 

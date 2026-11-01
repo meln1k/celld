@@ -87,10 +87,12 @@ fn main() {
         stats.events, outcome.trace_hash, outcome.authoritative, outcome.halts
     );
     println!(
-        "requests {}: answered {}, failed {}, writes acknowledged {}, forwarded {}, bounced {}",
+        "requests {}: answered {}, failed {}, cancelled {}, writes acknowledged {}, \
+         forwarded {}, bounced {}",
         stats.requests,
         stats.answered,
         stats.failed,
+        stats.cancelled,
         stats.acked_writes,
         stats.forwarded,
         stats.bounced
@@ -98,6 +100,10 @@ fn main() {
     println!(
         "crashes {}, pauses {}, partitions {}, bucket failures {}, restores from the bucket {}",
         stats.crashes, stats.pauses, stats.partitions, stats.store_failures, stats.restored
+    );
+    println!(
+        "evictions asked {}, evicted {}",
+        stats.evictions, stats.evicted
     );
     for v in &outcome.violations {
         println!("VIOLATION t={} {}: {}", v.at_ms, v.kind, v.detail);

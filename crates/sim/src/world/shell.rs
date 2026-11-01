@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 
 use celld_logic::{
-    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, Timer,
+    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, StopCause, Timer,
 };
 
 use super::faults::Partition;
@@ -208,7 +208,11 @@ impl World {
                 cause,
                 bounded,
             } => {
-                self.machines[node].proc_mut().published.remove(&cell);
+                let leak = matches!(cause, StopCause::Evict { .. })
+                    && self.config.mutation == Some(Mutation::StaleRegistry);
+                if !leak {
+                    self.machines[node].proc_mut().published.remove(&cell);
+                }
                 self.stop_runtime(node, op, cell, epoch, cause, bounded);
             }
             Effect::StartRuntime { op, cell, epoch } => {
@@ -241,7 +245,7 @@ impl World {
                 }
                 immediate.push_back(Event::Published { op, result: Ok(()) });
             }
-            Effect::Complete { request, result } => self.complete(node, request, result),
+            Effect::Complete { request, result } => self.complete(node, request, result, immediate),
             Effect::AwaitDurable {
                 op,
                 cell,
@@ -263,8 +267,12 @@ impl World {
                     result: Err(Failure::Definite),
                 });
             }
-            // An explicit eviction's caller; the simulation has none.
-            Effect::EvictionAdmission { .. } | Effect::EvictionFinished { .. } => {}
+            Effect::EvictionAdmission { request, result } => {
+                self.eviction_admitted(node, request, result)
+            }
+            Effect::EvictionFinished { request, result } => {
+                self.eviction_finished(node, request, result)
+            }
             Effect::VerifyOwnership { op, .. }
                 if self.config.mutation == Some(Mutation::BlindVerify) =>
             {
@@ -615,6 +623,10 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
             now_ms,
             now_mono_ms,
             ..
+        }
+        | Event::NudgeNodeLease {
+            now_ms,
+            now_mono_ms,
         } => {
             *now_ms = wall;
             *now_mono_ms = mono;
@@ -623,7 +635,8 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
         | Event::RequestAt { now_mono_ms, .. }
         | Event::CapacityRequestAt { now_mono_ms, .. }
         | Event::OutputAt { now_mono_ms, .. }
-        | Event::LoadSampled { now_mono_ms, .. } => *now_mono_ms = mono,
+        | Event::LoadSampled { now_mono_ms, .. }
+        | Event::EvictRequested { now_mono_ms, .. } => *now_mono_ms = mono,
         Event::OwnerRead { now_ms, .. } | Event::NodeLeaseRead { now_ms, .. } => *now_ms = wall,
         _ => {}
     }
