@@ -12,9 +12,9 @@
 //!   the bundle loop's tick, as one bundle of the session
 //!   (`log/<session>/bundle/<seq>`) for every open database with writes
 //!   past what the bucket covers. A bundle counts as durable for the gate
-//!   only if the lease still says the log is open once it lands
-//!   (`bundle_credit_allowed`): a fenced leader's late bundle proves
-//!   nothing. No restore reads bundles; a stop's final upload, a fold and a
+//!   only if the record is still open at its log epoch once it lands
+//!   (`bundle_credit_allowed`), and otherwise degrades its shipper: a
+//!   fenced leader's late bundle proves nothing. No restore reads bundles; a stop's final upload, a fold and a
 //!   recovery copy their rows into the per-cell prefixes.
 //! - When a node takes over a cell from a dead owner whose lease says its
 //!   log is not sealed, the core asks for `RecoverNodeLog` first. Recovery
@@ -47,16 +47,20 @@
 //!   one. Fold and recovery read the current epoch's members only.
 //!
 //! Not modelled: gray-failure eviction (`log_evict`'s latency verdicts and
-//! quarantine), the swap rate cap, compaction of bundle rows into per-cell
-//! objects, and bundle GC (bundles are never deleted).
+//! quarantine), the swap rate cap, recruiting a healthy log that runs below
+//! its width, reading peers' leases through a call that can fail (the
+//! reopen reads the bucket directly), compaction of bundle rows into
+//! per-cell objects, and bundle GC (bundles are never deleted).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use celld_logic::log_tier::LogState;
 use celld_logic::{Epoch, Event, Failure, OpId};
 
+use super::replicator::Tail;
 use super::shell::{Fate, StoreReq};
 use super::{shutdown, Item, Work, World, OPERATION_DEADLINE_MS};
+use crate::store::Row;
 use crate::{Mutation, WriteId};
 
 /// How often the bundle loop flushes to the bucket (`CELLD_LOG_FLUSH_MS`).
@@ -160,6 +164,18 @@ pub(super) enum Upload {
     Landed { stopping: bool },
 }
 
+/// How a bundle flush ended.
+pub(super) enum Flushed {
+    /// The PUT failed, or nobody knows whether it applied.
+    Failed,
+    /// It landed with the record still open at its log epoch: the rows,
+    /// each a cell epoch and its length, count for the gate.
+    Credited(Vec<(String, Epoch, usize)>),
+    /// It landed after the record moved under it: the shipper of
+    /// `log_epoch` degrades.
+    Refused { log_epoch: u64 },
+}
+
 pub(super) enum LogWork {
     /// A leader asks this follower to join its session.
     Join { session: String },
@@ -190,12 +206,8 @@ pub(super) enum LogWork {
     LeaseOpened(Event),
     /// The bundle loop's tick.
     Flush,
-    /// A bundle flush of these rows landed, or failed: only a `credited`
-    /// one covers them.
-    Bundled {
-        rows: Vec<(String, Epoch, usize)>,
-        credited: bool,
-    },
+    /// A bundle flush ended.
+    Bundled(Flushed),
     /// A frame's backstop ran out: every member must have confirmed it.
     Backstop { log_epoch: u64, frame: u64 },
     /// The degraded shipper's maintenance tick.
@@ -249,7 +261,7 @@ impl World {
             }
             LogWork::Flush => {
                 self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
-                let rows = self.bundle_rows(node);
+                let rows = self.flush_rows(node);
                 let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
                     return;
                 };
@@ -257,15 +269,26 @@ impl World {
                     return;
                 }
                 log.bundling = true;
-                let session = log.session.clone();
-                self.store_call(node, StoreReq::Bundle { session, rows });
+                let req = StoreReq::Bundle {
+                    session: log.session.clone(),
+                    log_epoch: log.epoch,
+                    rows,
+                };
+                self.store_call(node, req);
             }
-            LogWork::Bundled { rows, credited } => {
-                if let Some(log) = self.machines[node].proc_mut().log.as_mut() {
-                    log.bundling = false;
-                }
-                if credited {
-                    self.bundled(node, rows);
+            LogWork::Bundled(flushed) => {
+                let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+                    return;
+                };
+                log.bundling = false;
+                match flushed {
+                    Flushed::Failed => {}
+                    Flushed::Credited(rows) => self.bundled(node, rows),
+                    // Only the shipper that owned the flush's epoch.
+                    Flushed::Refused { log_epoch } if log_epoch == log.epoch => {
+                        self.degrade(node, "the record moved under a bundle flush");
+                    }
+                    Flushed::Refused { .. } => {}
                 }
             }
             LogWork::Recover {
@@ -568,23 +591,66 @@ impl World {
         let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
         };
+        // Frames restart at 1 in each log epoch: an earlier epoch's
+        // backstop leaves this one's frames alone.
+        if log.epoch != log_epoch {
+            return;
+        }
         let Some(confirmers) = log.pending.remove(&frame) else {
             return;
         };
         let session = log.session.clone();
-        if log.epoch != log_epoch || log.degraded {
+        if confirmers.len() < self.session(&session).ensemble.len() {
+            self.degrade(node, &format!("frame {frame} unconfirmed"));
+        }
+    }
+
+    /// Stop shipping: the gate rides the bundle loop until a reopen
+    /// (`degrade_shared`).
+    fn degrade(&mut self, node: usize, why: &str) {
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return;
+        };
+        if log.degraded {
             return;
         }
-        if confirmers.len() < self.session(&session).ensemble.len() {
-            self.note(|| format!("n{node} degrades {session} epoch {log_epoch}: frame {frame}"));
-            let log = self.machines[node]
-                .proc_mut()
-                .log
-                .as_mut()
-                .expect("checked");
-            log.degraded = true;
-            log.pending.clear();
-            self.work(node, MAINTAIN_MS, Work::Log(LogWork::Maintain));
+        log.degraded = true;
+        log.pending.clear();
+        let (session, epoch) = (log.session.clone(), log.epoch);
+        self.note(|| format!("n{node} degrades {session} epoch {epoch}: {why}"));
+        self.work(node, MAINTAIN_MS, Work::Log(LogWork::Maintain));
+    }
+
+    /// A bundle's PUT applies, and its rows are in the bucket whatever
+    /// follows. They count for the gate only if the record is still open
+    /// at the flush's log epoch (`bundle_credit_allowed`), and as held only
+    /// while a recovery can still drain them: once one has sealed the
+    /// session, no one lists its bundles again.
+    pub(super) fn apply_bundle(
+        &mut self,
+        name: &str,
+        session: &str,
+        log_epoch: u64,
+        rows: Vec<Row>,
+    ) -> Flushed {
+        let lens: Vec<_> = (rows.iter())
+            .map(|(cell, epoch, content)| (cell.clone(), *epoch, content.len()))
+            .collect();
+        let lease = self.store.read_lease(name);
+        let state = lease.filter(|lease| lease.generation == session);
+        let state = state.map(|lease| lease.log_state);
+        let drainable = state.is_some_and(|state| state != Some(LogState::Sealed));
+        self.store.put_bundle(session, rows, drainable);
+        for (cell, epoch, _) in &lens {
+            let held = self.store.held(cell, *epoch).len();
+            self.checker.prefix_grew(self.t, cell, *epoch, held);
+            self.judge_discoverable(cell);
+        }
+        let open = state == Some(Some(LogState::Open)) && self.session(session).epoch == log_epoch;
+        if open || self.config.mutation == Some(Mutation::CreditAfterSeal) {
+            Flushed::Credited(lens)
+        } else {
+            Flushed::Refused { log_epoch }
         }
     }
 
@@ -648,8 +714,7 @@ impl World {
             durable >= shipped.unwrap_or(0)
         };
         p.replicas.keys().all(|(cell, epoch)| tiered(cell, *epoch))
-            && (p.tails.iter())
-                .all(|((cell, epoch), tail)| self.store.durable_len(cell, *epoch) >= tail.len())
+            && p.tails.values().all(Tail::tiered)
     }
 
     /// The reopen's lease write applies: if the lease is still this
@@ -678,7 +743,13 @@ impl World {
 
     /// A reopen answered. If the record moved, install a shipper for its
     /// epoch and ensemble, and ship every open database to it.
+    ///
+    /// A failed answer is not the end of the write: production publishes
+    /// the record in memory and waits for any applied lease write to carry
+    /// it (`OwnLog::write`), so a lost response still succeeds. Read the
+    /// record back: if the write applied, it moved.
     fn reopened(&mut self, node: usize, record: Option<(u64, Vec<usize>)>) {
+        let record = record.or_else(|| self.applied_record(node));
         let who = self.who(node);
         let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
@@ -697,6 +768,18 @@ impl World {
         for (cell, epoch) in self.open_epochs(node) {
             self.ship(node, &cell, epoch);
         }
+    }
+
+    /// This process's record as the bucket has it, while its lease is
+    /// still this session's and open.
+    fn applied_record(&self, node: usize) -> Option<(u64, Vec<usize>)> {
+        let session = &self.machines[node].proc().log.as_ref()?.session;
+        let lease = self.store.read_lease(&self.machines[node].name)?;
+        if lease.generation != *session || lease.log_state != Some(LogState::Open) {
+            return None;
+        }
+        let entry = self.session(session);
+        Some((entry.epoch, entry.ensemble.clone()))
     }
 
     /// `RecoverNodeLog`, at the instant it reaches the bucket and the
@@ -828,7 +911,7 @@ impl World {
                 // A fragment that starts past what the bucket holds leaves
                 // a hole: its rows cannot be restored.
                 let from = m.disk.log.floors.get(key).copied().unwrap_or(0);
-                if self.store.prefix(c, *epoch).len() < from {
+                if self.store.held(c, *epoch).len() < from {
                     continue;
                 }
                 let longest = gathered.copies.entry((c.clone(), *epoch)).or_default();

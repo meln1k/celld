@@ -277,7 +277,7 @@ const KNOWN_CORE_PANICS: [&str; 11] = [
 ///
 /// - `stale-read`: a clean read trusts the node's belief in its lease,
 ///   which faulty clocks (a skew, a step, a suspend) or a slow clean reload
-///   break.
+///   break; or a restore lost an acknowledged write, and reads miss it.
 /// - `lost-write` and `late-ack`, in the fleet posture: after a slow clean
 ///   reload, a clock fault, or a failed tail fold that hands the cell away.
 /// - `liveness` and `alarm-not-fired`: a node whose memory walk-down wedged
@@ -294,16 +294,49 @@ const KNOWN_CORE_KINDS: [&str; 6] = [
     "evicted-pinned",
 ];
 
+/// The configuration a list line names.
+fn config_named(name: &str, seed: u64) -> SimConfig {
+    match name {
+        "swarm" => SimConfig::swarm(seed),
+        "chaos" => SimConfig::chaos(),
+        "true-clocks" => chaos_with_true_clocks(),
+        "crashes" => crashing_and_pausing(),
+        "crashes-fleet" => SimConfig {
+            fleet: true,
+            ..crashing_and_pausing()
+        },
+        _ => panic!("the list names an unknown configuration {name:?}"),
+    }
+}
+
 #[test]
 fn the_known_failures_are_known_core_bugs() {
     // Each listed failure must be one of the documented bugs: a new kind of
-    // failure is traced and described before it is listed.
+    // failure is traced and described before it is listed, and a known
+    // kind is listed only where its bug can happen.
     let known = KnownFailures::parse(KNOWN_FAILURES).expect("known-failures.txt");
-    for failure in known.failures() {
+    for (seed, name, failure) in known.failures() {
         let panic_known = (failure.panic.as_ref())
             .is_none_or(|panic| KNOWN_CORE_PANICS.iter().any(|bug| panic.contains(bug)));
         let kinds_known = (failure.kinds.iter()).all(|k| KNOWN_CORE_KINDS.contains(&k.as_str()));
-        assert!(panic_known && kinds_known, "{failure:?}");
+        assert!(panic_known && kinds_known, "{seed} {name}: {failure:?}");
+        let config = config_named(name, seed);
+        let faults = &config.faults;
+        let faulty_clocks = faults.max_skew_ms > 0
+            || faults.clock_steps > 0.0
+            || (faults.pauses > 0.0 && faults.suspend_probability > 0.0);
+        let clean_reloads = config.operator.deploys > 0.0 || config.operator.preserves > 0.0;
+        for kind in &failure.kinds {
+            let possible = match kind.as_str() {
+                "stale-read" => {
+                    faulty_clocks || clean_reloads || failure.kinds.contains("lost-write")
+                }
+                "lost-write" | "late-ack" => config.fleet,
+                "evicted-pinned" => !cfg!(debug_assertions),
+                _ => true,
+            };
+            assert!(possible, "{seed} {name}: {kind} cannot be a known bug here");
+        }
     }
 }
 
@@ -443,7 +476,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::StaleSnapshot => &["lost-write"],
             Mutation::GcUnlisted => &["base-deleted"],
             Mutation::CollectUnretired => &["alarm-undiscoverable"],
-            Mutation::CreditAfterSeal => &["lost-write"],
+            Mutation::CreditAfterSeal => &["read-before-durable"],
             Mutation::ReopenUntiered => &["lost-write"],
         };
         let base = match mutation {
@@ -533,22 +566,32 @@ fn every_planted_bug_is_caught_by_its_check() {
         };
         let config = SimConfig {
             mutation: Some(mutation),
-            ..base
+            ..base.clone()
+        };
+        // A watched property counts too: its bug shows it can fire.
+        let fired = |config: &SimConfig, seed: u64| -> Vec<&'static str> {
+            let outcome = run(seed, config);
+            let hits = outcome.violations.iter().chain(&outcome.watched);
+            hits.map(|v| v.kind).collect()
         };
         let mut missing: Vec<&str> = expected.to_vec();
         for seed in 0..20 {
-            let outcome = run(seed, &config);
-            // A watched property counts too: its bug shows it can fire.
-            let hits = outcome.violations.iter().chain(&outcome.watched);
-            let fired: Vec<&str> = hits.map(|v| v.kind).collect();
-            missing.retain(|kind| !fired.contains(kind));
+            let caught: Vec<&str> = (fired(&config, seed).into_iter())
+                .filter(|kind| missing.contains(kind))
+                .collect();
+            if caught.is_empty() {
+                continue;
+            }
+            // The bug did it only if the same seed without it does not.
+            let unplanted = fired(&base, seed);
+            missing.retain(|kind| !caught.contains(kind) || unplanted.contains(kind));
             if missing.is_empty() {
                 break;
             }
         }
         assert!(
             missing.is_empty(),
-            "{mutation:?}: {missing:?} never fired in 20 seeds"
+            "{mutation:?}: {missing:?} never fired in 20 seeds, on a seed it passes unplanted"
         );
     }
 }

@@ -13,11 +13,11 @@ use celld_logic::{
 use super::alarms::{AlarmWork, Waiter};
 use super::faults::Partition;
 use super::gc::GcReq;
-use super::node_log::LogWork;
+use super::node_log::{Flushed, LogWork};
 use super::replicator::ReplicaWork;
 use super::waker::WakerReq;
 use super::{Item, Pending, Work, World, WALL_EPOCH_MS};
-use crate::store::Load;
+use crate::store::{Load, Row};
 use crate::{Mutation, WriteId};
 
 /// The bucket client's timeout for one attempt (`bucket.rs`).
@@ -127,10 +127,11 @@ pub(super) enum StoreReq {
         epoch: Epoch,
         fold: bool,
     },
-    /// One flush of a session's bundle loop.
+    /// One flush of a session's bundle loop, at a log epoch.
     Bundle {
         session: String,
-        rows: Vec<(String, Epoch, Vec<WriteId>)>,
+        log_epoch: u64,
+        rows: Vec<Row>,
     },
     /// A degraded shipper's lease write that reopens its log at the epoch
     /// after `from` with `ensemble`.
@@ -512,7 +513,7 @@ impl World {
         self.checker.upload_applied(self.t, writer, cell, epoch);
         let at_ms = WALL_EPOCH_MS + self.t;
         self.store.put(cell, epoch, content, at_ms);
-        let held = self.store.prefix(cell, epoch).len();
+        let held = self.store.held(cell, epoch).len();
         self.checker.prefix_grew(self.t, cell, epoch, held);
         self.judge_discoverable(cell);
     }
@@ -628,10 +629,7 @@ impl World {
             StoreReq::Wake { gate: None, .. } => Work::Nothing,
             // The pass ends; the next tick starts another.
             StoreReq::Gc(_) => Work::Nothing,
-            StoreReq::Bundle { .. } => Work::Log(LogWork::Bundled {
-                rows: Vec::new(),
-                credited: false,
-            }),
+            StoreReq::Bundle { .. } => Work::Log(LogWork::Bundled(Flushed::Failed)),
             StoreReq::Reopen { .. } => Work::Log(LogWork::Reopened(None)),
             StoreReq::Waker(req) => World::waker_failed(req),
         }
@@ -768,39 +766,24 @@ impl World {
                 // `epoch_chain` lists every epoch and refuses a restore into
                 // an epoch some later writer already uploaded at: this
                 // claim was superseded before its restore got here.
-                _ if self.store.used_since(&cell, epoch) => core(Event::RestoreCompleted {
-                    op,
-                    result: Err(Failure::Definite),
-                }),
                 _ => Work::Replica(ReplicaWork::ChainRead {
                     op,
-                    chain: self.store.read_chain(&cell, epoch),
+                    chain: match self.store.used_since(&cell, epoch) {
+                        true => Err(Failure::Definite),
+                        false => Ok(self.store.read_chain(&cell, epoch)),
+                    },
                     cell,
                     epoch,
                 }),
             },
             StoreReq::Gc(req) => self.gc_apply(node, req),
-            StoreReq::Bundle { session, rows } => {
-                let lens: Vec<_> = (rows.iter())
-                    .map(|(cell, epoch, content)| (cell.clone(), *epoch, content.len()))
-                    .collect();
-                self.store.put_bundle(&session, rows);
-                for (cell, epoch, _) in &lens {
-                    let held = self.store.prefix(cell, *epoch).len();
-                    self.checker.prefix_grew(self.t, cell, *epoch, held);
-                    self.judge_discoverable(cell);
-                }
-                // The PUT applies whatever happens; its rows count only if
-                // the lease still says this session's log is open.
-                let credited = self.config.mutation == Some(Mutation::CreditAfterSeal)
-                    || self.store.read_lease(&name).is_some_and(|lease| {
-                        lease.generation == session && lease.log_state == Some(LogState::Open)
-                    });
-                Work::Log(LogWork::Bundled {
-                    rows: lens,
-                    credited,
-                })
-            }
+            StoreReq::Bundle {
+                session,
+                log_epoch,
+                rows,
+            } => Work::Log(LogWork::Bundled(
+                self.apply_bundle(&name, &session, log_epoch, rows),
+            )),
             StoreReq::Reopen {
                 session,
                 from,

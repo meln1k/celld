@@ -104,10 +104,7 @@ impl World {
                 retired,
             } => {
                 if retired {
-                    let req = WakerReq::Delete {
-                        cell: cell.clone(),
-                        id: None,
-                    };
+                    let req = WakerReq::DeleteRetired { cell: cell.clone() };
                     self.waker_call(node, req);
                 }
                 self.wake_maintained(node, cell, alarm, report);
@@ -308,7 +305,8 @@ impl World {
                 .seen(node, cell, epoch)
                 .is_some_and(|content| self.alarm_of(content, epoch).same_installation(alarm));
         let unproven = self.config.mutation == Some(Mutation::RetireUnproven);
-        let durable = unproven || self.store.durable_len(cell, epoch) as u64 >= source.position;
+        let durable =
+            unproven || (current && self.durable_here(node, cell, epoch) as u64 >= source.position);
         let owned = unproven || self.store.owner(cell) == Some((Some(m.name.as_str()), epoch));
         (current && durable && owned).then_some(Retirement {
             id: source.id,

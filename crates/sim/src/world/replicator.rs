@@ -21,6 +21,7 @@ use celld_logic::{
 use super::node_log::{FollowerDisk, Upload};
 use super::shell::StoreReq;
 use super::{AgendaKey, Work, World, OPERATION_DEADLINE_MS};
+use crate::store::Row;
 use crate::{Mutation, WriteId};
 
 /// The budget for one durability proof (`DEFAULT_DURABILITY_TIMEOUT_SECS`
@@ -41,10 +42,30 @@ pub(super) struct Disk {
 }
 
 impl Disk {
-    /// Delete every live file but these (`prune_stale_live`). Eviction
-    /// snapshots stay.
-    pub(super) fn prune_except(&mut self, keep: &[(String, Epoch)]) {
+    /// Delete every live file but these, the databases the process holds
+    /// open (`prune_stale_live`). Eviction snapshots stay, and are still
+    /// listed: the prune succeeds only if what remains is exactly `keep`.
+    pub(super) fn prune_except(&mut self, keep: &[(String, Epoch)]) -> bool {
         self.live.retain(|key, _| keep.contains(key));
+        self.evicted.keys().all(|key| keep.contains(key))
+    }
+}
+
+/// What an epoch that ended without its final upload left
+/// (`RetainedTail`): how far it may have acknowledged, and how far the
+/// bucket covers it, which an upload or a bundle in flight when it ended
+/// still raises.
+#[derive(Clone, Copy)]
+pub(super) struct Tail {
+    acked: usize,
+    durable: usize,
+}
+
+impl Tail {
+    /// The bucket covers all it may have acknowledged: a reopen need not
+    /// wait for it (`all_fragment_rows_tiered`).
+    pub(super) fn tiered(&self) -> bool {
+        self.durable >= self.acked
     }
 }
 
@@ -137,12 +158,13 @@ pub(super) enum ReplicaWork {
         epoch: Epoch,
         op: OpId,
     },
-    /// The bucket answered a restore's chain read.
+    /// The bucket answered a restore's chain read, after any fold: with
+    /// the chain, or refusing the restore.
     ChainRead {
         op: OpId,
         cell: String,
         epoch: Epoch,
-        chain: Option<Vec<WriteId>>,
+        chain: Result<Option<Vec<WriteId>>, Failure>,
     },
 }
 
@@ -242,7 +264,8 @@ impl World {
             // (`note_undrained_tail`).
             let acked = self.shipped_len(node, &key.0, epoch).max(replica.bundled);
             if acked > replica.uploaded {
-                let tail = replica.content[..acked].to_vec();
+                let durable = replica.uploaded.max(replica.bundled);
+                let tail = Tail { acked, durable };
                 self.machines[node]
                     .proc_mut()
                     .tails
@@ -341,11 +364,19 @@ impl World {
         op: OpId,
         cell: String,
         epoch: Epoch,
-        chain: Option<Vec<WriteId>>,
+        chain: Result<Option<Vec<WriteId>>, Failure>,
     ) {
         // The fold applied with the read: the cell's tails are gone, as
-        // `fold_cell`'s success clears its `dirty_tails` entry.
+        // `fold_cell`'s success clears its `dirty_tails` entry before
+        // `epoch_chain` runs.
         (self.machines[node].proc_mut().tails).retain(|(c, _), _| *c != cell);
+        let chain = match chain {
+            Ok(chain) => chain,
+            Err(failure) => {
+                let result = Err(failure);
+                return self.drive(node, Event::RestoreCompleted { op, result });
+            }
+        };
         let restored = chain.is_some();
         self.stats.restored += 1;
         let chain = chain.unwrap_or_default();
@@ -611,7 +642,11 @@ impl World {
         p.node_proof_ms = p.node_proof_ms.max(mono);
         for (cell, epoch, len) in rows {
             let key = (cell.clone(), epoch);
-            if let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) {
+            let p = self.machines[node].proc_mut();
+            if let Some(tail) = p.tails.get_mut(&key) {
+                tail.durable = tail.durable.max(len);
+            }
+            if let Some(replica) = p.replicas.get_mut(&key) {
                 replica.bundled = replica.bundled.max(len);
                 self.settle_proofs(node, &cell, epoch);
             }
@@ -627,7 +662,7 @@ impl World {
 
     /// The rows the next bundle flush carries: each open database with
     /// writes past what the bucket covers (`req_seq > synced_seq`).
-    pub(super) fn bundle_rows(&self, node: usize) -> Vec<(String, Epoch, Vec<WriteId>)> {
+    pub(super) fn flush_rows(&self, node: usize) -> Vec<Row> {
         (self.machines[node].proc().replicas.iter())
             .filter(|(_, r)| r.content.len() > r.uploaded.max(r.bundled))
             .map(|((cell, epoch), r)| (cell.clone(), *epoch, r.content.clone()))
@@ -659,7 +694,7 @@ impl World {
         let p = self.machines[node].proc_mut();
         p.node_proof_ms = p.node_proof_ms.max(mono);
         let key = (cell.clone(), epoch);
-        if p.tails.get(&key).is_some_and(|tail| tail.len() <= len) {
+        if p.tails.get(&key).is_some_and(|tail| tail.acked <= len) {
             p.tails.remove(&key);
         }
         if let Some(replica) = self.machines[node]
@@ -684,6 +719,15 @@ impl World {
             .replicas
             .keys()
             .cloned()
+            .collect()
+    }
+
+    /// Every open database that is not stopping (`resident_epochs`).
+    pub(super) fn resident_epochs(&self, node: usize) -> Vec<(String, Epoch)> {
+        let replicas = &self.machines[node].proc().replicas;
+        (replicas.iter())
+            .filter(|(_, replica)| replica.stop.is_none())
+            .map(|(key, _)| key.clone())
             .collect()
     }
 

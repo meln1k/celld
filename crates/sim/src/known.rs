@@ -150,9 +150,10 @@ impl KnownFailures {
         Ok(known)
     }
 
-    /// Every failure the list names for this build's mode.
-    pub fn failures(&self) -> impl Iterator<Item = &Failure> {
-        self.listed.values()
+    /// Every failure the list names for this build's mode, with its seed
+    /// and configuration.
+    pub fn failures(&self) -> impl Iterator<Item = (u64, &str, &Failure)> {
+        (self.listed.iter()).map(|((seed, config), failure)| (*seed, config.as_str(), failure))
     }
 
     pub fn judge(&self, seed: u64, config: &str, outcome: &Outcome) -> Verdict {

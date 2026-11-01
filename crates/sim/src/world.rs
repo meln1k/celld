@@ -75,7 +75,7 @@ use handoff::{Adoption, Answer, HandoffWork, Offer};
 use liveness::Goal;
 use node_log::{Log, LogWork, Session};
 use operator::{Act, OperatorWork};
-use replicator::{Disk, Replica, ReplicaWork};
+use replicator::{Disk, Replica, ReplicaWork, Tail};
 use shell::{Slot, StoreReq};
 use shutdown::{Shutdown, ShutdownWork};
 use sockets::{Socket, SocketWork};
@@ -273,10 +273,10 @@ struct Process {
     timers: BTreeMap<Slot, (u64, Timer, u64)>,
     next_ordinal: u64,
     replicas: BTreeMap<(String, Epoch), Replica>,
-    /// Fleet-confirmed or bundled writes of an epoch that ended without its
-    /// final upload (`dirty_tails`). The cell's next activation here folds
-    /// them into its prefix first.
-    tails: BTreeMap<(String, Epoch), Vec<WriteId>>,
+    /// Epochs that ended without their final upload, with acknowledged
+    /// writes outside the per-cell layout (`dirty_tails`). The cell's next
+    /// activation here folds them into its prefix first.
+    tails: BTreeMap<(String, Epoch), Tail>,
     /// When the last upload on this process landed, on its monotonic clock:
     /// production's `node_proof_ms`.
     node_proof_ms: u64,

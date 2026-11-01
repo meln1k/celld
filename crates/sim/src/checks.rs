@@ -141,7 +141,7 @@ impl Checker {
         fleet: bool,
     ) {
         self.handler_proven.insert((cell.to_string(), epoch, write));
-        if fleet && !store.prefix(cell, epoch).contains(&write) {
+        if fleet && !store.held(cell, epoch).contains(&write) {
             let key = (who.to_string(), cell.to_string(), epoch, write);
             self.fleet_acked.insert(key);
         }
@@ -333,9 +333,7 @@ impl Checker {
         let lost: Vec<(String, Epoch, WriteId)> = self
             .fleet_acked
             .iter()
-            .filter(|(w, cell, epoch, write)| {
-                w == who && !store.prefix(cell, *epoch).contains(write)
-            })
+            .filter(|(w, cell, epoch, write)| w == who && !store.held(cell, *epoch).contains(write))
             .map(|(_, cell, epoch, write)| (cell.clone(), *epoch, *write))
             .collect();
         for (cell, epoch, write) in &lost {
@@ -423,10 +421,6 @@ impl Checker {
         }
     }
 
-    /// An upload landed in the prefix of `cell` epoch `epoch`: the other
-    /// half of **one writer per epoch**. Checked when the upload lands, not
-    /// when it is sent, because a node that lost the cell can still have an
-    /// upload on the wire.
     /// Watched: **epoch GC never deletes a restore's base.** Epoch GC is
     /// about to delete `epoch` of `cell`, and `base` is the epoch a restore
     /// of the cell would read now.
@@ -441,6 +435,10 @@ impl Checker {
         }
     }
 
+    /// An upload landed in the prefix of `cell` epoch `epoch`: the other
+    /// half of **one writer per epoch**. Checked when the upload lands, not
+    /// when it is sent, because a node that lost the cell can still have an
+    /// upload on the wire.
     pub fn upload_applied(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch) {
         let writer = self.writer(who);
         if let Some(first) = first_writer(&mut self.uploaders, &writer, cell, epoch) {
@@ -623,7 +621,7 @@ impl Checker {
             }
             return;
         };
-        let prefix = store.prefix(cell, epoch);
+        let prefix = store.held(cell, epoch);
         let at = position.checked_sub(1).and_then(|i| prefix.get(i as usize));
         if (at != Some(&write) || durable < saw) && !fleet {
             self.violation(
@@ -655,7 +653,7 @@ impl Checker {
             );
         }
         self.acked.insert((cell.to_string(), epoch, write));
-        if fleet && !store.prefix(cell, epoch).contains(&write) {
+        if fleet && !store.held(cell, epoch).contains(&write) {
             let key = (who.to_string(), cell.to_string(), epoch, write);
             self.fleet_acked.insert(key);
         }

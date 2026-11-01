@@ -1,7 +1,8 @@
 //! Epoch GC (`LtxRepl::gc_superseded_epochs`): an owner deletes the epoch
 //! prefixes of a cell below its restore chain's base.
 //!
-//! Every few seconds a process visits each database it holds open, in
+//! Every few seconds a process visits each database it holds open and is
+//! not stopping, in
 //! production's order, because the order is the fence: list the cell's
 //! epochs and plan with `epoch_gc::plan`, which decides nothing unless the
 //! newest listed epoch is the owner's own; only then read the owner record;
@@ -11,9 +12,12 @@
 //!
 //! Every upload here carries the whole database, so each listed prefix is a
 //! base of its own and the chain is the newest one. Listings are consistent,
-//! so the retired mark, which guards against a lagging one, is not modelled;
-//! the oracle goes on counting a deleted prefix's writes as durable, as the
-//! mark makes production's coverage do.
+//! so the retired mark's guard against a lagging one is not modelled. Its
+//! effect on coverage is: a deleted epoch counts as covered whole
+//! (`Store::percell_len`), and the oracle goes on counting its writes as
+//! durable. Not modelled either: production runs one pass at a time, and
+//! here a tick starts the next pass while the last one's calls may still be
+//! in flight.
 
 use celld_logic::epoch_gc::{self, ListedEpoch};
 use celld_logic::Epoch;
@@ -78,7 +82,7 @@ impl World {
         match work {
             GcWork::Tick => {
                 self.work(node, GC_TICK_MS, Work::Gc(GcWork::Tick));
-                for (cell, epoch) in self.open_epochs(node) {
+                for (cell, epoch) in self.resident_epochs(node) {
                     self.gc_call(node, cell, epoch, GcCall::List);
                 }
             }

@@ -19,7 +19,8 @@
 //! answer, and once sent it applies even if its process dies. A failed
 //! listing skips the pass, a failed delete leaves its entry for the next
 //! one. The one listing reads every entry: the fleet here holds far fewer
-//! than a page.
+//! than a page. Not modelled: production runs a due scan's probes before
+//! the next scan; here the next scan may start while they are in flight.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,12 +67,11 @@ pub(super) enum WakerReq {
         cell: String,
         entries: Vec<(PublicationId, i64)>,
     },
-    /// Delete one entry: the collector's, or `maintain`'s eager delete of
-    /// every entry the cell's certificate retires.
-    Delete {
-        cell: String,
-        id: Option<PublicationId>,
-    },
+    /// The collector deletes one entry the cell's certificate retires.
+    Delete { cell: String, id: PublicationId },
+    /// `maintain`'s eager delete of every entry the cell's certificate
+    /// retires.
+    DeleteRetired { cell: String },
 }
 
 pub(super) enum WakerWork {
@@ -196,7 +196,7 @@ impl World {
             } => {
                 for id in delete {
                     let cell = cell.clone();
-                    self.waker_call(node, WakerReq::Delete { cell, id: Some(id) });
+                    self.waker_call(node, WakerReq::Delete { cell, id });
                 }
                 self.collected(node, None, refresh.map(|minute| (cell, minute)));
             }
@@ -325,10 +325,12 @@ impl World {
                 }
             }
             WakerReq::Delete { cell, id } => {
-                match id {
-                    Some(id) => self.store.delete_wake(&cell, id),
-                    None => self.store.delete_retired(&cell),
-                }
+                self.store.delete_wake(&cell, id);
+                self.judge_discoverable(&cell);
+                return Work::Nothing;
+            }
+            WakerReq::DeleteRetired { cell } => {
+                self.store.delete_retired(&cell);
                 self.judge_discoverable(&cell);
                 return Work::Nothing;
             }
@@ -372,7 +374,7 @@ impl World {
                 delete: Vec::new(),
                 refresh: None,
             },
-            WakerReq::Delete { .. } => return Work::Nothing,
+            WakerReq::Delete { .. } | WakerReq::DeleteRetired { .. } => return Work::Nothing,
         };
         Work::Waker(work)
     }

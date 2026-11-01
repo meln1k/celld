@@ -5,13 +5,19 @@
 //! consistency. Each operation applies atomically at one simulated instant.
 //! Latency and loss around that instant belong to the world, not here.
 //!
-//! It holds four kinds of object:
+//! It holds:
 //!
-//! - node leases, `nodes/<node>.json`;
+//! - node leases, `nodes/<node>.json`, which carry each node's log state;
 //! - ownership records, `cells/<cell>/own.json`;
 //! - replica prefixes, `cells/<cell>/ltx/e<epoch>/`;
+//! - node bundles, `log/<session>/bundle/<seq>`;
 //! - wake entries, `wake/<minute>/<cell>/<id>`: one per alarm installation
-//!   that some node must wake its cell for.
+//!   that some node must wake its cell for, each cell's retirement
+//!   certificate, `wake/retired/<cell>.json`, and the waker role,
+//!   `wake/waker.json`.
+//!
+//! Besides the bucket's own state it keeps the oracle's view, `held`: the
+//! longest database of each cell epoch it ever held anywhere.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,10 +70,13 @@ pub struct Store {
     /// what epoch GC's grace reads.
     uploaded_ms: BTreeMap<(String, Epoch), u64>,
     /// The longest database of each cell epoch the bucket ever held, in
-    /// its prefix or in a bundle, deleted since or not: the oracle's view
-    /// (`prefix`). Epoch GC deletes a prefix whose rows production's retired
-    /// mark keeps counting as covered.
+    /// its prefix or in a bundle a recovery can drain, deleted since or not:
+    /// the oracle's view (`held`). Epoch GC deletes a prefix whose rows
+    /// production's retired mark keeps counting as covered.
     held: BTreeMap<(String, Epoch), Vec<WriteId>>,
+    /// Epochs epoch GC deleted: production's retired mark, which makes
+    /// per-cell coverage count every row of them as covered.
+    retired: BTreeSet<(String, Epoch)>,
     /// Node bundles, `log/<session>/bundle/<seq>`: the rows one flush of a
     /// session's bundle loop carried, each a cell epoch's database. No
     /// restore reads them; a fold or a recovery copies them into prefixes.
@@ -241,9 +250,11 @@ impl Store {
         }
     }
 
-    /// `put_bundle`: one flush of `session`'s bundle loop.
-    pub fn put_bundle(&mut self, session: &str, rows: Vec<Row>) {
-        for (cell, epoch, content) in &rows {
+    /// `put_bundle`: one flush of `session`'s bundle loop. Its rows count
+    /// as held only if a recovery can still drain them: once recovery has
+    /// sealed the session, no one lists its bundles again.
+    pub fn put_bundle(&mut self, session: &str, rows: Vec<Row>, drainable: bool) {
+        for (cell, epoch, content) in rows.iter().filter(|_| drainable) {
             self.hold(cell, *epoch, content);
         }
         let range = (session.to_string(), 0)..=(session.to_string(), u64::MAX);
@@ -308,6 +319,7 @@ impl Store {
     /// Delete every object of one epoch prefix.
     pub fn delete_epoch(&mut self, cell: &str, epoch: Epoch) {
         self.prefixes.remove(&(cell.to_string(), epoch));
+        self.retired.insert((cell.to_string(), epoch));
     }
 
     /// What a restore at `epoch` reads: the newest prefix below it that
@@ -361,12 +373,16 @@ impl Store {
     /// prefix or a bundle held once anything was uploaded for it, or else
     /// the chain it was restored from, as long as the restore read it.
     pub fn durable_len(&self, cell: &str, epoch: Epoch) -> usize {
-        self.covered(self.prefix(cell, epoch).len(), cell, epoch)
+        self.covered(self.held(cell, epoch).len(), cell, epoch)
     }
 
     /// How much of the epoch's database the per-cell layout holds, which is
-    /// all a restore reads (`percell_coverage`): bundles do not count.
+    /// all a restore reads (`percell_coverage`): bundles do not count, and
+    /// a retired epoch counts as covered whole.
     pub fn percell_len(&self, cell: &str, epoch: Epoch) -> usize {
+        if self.retired.contains(&(cell.to_string(), epoch)) {
+            return usize::MAX;
+        }
         let live = self
             .prefixes
             .get(&(cell.to_string(), epoch))
@@ -508,7 +524,7 @@ impl Store {
     /// The longest database of the cell epoch the bucket ever held, in its
     /// prefix or a bundle, deleted or not: the oracle's view of what the
     /// bucket proved durable.
-    pub fn prefix(&self, cell: &str, epoch: Epoch) -> &[WriteId] {
+    pub fn held(&self, cell: &str, epoch: Epoch) -> &[WriteId] {
         (self.held.get(&(cell.to_string(), epoch))).map_or(&[], Vec::as_slice)
     }
 }

@@ -166,15 +166,18 @@ impl World {
 
     /// The process exits. With a clean-reload marker, the files of every
     /// database it did not keep open are pruned, and the replacement starts
-    /// at once.
-    fn exit(&mut self, node: usize, marker: Option<String>) {
+    /// at once. A prune that leaves anything else behind, an eviction
+    /// snapshot included, abandons the marker (`clean_reload_abandoned`).
+    fn exit(&mut self, node: usize, mut marker: Option<String>) {
         let who = self.who(node);
+        if marker.is_some() {
+            let keep: Vec<_> = self.open_epochs(node);
+            if !self.machines[node].disk.prune_except(&keep) {
+                marker = None;
+            }
+        }
         let clean = marker.is_some();
         self.note(|| format!("exit {who} (clean reload: {clean})"));
-        if clean {
-            let keep: Vec<_> = self.open_epochs(node);
-            self.machines[node].disk.prune_except(&keep);
-        }
         // The graceful drain point: seal the log if the bucket has it all.
         self.seal_own_log(node);
         self.machines[node].reload = marker;
