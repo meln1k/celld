@@ -34,7 +34,9 @@ const CAPACITY_REFUSED_WAIT_MS: u64 = 25;
 /// (`PEER_CONNECT_TIMEOUT` in `machine.rs`).
 const PEER_CONNECT_TIMEOUT_MS: u64 = 3_000;
 
-/// One client request, from the client's side.
+/// One client request, from the client's side, while the client still
+/// waits for it. Its answer removes it from `World::ops`, so work for a
+/// request that is no longer there finds nobody waiting.
 pub(super) struct Op {
     cell: String,
     write: bool,
@@ -43,7 +45,6 @@ pub(super) struct Op {
     retry: RouteRetry,
     /// The liveness goal this request is an attempt at.
     goal: Option<usize>,
-    done: bool,
 }
 
 /// Why a forward came back without running.
@@ -165,6 +166,10 @@ impl RouteRetry {
 /// One delivery of a client request to one node's core.
 pub(super) struct Req {
     op: u64,
+    /// The cell and whether the handler writes: a copy of the client's, so
+    /// the handler runs on even after the client stopped waiting.
+    cell: String,
+    write: bool,
     /// How the request got here. A forwarded request is never forwarded on.
     via: Via,
     /// The epoch the request ran at, once routed locally.
@@ -181,7 +186,6 @@ impl World {
         self.after(CLIENTS_START_MS, Item::ClientNew);
     }
 
-    /// A client sends a request for a random cell to a random node.
     /// A client sends a request for a random cell to a random node.
     pub(super) fn client_new(&mut self) {
         let cell = format!("c{}", self.work_rng.below(self.config.cells as u64));
@@ -215,54 +219,51 @@ impl World {
         ingress: Option<usize>,
         goal: Option<usize>,
     ) {
-        let op = self.next_op;
-        self.next_op += 1;
         if goal.is_none() {
             self.stats.requests += 1;
         }
-        self.ops.insert(
-            op,
-            Op {
-                cell,
-                write,
-                ingress: ingress.unwrap_or(0),
-                retry: RouteRetry::new(self.t),
-                goal,
-                done: false,
+        let Some(ingress) = ingress else {
+            return self.answer(goal, false);
+        };
+        let op = self.next_op;
+        self.next_op += 1;
+        let entry = Op {
+            cell,
+            write,
+            ingress,
+            retry: RouteRetry::new(self.t),
+            goal,
+        };
+        self.ops.insert(op, entry);
+        let delay = self.net_rng.range(1, 3);
+        let via = Via::Client;
+        self.after(
+            delay,
+            Item::Arrive {
+                node: ingress,
+                op,
+                via,
             },
         );
-        match ingress {
-            Some(node) => {
-                let delay = self.net_rng.range(1, 3);
-                self.after(
-                    delay,
-                    Item::Arrive {
-                        node,
-                        op,
-                        via: Via::Client,
-                    },
-                );
-            }
-            None => self.settle(op, false),
-        }
     }
 
     /// The request reaches a node: hand it to the core.
     pub(super) fn arrive(&mut self, node: usize, op: u64, via: Via) {
-        if self.ops[&op].done {
+        let Some(entry) = self.ops.get(&op) else {
             return;
-        }
+        };
+        let (ingress, cell, write) = (entry.ingress, entry.cell.clone(), entry.write);
         let paused = self.machines[node]
             .proc
             .as_ref()
             .and_then(|p| p.paused_until);
         if let Some(until) = paused {
             // The connection is accepted, but nothing reads it yet.
-            return self.after(until - self.t, Item::Arrive { node, op, via });
+            self.after(until - self.t, Item::Arrive { node, op, via });
+            return;
         }
         // A forward needs the network on both ends; a client reaches its
         // ingress through the load balancer either way.
-        let ingress = self.ops[&op].ingress;
         let partitions = [node, ingress].map(|n| self.machines[n].partition.map(|(_, mode)| mode));
         if via != Via::Client && partitions.iter().any(Option::is_some) {
             // A refused connection fails at once; a hung one only when the
@@ -282,11 +283,12 @@ impl World {
             }
             return;
         }
-        let cell = self.ops[&op].cell.clone();
         let request = self.next_request;
         self.next_request += 1;
         let req = Req {
             op,
+            cell: cell.clone(),
+            write,
             via,
             epoch: None,
             committed: None,
@@ -349,7 +351,9 @@ impl World {
     /// a peer already said that route is stale.
     fn forward(&mut self, op: u64, owner: String, epoch: Epoch) {
         let t = self.t;
-        let retry = &mut self.ops.get_mut(&op).unwrap().retry;
+        let Some(Op { retry, .. }) = self.ops.get_mut(&op) else {
+            return;
+        };
         if retry.observe(&owner, epoch) {
             // Wait for the ingress's view of the owner to change.
             match retry.wait(t) {
@@ -391,10 +395,9 @@ impl World {
     /// is only whether it can help.
     pub(super) fn bounced(&mut self, op: u64, why: Bounce) {
         let t = self.t;
-        let entry = self.ops.get_mut(&op).unwrap();
-        if entry.done {
+        let Some(entry) = self.ops.get_mut(&op) else {
             return;
-        }
+        };
         match entry.retry.failed(why, t) {
             Some(wait) => self.redispatch_after(op, wait),
             None => self.settle(op, false),
@@ -410,10 +413,9 @@ impl World {
 
     /// Retire the failed route in the ingress's core and resolve again.
     pub(super) fn redispatch(&mut self, op: u64) {
-        let entry = &self.ops[&op];
-        if entry.done {
+        let Some(entry) = self.ops.get(&op) else {
             return;
-        }
+        };
         let (ingress, cell) = (entry.ingress, entry.cell.clone());
         let (node, epoch) = entry.retry.generation.clone().expect("a route was tried");
         self.drive(ingress, Event::InvalidateRemote { cell, node, epoch });
@@ -434,7 +436,7 @@ impl World {
         let lost: Vec<u64> = self
             .ops
             .iter()
-            .filter(|(_, entry)| entry.ingress == node && !entry.done)
+            .filter(|(_, entry)| entry.ingress == node)
             .map(|(op, _)| *op)
             .collect();
         for op in lost {
@@ -445,8 +447,8 @@ impl World {
     /// The request runs here: maybe commit a write after a while, then
     /// answer.
     fn run_handler(&mut self, node: usize, request: RequestId) {
-        let op = self.machines[node].proc().requests[&request].op;
-        let (cell, write) = (self.ops[&op].cell.clone(), self.ops[&op].write);
+        let req = &self.machines[node].proc().requests[&request];
+        let (op, cell, write) = (req.op, req.cell.clone(), req.write);
         let epoch = self.machines[node].proc().published.get(&cell).copied();
         let name = self.machines[node].name.clone();
         self.checker
@@ -478,7 +480,7 @@ impl World {
         let Some(req) = self.machines[node].proc().requests.get(&request) else {
             return;
         };
-        let (cell, epoch) = (self.ops[&req.op].cell.clone(), req.epoch.unwrap());
+        let (cell, epoch) = (req.cell.clone(), req.epoch.unwrap());
         match self.commit_write(node, &cell, epoch) {
             Some(committed) => {
                 let req = self.machines[node]
@@ -510,7 +512,7 @@ impl World {
         let Some(req) = self.machines[node].proc().requests.get(&request) else {
             return;
         };
-        let cell = self.ops[&req.op].cell.clone();
+        let cell = req.cell.clone();
         let Some((opened, saw)) = self.positions(node, &cell, req.epoch.unwrap()) else {
             return self.handler_failed(node, request);
         };
@@ -556,31 +558,38 @@ impl World {
         let Some(req) = self.machines[node].proc_mut().requests.remove(&request) else {
             return;
         };
-        if result.is_err() || self.ops[&req.op].done {
+        if result.is_err() || !self.ops.contains_key(&req.op) {
             // Refused, or released to a client that already gave up when
             // its connection died: either way nobody was told it worked.
             self.settle(req.op, false);
             return;
         }
         let epoch = req.epoch.expect("only a routed request answers");
-        let cell = self.ops[&req.op].cell.clone();
         if req.committed.is_some() {
             self.stats.acked_writes += 1;
         }
-        self.checker
-            .response_released(self.t, &self.store, &cell, epoch, req.committed, req.saw);
+        self.checker.response_released(
+            self.t,
+            &self.store,
+            &req.cell,
+            epoch,
+            req.committed,
+            req.saw,
+        );
         self.settle(req.op, true);
     }
 
     /// The client hears its answer. Only the first one counts: a request
     /// whose ingress died has already failed, whatever happens to it later.
     fn settle(&mut self, op: u64, answered: bool) {
-        let entry = self.ops.get_mut(&op).unwrap();
-        if entry.done {
-            return;
+        if let Some(entry) = self.ops.remove(&op) {
+            self.answer(entry.goal, answered);
         }
-        entry.done = true;
-        match entry.goal {
+    }
+
+    /// Count an answer, or report it to the liveness goal it was for.
+    fn answer(&mut self, goal: Option<usize>, answered: bool) {
+        match goal {
             Some(goal) => self.goal_settled(goal, answered),
             None if answered => self.stats.answered += 1,
             None => self.stats.failed += 1,

@@ -17,7 +17,7 @@ use celld_logic::{
 };
 
 use super::shell::StoreReq;
-use super::{Work, World, OPERATION_DEADLINE_MS};
+use super::{AgendaKey, Work, World, OPERATION_DEADLINE_MS};
 use crate::{Mutation, WriteId};
 
 /// The budget for one durability proof (`DEFAULT_DURABILITY_TIMEOUT_SECS`
@@ -45,6 +45,8 @@ pub(super) struct Replica {
     capture_started_ms: u64,
     /// Proofs waiting for `uploaded` to reach a position.
     waiters: Vec<Waiter>,
+    /// Each waiter's pending deadline, cancelled once it is answered.
+    deadlines: BTreeMap<OpId, AgendaKey>,
     /// An eviction stop waiting for its final upload: the operation that
     /// asked for it.
     stop: Option<OpId>,
@@ -155,6 +157,9 @@ impl World {
                 let event = waiter.answer(Err(Failure::Ambiguous));
                 self.deliver(node, 0, event);
             }
+            for deadline in replica.deadlines.values() {
+                self.cancel(*deadline);
+            }
             match cause {
                 // The node lost its authority: close in place, with no
                 // final upload. The file stays on disk.
@@ -219,6 +224,7 @@ impl World {
             capture_len: 0,
             capture_started_ms: 0,
             waiters: Vec::new(),
+            deadlines: BTreeMap::new(),
             stop: None,
         };
         self.machines[node]
@@ -323,7 +329,10 @@ impl World {
         };
         // A gate's deadline only ever moves later, so its first wake is at
         // the earliest it can be: one budget from now.
-        self.work(node, PROOF_BUDGET_MS, deadline);
+        let key = self.work(node, PROOF_BUDGET_MS, deadline);
+        self.replica_mut(node, cell, epoch)
+            .deadlines
+            .insert(op, key);
         self.settle_proofs(node, cell, epoch);
         self.upload(node, cell, epoch);
     }
@@ -340,6 +349,7 @@ impl World {
             replica.stop = None;
             Event::RuntimeStopFailed { op }
         } else if let Some(i) = replica.waiters.iter().position(|w| w.op() == op) {
+            replica.deadlines.remove(&op);
             if let Waiter::Gate { wait, .. } = &replica.waiters[i] {
                 // As production does on every wake: recompute, and fail only
                 // a deadline still in the past.
@@ -350,8 +360,16 @@ impl World {
                 };
                 let deadline = proof_deadline(wait, &progress);
                 if mono < deadline {
-                    let work = Work::ProofDeadline { cell, epoch, op };
-                    return self.work(node, deadline - mono, work);
+                    let work = Work::ProofDeadline {
+                        cell: cell.clone(),
+                        epoch,
+                        op,
+                    };
+                    let key = self.work(node, deadline - mono, work);
+                    self.replica_mut(node, &cell, epoch)
+                        .deadlines
+                        .insert(op, key);
+                    return;
                 }
             }
             replica.waiters.remove(i).answer(Err(Failure::Ambiguous))
@@ -422,6 +440,17 @@ impl World {
         }
     }
 
+    /// The open database of `cell` at `epoch`, which the caller knows is
+    /// there.
+    fn replica_mut(&mut self, node: usize, cell: &str, epoch: Epoch) -> &mut Replica {
+        let key = (cell.to_string(), epoch);
+        self.machines[node]
+            .proc_mut()
+            .replicas
+            .get_mut(&key)
+            .expect("an open database")
+    }
+
     /// Answer every proof the bucket now covers, and finish a stop whose
     /// final upload landed. Answers are scheduled, not driven, because this
     /// can run inside `execute`.
@@ -432,10 +461,12 @@ impl World {
         };
         let uploaded = replica.uploaded as u64;
         let mut answers = Vec::new();
+        let mut settled = Vec::new();
         replica.waiters.retain(|waiter| {
             let covered = waiter.position() <= uploaded;
             if covered {
                 answers.push(waiter.answer(Ok(uploaded)));
+                settled.extend(replica.deadlines.remove(&waiter.op()));
             }
             !covered
         });
@@ -451,7 +482,11 @@ impl World {
             for waiter in &replica.waiters {
                 answers.push(waiter.answer(Err(Failure::Ambiguous)));
             }
+            settled.extend(replica.deadlines.values());
             answers.push(Event::RuntimeStopped { op });
+        }
+        for deadline in settled {
+            self.cancel(deadline);
         }
         for event in answers {
             self.deliver(node, 0, event);

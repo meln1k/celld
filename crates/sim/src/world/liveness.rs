@@ -53,7 +53,8 @@ impl World {
         if self.t < self.quiet_from {
             // A late pause, partition or restart is still under way. What
             // the fleet does before it ends is the fault's doing.
-            return self.after(self.quiet_from - self.t, Item::Probe);
+            self.after(self.quiet_from - self.t, Item::Probe);
+            return;
         }
         self.note(|| "probe: every cell must take a write".into());
         let deadline = self.t + PROBE_WINDOW_MS;

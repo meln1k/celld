@@ -49,6 +49,8 @@ use replicator::{Disk, Replica};
 use shell::{Slot, StoreReq};
 
 type Time = u64;
+/// An item's place on the agenda, to cancel it by.
+type AgendaKey = (Time, u64);
 
 /// The core's deadline for an operation, and the shell's for its own work.
 const OPERATION_DEADLINE_MS: u64 = 15_000;
@@ -296,15 +298,22 @@ impl World {
         }
     }
 
-    fn after(&mut self, delay: u64, item: Item) {
+    fn after(&mut self, delay: u64, item: Item) -> AgendaKey {
         self.seq += 1;
-        self.agenda.insert((self.t + delay, self.seq), item);
+        let key = (self.t + delay, self.seq);
+        self.agenda.insert(key, item);
+        key
+    }
+
+    /// Drop an item that is no longer needed, so it never runs.
+    fn cancel(&mut self, key: AgendaKey) {
+        self.agenda.remove(&key);
     }
 
     /// Schedule work for the process now running on `node`.
-    fn work(&mut self, node: usize, delay: u64, work: Work) {
+    fn work(&mut self, node: usize, delay: u64, work: Work) -> AgendaKey {
         let inc = self.machines[node].inc;
-        self.after(delay, Item::Proc { node, inc, work });
+        self.after(delay, Item::Proc { node, inc, work })
     }
 
     fn deliver(&mut self, node: usize, delay: u64, event: Event) {
@@ -366,7 +375,9 @@ impl World {
                 };
                 match proc.paused_until {
                     // A paused process runs this when it resumes, in order.
-                    Some(until) => self.after(until - self.t, Item::Proc { node, inc, work }),
+                    Some(until) => {
+                        self.after(until - self.t, Item::Proc { node, inc, work });
+                    }
                     None => self.proc_work(node, work),
                 }
             }

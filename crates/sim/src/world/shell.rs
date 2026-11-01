@@ -296,7 +296,8 @@ impl World {
         }
         if mono < at_mono {
             // A suspend held the monotonic clock back: not due yet.
-            return self.work(node, at_mono - mono, Work::Timer { slot, ordinal });
+            self.work(node, at_mono - mono, Work::Timer { slot, ordinal });
+            return;
         }
         let (_, timer, _) = n.timers.remove(&slot).unwrap();
         self.drive(
