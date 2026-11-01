@@ -139,6 +139,9 @@ pub struct Operator {
     /// An operator shuts a node down gracefully: it hands every cell to a
     /// peer, exits, and is restarted.
     pub drains: f64,
+    /// An operator replaces a node's process in place: the replacement
+    /// resumes its databases where they are.
+    pub preserves: f64,
     /// The balancer asks a node to give a few idle cells to emptier peers.
     pub rebalances: f64,
 }
@@ -196,6 +199,7 @@ impl SimConfig {
                 // A drain fails the requests it cuts off; the calm fleet
                 // answers every one.
                 drains: 0.0,
+                preserves: 0.0,
                 rebalances: 6.0,
             },
             max_resident: 4,
@@ -247,6 +251,7 @@ impl SimConfig {
             cancel_probability: 0.05,
             operator: Operator {
                 drains: 2.0,
+                preserves: 2.0,
                 ..Self::calm().operator
             },
             ..Self::crashing(3.0)
@@ -337,6 +342,7 @@ impl Operator {
             nudges: maybe(1, 30),
             drains: maybe(1, 4),
             rebalances: maybe(1, 30),
+            preserves: maybe(1, 4),
         }
     }
 }
@@ -373,6 +379,9 @@ pub struct Stats {
     /// Graceful shutdowns, and cells a peer acquired from their donor.
     pub drains: u64,
     pub handed_off: u64,
+    /// Planned replacements, and databases a replacement resumed in place.
+    pub preserves: u64,
+    pub resumed: u64,
 }
 
 /// What a run produced.

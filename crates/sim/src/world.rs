@@ -16,6 +16,7 @@
 //! - `clients`: the workload and the scripted handler that serves it.
 //! - `faults`: what goes wrong, and the supervisor that restarts a node.
 //! - `operator`: what an operator and the rest of a node do unprompted.
+//! - `shutdown`: graceful shutdowns, which drain or preserve a node.
 //! - `handoff`: draining and rebalancing, which hand cells to peers.
 //! - `liveness`: the probe and the audit that end every run.
 //!
@@ -32,6 +33,7 @@ mod liveness;
 mod operator;
 mod replicator;
 mod shell;
+mod shutdown;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
@@ -53,6 +55,7 @@ use liveness::Goal;
 use operator::Act;
 use replicator::{Disk, Replica};
 use shell::{Slot, StoreReq};
+use shutdown::{Mode, Shutdown};
 
 type Time = u64;
 /// An item's place on the agenda, to cancel it by.
@@ -156,9 +159,9 @@ enum Work {
     /// The log tier asks the core to renew its lease now.
     Nudge,
     /// The operator starts a graceful shutdown.
-    Drain,
-    /// Has the drain finished?
-    DrainPoll,
+    Shutdown(Mode),
+    /// Has the shutdown finished?
+    ShutdownPoll,
     /// The balancer asks the core to give some idle cells away.
     Rebalance { cells: usize },
     /// The donor looks for peers to offer a released cell to.
@@ -182,6 +185,8 @@ struct Machine {
     disk: Disk,
     /// The network partition the machine is in, while it lasts.
     partition: Option<(u64, Partition)>,
+    /// The clean-reload marker a preserved process left: its generation.
+    reload: Option<String>,
     proc: Option<Process>,
 }
 
@@ -194,6 +199,7 @@ impl Machine {
             wall_offset_ms,
             disk: Disk::default(),
             partition: None,
+            reload: None,
             proc: None,
         }
     }
@@ -208,6 +214,17 @@ impl Machine {
 
     fn proc_mut(&mut self) -> &mut Process {
         self.proc.as_mut().expect("a process is running")
+    }
+}
+
+impl World {
+    /// The process on `node` is up and preserving: it refuses every new
+    /// request.
+    fn preserving(&self, node: usize) -> bool {
+        self.machines[node].proc.as_ref().is_some_and(|p| {
+            p.shutdown
+                .is_some_and(|s| matches!(s.mode, Mode::Preserve | Mode::Closing))
+        })
     }
 }
 
@@ -236,8 +253,8 @@ struct Process {
     requests: BTreeMap<RequestId, Req>,
     /// Operator evictions the core has not answered yet, and their cells.
     evictions: BTreeMap<RequestId, String>,
-    /// While draining: when the process exits whatever is left.
-    draining: Option<Time>,
+    /// A graceful shutdown under way.
+    shutdown: Option<Shutdown>,
     /// Released cells this process is finding a successor for.
     adoptions: BTreeMap<OpId, Adoption>,
     /// Offers from donors this process's core is deciding on.
@@ -259,7 +276,7 @@ impl Process {
             published: BTreeMap::new(),
             requests: BTreeMap::new(),
             evictions: BTreeMap::new(),
-            draining: None,
+            shutdown: None,
             adoptions: BTreeMap::new(),
             offers: BTreeMap::new(),
         }
@@ -474,9 +491,11 @@ impl World {
             Work::HandlerCommit { request } => self.handler_commit(node, request),
             Work::HandlerEnd { request } => self.handler_end(node, request),
             Work::Redispatch { op } => self.redispatch(op),
+            // A preserving actor ignores the balancer, and refuses evictions.
+            Work::Rebalance { .. } | Work::Evict { .. } if self.preserving(node) => {}
             Work::Evict { cell } => self.evict(node, cell),
-            Work::Drain => self.drain(node),
-            Work::DrainPoll => self.drain_poll(node),
+            Work::Shutdown(mode) => self.shut_down(node, mode),
+            Work::ShutdownPoll => self.shutdown_poll(node),
             Work::Rebalance { cells } => self.drive(node, Event::Rebalance { cells }),
             Work::AdoptSearch { op } => self.adopt_search(node, op),
             Work::OfferAnswered { op, answer } => self.offer_answered(node, op, answer),
@@ -504,12 +523,19 @@ impl World {
         m.inc += 1;
         m.proc = Some(Process::new(&m.name, mono_base, self.core));
         let inc = m.inc;
-        self.note(|| format!("start n{node}#{inc}"));
+        let resume_generation = m.reload.take();
+        self.note(|| format!("start n{node}#{inc} (resuming {resume_generation:?})"));
+        if resume_generation.is_some() {
+            // The predecessor handed its epochs over: they are this
+            // process's to run and to upload into now.
+            let (old, new) = (format!("n{node}#{}", inc - 1), self.who(node));
+            self.checker.reloaded(&old, &new);
+        }
         let spec = NodeLeaseSpec {
             addr: self.machines[node].name.clone(),
             peer_protocol: PEER_PROTOCOL,
-            generation: format!("g{node}.{inc}"),
-            resume_generation: None,
+            generation: shutdown::generation(node, inc),
+            resume_generation,
             ttl_ms: self.config.ttl_ms,
         };
         let event = Event::StartNodeLease {

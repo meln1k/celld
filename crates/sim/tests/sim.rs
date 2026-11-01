@@ -208,6 +208,7 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         faulted.evicted += outcome.stats.evicted;
         faulted.drains += outcome.stats.drains;
         faulted.handed_off += outcome.stats.handed_off;
+        faulted.resumed += outcome.stats.resumed;
     }
     // Most seeds run to the end and through the liveness audit.
     assert!(
@@ -218,12 +219,14 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.partitions > 10, "{faulted:?}");
     assert!(faulted.store_failures > 500, "{faulted:?}");
     assert!(faulted.crashes > 10, "{faulted:?}");
-    // So did the operator's work: clients gave up, cells were evicted, and
-    // drained nodes handed cells to their peers.
+    // So did the operator's work: clients gave up, cells were evicted,
+    // drained nodes handed cells to their peers, and preserved nodes'
+    // replacements resumed databases in place.
     assert!(faulted.cancelled > 500, "{faulted:?}");
     assert!(faulted.evicted > 20, "{faulted:?}");
     assert!(faulted.drains > 10, "{faulted:?}");
     assert!(faulted.handed_off > 20, "{faulted:?}");
+    assert!(faulted.resumed > 10, "{faulted:?}");
 }
 
 #[test]

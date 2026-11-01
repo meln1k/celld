@@ -9,7 +9,7 @@
 use celld_logic::{EvictError, EvictSuccess, EvictionAdmission, RequestId};
 
 use super::clients::CLIENTS_STOP_BEFORE_END_MS;
-use super::{Item, Work, World};
+use super::{Item, Mode, Work, World};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Act {
@@ -19,13 +19,22 @@ pub(super) enum Act {
     Nudge,
     /// A graceful shutdown (`SIGTERM`): drain, exit, and be restarted.
     Drain,
+    /// A planned replacement on the same machine: preserve, exit, and
+    /// reload in place.
+    Preserve,
     /// `Message::Rebalance`: give a few idle cells to emptier peers.
     Rebalance,
 }
 
 impl World {
     pub(super) fn start_operator(&mut self) {
-        for act in [Act::Evict, Act::Nudge, Act::Drain, Act::Rebalance] {
+        for act in [
+            Act::Evict,
+            Act::Nudge,
+            Act::Drain,
+            Act::Preserve,
+            Act::Rebalance,
+        ] {
             if self.act_rate(act) > 0.0 {
                 let gap = self.act_gap(act);
                 self.after(gap, Item::Operator(act));
@@ -39,6 +48,7 @@ impl World {
             Act::Evict => operator.evictions,
             Act::Nudge => operator.nudges,
             Act::Drain => operator.drains,
+            Act::Preserve => operator.preserves,
             Act::Rebalance => operator.rebalances,
         }
     }
@@ -62,7 +72,8 @@ impl World {
                     Work::Evict { cell }
                 }
                 Act::Nudge => Work::Nudge,
-                Act::Drain => Work::Drain,
+                Act::Drain => Work::Shutdown(Mode::Drain),
+                Act::Preserve => Work::Shutdown(Mode::Preserve),
                 Act::Rebalance => Work::Rebalance {
                     cells: self.op_rng.range(1, 3) as usize,
                 },

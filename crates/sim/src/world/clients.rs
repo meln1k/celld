@@ -210,13 +210,14 @@ impl World {
         }
     }
 
-    /// The load balancer in front of the fleet only picks nodes whose
-    /// process is up and not shutting down.
+    /// The load balancer in front of the fleet only picks nodes that are
+    /// ready: up, holding their node lease, and not shutting down, as the
+    /// health endpoint reports.
     pub(super) fn pick_ingress(&mut self) -> Option<usize> {
         let up: Vec<usize> = (0..self.machines.len())
             .filter(|&node| {
                 let m = &self.machines[node];
-                m.up() && m.proc().draining.is_none()
+                m.up() && m.proc().shutdown.is_none() && m.proc().state.node_authoritative()
             })
             .collect();
         self.work_rng.pick(&up).copied()
@@ -305,6 +306,12 @@ impl World {
                 _ => self.bounce(op, Bounce::Unreachable),
             }
             return;
+        }
+        let shutdown = self.machines[node].proc().shutdown.is_some();
+        if (via == Via::Client && shutdown) || self.preserving(node) {
+            // A shutting-down node admits no public request (`admit_public`),
+            // and a preserving actor refuses every request.
+            return self.settle(op, false);
         }
         let request = self.next_request;
         self.next_request += 1;

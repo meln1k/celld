@@ -1,12 +1,11 @@
-//! Handing cells to peers: a node draining for shutdown releases every
-//! cell (`ReleaseAll`), a dense node gives a few idle cells away
-//! (`Rebalance`), and each released cell is offered to peers until one
-//! acquires it (`AdoptReleased`, and `HandoffRequestAt` on the peer).
+//! Handing cells to peers. A draining node releases every cell, and a dense
+//! node gives a few idle ones away (`Rebalance`). Each released cell is
+//! offered to peers until one acquires it (`AdoptReleased`, and
+//! `HandoffRequestAt` on the peer).
 //!
 //! This follows `crates/celld/actor.rs`: `handoff_candidates` and the
-//! `AdoptReleased` loop on the donor, `accept_handoff` and
-//! `settle_handoff_accepts` on the peer, and the drain loop in `main.rs`
-//! that waits for the core to report nothing left before the process exits.
+//! `AdoptReleased` loop on the donor, and `accept_handoff` and
+//! `settle_handoff_accepts` on the peer.
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -15,11 +14,6 @@ use celld_logic::{AdoptedCell, Epoch, Event, Failure, OpId, RequestId, Route};
 use super::faults::Partition;
 use super::{Item, Time, Work, World, OPERATION_DEADLINE_MS, PEER_PROTOCOL};
 
-/// How long a drain may take before the process exits anyway. A cell cut
-/// off keeps its owner record and recovers like a crashed node's.
-const DRAIN_DEADLINE_MS: u64 = 20_000;
-/// How often the shell asks the core whether the drain is done.
-const DRAIN_POLL_MS: u64 = 50;
 /// How long the donor waits before searching again when no peer took a
 /// cell (`HANDOFF_RETRY_DELAY`).
 const HANDOFF_RETRY_MS: u64 = 250;
@@ -62,40 +56,6 @@ pub(super) enum Answer {
 }
 
 impl World {
-    /// The operator shuts the node down gracefully: release every cell,
-    /// then exit once nothing is left or the deadline passes.
-    pub(super) fn drain(&mut self, node: usize) {
-        let p = self.machines[node].proc_mut();
-        if p.draining.is_some() {
-            return;
-        }
-        p.draining = Some(self.t + DRAIN_DEADLINE_MS);
-        self.stats.drains += 1;
-        // Until the restart that follows it is over, the fleet is disturbed.
-        self.disturbed_until(self.t + DRAIN_DEADLINE_MS + 3 * self.config.ttl_ms);
-        self.note(|| format!("drain n{node}"));
-        self.drive(node, Event::ReleaseAll);
-        self.work(node, DRAIN_POLL_MS, Work::DrainPoll);
-    }
-
-    pub(super) fn drain_poll(&mut self, node: usize) {
-        let p = self.machines[node].proc();
-        let s = &p.state;
-        let drained = s.occupied() == 0
-            && s.activating() == 0
-            && s.quiescing() == 0
-            && s.evicting() == 0
-            && s.releasing() == 0
-            && s.adopting() == 0;
-        if drained || p.draining.is_some_and(|deadline| self.t >= deadline) {
-            let who = self.who(node);
-            self.note(|| format!("exit {who} (drained: {drained})"));
-            self.crash(node, false);
-        } else {
-            self.work(node, DRAIN_POLL_MS, Work::DrainPoll);
-        }
-    }
-
     /// The core released a cell and wants a successor to acquire it.
     pub(super) fn adopt_released(
         &mut self,
@@ -222,8 +182,9 @@ impl World {
             };
             return self.answer_offer(offer, Answer::Failed, delay);
         }
-        if self.machines[node].proc().draining.is_some() {
-            // A draining peer answers `503` (`internal_handoff`).
+        if self.machines[node].proc().shutdown.is_some() {
+            // A draining peer answers `503` (`internal_handoff`), and a
+            // preserving one refuses every request.
             let delay = self.net_rng.range(1, 5);
             return self.answer_offer(offer, Answer::Failed, delay);
         }

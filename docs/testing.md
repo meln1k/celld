@@ -87,7 +87,9 @@ write and answers through the output gate. Some clients give up before they
 hear back, an operator evicts cells by hand and shuts nodes down, a balancer
 gives idle cells away, and the log tier nudges node leases. A node that shuts
 down or gives a cell away offers it to its peers until one acquires it, as
-`AdoptReleased` and the peer's handoff endpoint do in production.
+`AdoptReleased` and the peer's handoff endpoint do in production. A node can
+also be replaced in place: its process preserves its cells and exits, and the
+replacement resumes each database at the same epoch without the bucket.
 
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the

@@ -31,6 +31,13 @@ pub(super) struct Disk {
     live: BTreeMap<(String, Epoch), Vec<WriteId>>,
 }
 
+impl Disk {
+    /// Delete every file but these (`prune_stale_live`).
+    pub(super) fn prune_except(&mut self, keep: &[(String, Epoch)]) {
+        self.live.retain(|key, _| keep.contains(key));
+    }
+}
+
 /// A cell's open database on one node, at one epoch.
 pub(super) struct Replica {
     content: Vec<WriteId>,
@@ -181,7 +188,21 @@ impl World {
     }
 
     pub(super) fn restore(&mut self, node: usize, op: OpId, cell: String, spec: RestoreSpec) {
-        assert!(!spec.resume_local, "no clean reload is modeled: {spec:?}");
+        if spec.resume_local {
+            // A clean reload: open the predecessor's file where it is.
+            let file = self.machines[node]
+                .disk
+                .live
+                .remove(&(cell.clone(), spec.epoch));
+            let delay = self.net_rng.range(1, 5);
+            let Some(content) = file else {
+                let result = Err(Failure::Definite);
+                return self.deliver(node, delay, Event::RestoreCompleted { op, result });
+            };
+            self.stats.resumed += 1;
+            self.open_replica(node, cell, spec.epoch, content);
+            return self.deliver(node, delay, restore_completed(op, false));
+        }
         if spec.fresh {
             // Epoch one of a new cell: there is nothing to restore.
             self.open_replica(node, cell, spec.epoch, Vec::new());
@@ -275,6 +296,15 @@ impl World {
             .replicas
             .get(&(cell.to_string(), epoch))?;
         Some((replica.start_len as u64, replica.content.len() as u64))
+    }
+
+    /// Every open database's writes are all in the bucket.
+    pub(super) fn all_uploaded(&self, node: usize) -> bool {
+        self.machines[node]
+            .proc()
+            .replicas
+            .values()
+            .all(|replica| !replica.uploading && replica.uploaded >= replica.content.len())
     }
 
     /// The output gate's proof: answer once the bucket holds `position`.

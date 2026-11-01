@@ -166,10 +166,15 @@ impl World {
     /// The supervisor restarts a dead process after one to three lease
     /// lifetimes. Waiting at least one means the dead process's lease has
     /// expired by the time the new one starts, as with a real restart that
-    /// takes a while.
+    /// takes a while. A preserved process's replacement starts at once.
     pub(super) fn schedule_restart(&mut self, node: usize) {
         let ttl = self.config.ttl_ms;
-        let delay = self.fault_rng.range(ttl, 3 * ttl);
+        let delay = if self.machines[node].reload.is_some() {
+            // A planned replacement is already waiting to start.
+            self.op_rng.range(10, 300)
+        } else {
+            self.fault_rng.range(ttl, 3 * ttl)
+        };
         if self.t < self.config.chaos_ms {
             // A restart after the chaos is the system's own business, but
             // one a fault caused is part of the fault.

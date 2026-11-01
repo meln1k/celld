@@ -164,6 +164,21 @@ impl Checker {
         }
     }
 
+    /// A preserved process `old` handed its epochs to its replacement
+    /// `new`, which resumes them in place. They become `new`'s to run and to
+    /// upload into; `old` has exited, and its last uploads all landed.
+    pub fn reloaded(&mut self, old: &str, new: &str) {
+        for writer in self
+            .runtimes
+            .values_mut()
+            .chain(self.uploaders.values_mut())
+        {
+            if writer == old {
+                *writer = new.to_string();
+            }
+        }
+    }
+
     /// **Liveness.** Once faults have healed, the fleet must serve every
     /// cell before the deadline.
     pub fn unserved(&mut self, t: u64, phase: &str, cell: &str) {
@@ -317,8 +332,9 @@ impl Checker {
     /// the same promise.
     ///
     /// **A restore is a real state.** What it opens with must be a state
-    /// some database of an earlier epoch actually held: a prefix of one of
-    /// its lineages. A hole, a reordering or a foreign write is not.
+    /// some database of an earlier epoch, or of this one before a clean
+    /// reload, actually held: a prefix of one of its lineages. A hole, a
+    /// reordering or a foreign write is not.
     ///
     /// Returns the lineage this database starts, for `committed`.
     pub fn replica_opened(
@@ -332,7 +348,7 @@ impl Checker {
         let real = content.is_empty()
             || self
                 .lineages
-                .range((cell.to_string(), 0)..(cell.to_string(), epoch))
+                .range((cell.to_string(), 0)..=(cell.to_string(), epoch))
                 .flat_map(|(_, lineages)| lineages)
                 .any(|lineage| lineage.starts_with(content));
         if !real {
