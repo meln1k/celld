@@ -310,6 +310,64 @@ impl Checker {
         ensembles.push(ensemble.to_vec());
     }
 
+    /// Watched: **the fleet proves only what the current ensemble holds.**
+    /// `who`'s log proved `proved` of a cell epoch through the fleet: every
+    /// follower of its newest log epoch must have fsynced it. A proof
+    /// backed by an earlier ensemble rests on copies its members drop.
+    pub fn fleet_proof(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch, proved: &[WriteId]) {
+        let current = self.ensembles.get(who).and_then(|e| e.last());
+        let backed = current.is_some_and(|ensemble| {
+            ensemble.iter().all(|&f| {
+                let key = (who.to_string(), f, cell.to_string(), epoch);
+                (self.fsynced.get(&key)).is_some_and(|held| held.starts_with(proved))
+            })
+        });
+        if !backed {
+            self.watch(
+                t,
+                "fleet-proof-unbacked",
+                format!("{who} {cell}"),
+                format!(
+                    "{who} proved {} writes of {cell} epoch {epoch} through a fleet whose \
+                     current followers did not all fsync them",
+                    proved.len()
+                ),
+            );
+        }
+    }
+
+    /// Watched: **a bundle credits only what the bucket holds.** `who`
+    /// credited `len` writes of a cell epoch to a bundle: the bucket must
+    /// hold them, in a prefix or a bundle a recovery can still drain. One
+    /// that landed after its session was sealed holds nothing.
+    pub fn bundle_credited(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch, len: usize) {
+        let held = self.held(cell, epoch).len();
+        if held < len {
+            self.watch(
+                t,
+                "bundle-credit-unheld",
+                format!("{who} {cell}"),
+                format!(
+                    "{who} credited {len} writes of {cell} epoch {epoch} to a bundle, \
+                     but the bucket holds {held}"
+                ),
+            );
+        }
+    }
+
+    /// Watched: **a degraded log reopens.** In a quiet fleet, once the
+    /// bucket holds everything it shipped and a peer could follow it, a
+    /// degraded log reopens at the next log epoch within a few maintain
+    /// ticks (`maintain`).
+    pub fn reopen_stuck(&mut self, t: u64, who: &str, stalled_ms: u64) {
+        self.watch(
+            t,
+            "reopen-stuck",
+            who.to_string(),
+            format!("{who}'s log stayed degraded {stalled_ms} ms with a peer to recruit"),
+        );
+    }
+
     /// A follower fsynced a cell epoch's database for leader `who`.
     pub fn follower_fsynced(
         &mut self,
@@ -347,7 +405,16 @@ impl Checker {
     /// declared a bounded loss, as production may. The acknowledged writes
     /// only that log held, and the bucket still lacks, are gone; forget
     /// them, so no later check expects them. Returns how many.
-    pub fn declare_loss(&mut self, who: &str) -> u64 {
+    ///
+    /// Watched: **a loss is declared only for writes that are gone.** A
+    /// forgiven write that a follower disk of a machine still in the fleet
+    /// holds (`on_disk`) was not lost; the declaration hid it.
+    pub fn declare_loss(
+        &mut self,
+        t: u64,
+        who: &str,
+        on_disk: &[(String, Epoch, &[WriteId])],
+    ) -> u64 {
         let lost: Vec<(String, Epoch, WriteId)> = self
             .fleet_acked
             .iter()
@@ -355,6 +422,19 @@ impl Checker {
             .map(|(_, cell, epoch, write)| (cell.clone(), *epoch, *write))
             .collect();
         for (cell, epoch, write) in &lost {
+            let kept = (on_disk.iter())
+                .any(|(c, e, rows)| c == cell && e == epoch && rows.contains(write));
+            if kept {
+                self.watch(
+                    t,
+                    "unjustified-loss",
+                    format!("{who} {cell}"),
+                    format!(
+                        "{who}'s declared loss forgave write {write} of {cell} epoch {epoch}, \
+                         which a follower disk still holds"
+                    ),
+                );
+            }
             self.acked.remove(&(cell.clone(), *epoch, *write));
             self.handler_proven.remove(&(cell.clone(), *epoch, *write));
             if let Some(acks) = self.acked_at.get_mut(cell) {

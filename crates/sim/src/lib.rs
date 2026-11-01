@@ -176,8 +176,9 @@ pub enum Mutation {
     /// and every restore says there is none. Caught by `alarm-not-fired`.
     AlarmsUnreported,
     /// A follower confirms as many writes as it was sent, but fsyncs a
-    /// different last write. Caught by `unverified-ack`, which compares
-    /// what the fleet holds write for write, not only its length.
+    /// different last write. Caught by `unverified-ack` and
+    /// `fleet-proof-unbacked`, which compare what the fleet holds write for
+    /// write, not only its length.
     FollowerCorrupts,
     /// A handler's error answer goes straight to its client, past the
     /// output gate, as it did before `FailedInTurn`. Caught by
@@ -220,16 +221,21 @@ pub enum Mutation {
     CollectUnretired,
     /// A bundle flush counts as durable without the re-read that proves
     /// the session's log was still open when it landed, so a fenced leader
-    /// releases writes no recovery drains. Caught by `read-before-durable`.
+    /// releases writes no recovery drains. Caught by `read-before-durable`
+    /// and `bundle-credit-unheld`.
     CreditAfterSeal,
     /// A degraded shipper reopens its log before the bucket holds what it
     /// shipped, so the new epoch's recovery finds no witness to the old
     /// epoch's fleet acks and needs none. Caught by `lost-write`.
     ReopenUntiered,
+    /// Recovery declares a bounded loss without waiting for the followers
+    /// that might come back, forgiving writes their disks still hold.
+    /// Caught by `unjustified-loss`.
+    LossWithoutWaiting,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 26] = [
+    pub const ALL: [Mutation; 27] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -256,6 +262,7 @@ impl Mutation {
         Mutation::CollectUnretired,
         Mutation::CreditAfterSeal,
         Mutation::ReopenUntiered,
+        Mutation::LossWithoutWaiting,
     ];
 }
 

@@ -53,16 +53,16 @@ impl World {
             return;
         }
         log.posture = Posture::Degraded;
-        log.pending.clear();
         let (session, epoch) = (log.session.clone(), log.epoch);
         self.note(|| format!("n{node} degrades {session} epoch {epoch}: {why}"));
         self.work(node, MAINTAIN_MS, Work::Log(LogWork::Maintain));
     }
 
-    /// The degraded shipper's tick (`maintain`): once every database's
-    /// shipped rows are in the bucket, its own and its tails'
-    /// (`may_reconfigure`), reopen the log at the next epoch with up to two
-    /// live peers. Until then, and while a reopen is in flight, try again.
+    /// The degraded shipper's tick (`maintain`): once no frame is still
+    /// waiting on its members and every database's shipped rows are in the
+    /// bucket, its own and its tails' (`may_reconfigure`), reopen the log
+    /// at the next epoch with up to two live peers. Until then, and while a
+    /// reopen is in flight, try again.
     pub(super) fn maintain(&mut self, node: usize) {
         let Some(log) = self.machines[node].proc().log.as_ref() else {
             return;
@@ -70,10 +70,10 @@ impl World {
         if log.posture == Posture::Shipping {
             return;
         }
-        let reopening = log.posture == Posture::Reopening;
+        let waiting = log.posture == Posture::Reopening || !log.pending.is_empty();
         self.work(node, MAINTAIN_MS, Work::Log(LogWork::Maintain));
         let untiered = self.config.mutation == Some(Mutation::ReopenUntiered);
-        if reopening || !(untiered || self.all_shipped_tiered(node)) {
+        if waiting || !(untiered || self.all_shipped_tiered(node)) {
             return;
         }
         let now = self.wall(node);
@@ -173,6 +173,28 @@ impl World {
         for (cell, epoch) in self.open_epochs(node) {
             self.ship(node, &cell, epoch);
         }
+    }
+
+    /// Whether this process's log should be reopening now: degraded, with
+    /// everything it shipped in the bucket, and a peer that could follow it
+    /// running, reachable and not shutting down.
+    pub(in crate::world) fn reopen_due(&self, node: usize) -> bool {
+        let m = &self.machines[node];
+        let Some(log) = m.proc().log.as_ref() else {
+            return false;
+        };
+        let peer = (self.machines.iter().enumerate()).any(|(i, peer)| {
+            i != node
+                && !peer.retired
+                && peer.partition.is_none()
+                && (peer.proc.as_ref())
+                    .is_some_and(|p| p.paused_until.is_none() && p.shutdown.is_none())
+        });
+        log.posture != Posture::Shipping
+            && m.partition.is_none()
+            && m.proc().shutdown.is_none()
+            && self.all_shipped_tiered(node)
+            && peer
     }
 
     /// This process's record as the bucket has it, while its lease is

@@ -18,6 +18,9 @@ use super::{Pending, Time, World, LOAD_SAMPLE_MS, WALL_EPOCH_MS};
 
 /// How long a quiet node may stay over its memory ceiling.
 const MEMORY_RELIEF_MS: u64 = 10_000;
+/// How long a quiet degraded log may go without reopening once it could:
+/// ten maintain ticks.
+const REOPEN_MS: u64 = 10_000;
 /// How long after a deploy's `max_age_ms` its forced moves may still take.
 pub(super) const DEPLOY_SLACK_MS: u64 = 10_000;
 
@@ -30,6 +33,8 @@ pub(super) struct Watch {
     pub(super) touched: BTreeMap<String, Time>,
     /// Since when the core has been shedding without a break.
     pub(super) shedding_since: Option<Time>,
+    /// Since when the process's log could have reopened without a break.
+    pub(super) reopen_due_since: Option<Time>,
     /// Cells whose runtime this step stopped, for good: judged once the
     /// step is over, when every socket it closed has closed.
     pub(super) stopped: Vec<String>,
@@ -244,6 +249,23 @@ impl World {
         if t >= self.settled_from() + MEMORY_RELIEF_MS && t - since > MEMORY_RELIEF_MS {
             let who = self.who(node);
             self.checker.memory_kept(t, &who, memory, t - since);
+        }
+    }
+
+    /// Watched: in a quiet fleet, a degraded log reopens within ten
+    /// maintain ticks of when it could: the bucket holds everything it
+    /// shipped, and a peer could follow it.
+    pub(super) fn judge_reopen(&mut self, node: usize) {
+        let (t, due) = (self.t, self.reopen_due(node));
+        let watch = &mut self.machines[node].proc_mut().watch;
+        if !due {
+            watch.reopen_due_since = None;
+            return;
+        }
+        let since = *watch.reopen_due_since.get_or_insert(t);
+        if t >= self.settled_from() + REOPEN_MS && t - since > REOPEN_MS {
+            let who = self.who(node);
+            self.checker.reopen_stuck(t, &who, t - since);
         }
     }
 

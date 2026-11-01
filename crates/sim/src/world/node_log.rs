@@ -553,7 +553,9 @@ impl World {
 
     /// A follower's confirmation reaches its leader. Once every follower
     /// holds a position, the fleet has proved it. A confirmation of an
-    /// earlier log epoch proves nothing.
+    /// earlier log epoch, or of a frame whose backstop already failed it,
+    /// proves nothing: production decides each batch once
+    /// (`ack_fleet_allowed`).
     fn confirmed(
         &mut self,
         node: usize,
@@ -569,9 +571,10 @@ impl World {
         if log.epoch != log_epoch {
             return;
         }
-        if let Some(confirmers) = log.pending.get_mut(&frame) {
-            confirmers.insert(follower);
-        }
+        let Some(confirmers) = log.pending.get_mut(&frame) else {
+            return;
+        };
+        confirmers.insert(follower);
         let held = log
             .confirmed
             .entry((follower, cell.clone(), epoch))
@@ -585,6 +588,12 @@ impl World {
             })
             .min()
             .unwrap_or(0);
+        if let Some(content) = self.seen(node, &cell, epoch).filter(|_| fleet > 0) {
+            let proved = content[..fleet.min(content.len())].to_vec();
+            let who = self.who(node);
+            self.checker
+                .fleet_proof(self.t, &who, &cell, epoch, &proved);
+        }
         self.fleet_reached(node, &cell, epoch, fleet);
     }
 
@@ -779,12 +788,10 @@ impl World {
         let entry = self.session(session);
         let (dead, proved) = (self.who_at(entry.node, entry.inc), entry.proved);
         let gathered = self.gather(session, None);
-        if proved && !gathered.witnessed {
-            if gathered.undecided {
-                return Err(Failure::Ambiguous);
-            }
-            let lost = self.checker.declare_loss(&dead);
-            self.stats.fleet_losses += lost;
+        let loss = proved && !gathered.witnessed;
+        let wait = self.config.mutation != Some(Mutation::LossWithoutWaiting);
+        if loss && gathered.undecided && wait {
+            return Err(Failure::Ambiguous);
         }
         for member in gathered.answering {
             let disk = &mut self.machines[member].disk.log;
@@ -796,6 +803,18 @@ impl World {
         }
         for ((cell, epoch), content) in gathered.copies {
             self.land_upload(&dead, &cell, epoch, &content);
+        }
+        // Declared once what the recovery restores is in, so it forgives
+        // only what it could not restore.
+        if loss {
+            let on_disk: Vec<_> = (self.machines.iter())
+                .filter(|m| !m.retired)
+                .flat_map(|m| &m.disk.log.copies)
+                .filter(|((s, _, _), _)| s == session)
+                .map(|((_, cell, epoch), copy)| (cell.clone(), *epoch, copy.rows.as_slice()))
+                .collect();
+            let lost = self.checker.declare_loss(self.t, &dead, &on_disk);
+            self.stats.fleet_losses += lost;
         }
         self.store.seal_log(owner, session);
         self.stats.log_recoveries += 1;

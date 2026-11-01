@@ -774,6 +774,7 @@ impl World {
             self.stats.shedding_samples += 1;
         }
         self.judge_memory(node);
+        self.judge_reopen(node);
     }
 
     /// The process on `node` dies. Its open databases stay on disk as it

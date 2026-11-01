@@ -640,7 +640,10 @@ impl World {
         let mono = self.mono(node);
         let p = self.machines[node].proc_mut();
         p.node_proof_ms = p.node_proof_ms.max(mono);
+        let who = self.who(node);
         for (cell, epoch, len) in rows {
+            self.checker
+                .bundle_credited(self.t, &who, &cell, epoch, len);
             let key = (cell.clone(), epoch);
             let p = self.machines[node].proc_mut();
             if let Some(tail) = p.tails.get_mut(&key) {
