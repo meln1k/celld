@@ -102,12 +102,11 @@ fn a_swarm_seed_replays_its_configuration_and_its_run() {
     // In a swarm the seed also draws the configuration, so one number
     // still reproduces a failure.
     for seed in [0, 3, 1_562] {
-        let config = SimConfig::swarm(seed);
+        let first = run(seed, &SimConfig::swarm(seed));
         assert_eq!(
-            format!("{config:?}"),
-            format!("{:?}", SimConfig::swarm(seed))
+            first.trace_hash,
+            run(seed, &SimConfig::swarm(seed)).trace_hash
         );
-        assert_eq!(run(seed, &config).trace_hash, run(seed, &config).trace_hash);
     }
     let shapes: std::collections::BTreeSet<_> = (0..20)
         .map(|seed| {

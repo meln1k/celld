@@ -211,7 +211,30 @@ impl SimConfig {
     pub fn swarm(seed: u64) -> Self {
         let mut rng = Rng::new(seed ^ 0x5357_4152_4d00_0000);
         let r = &mut rng;
-        // A fault rate, or zero: each fault is on in about half the seeds.
+        let ttl_ms = *r.pick(&[2_000, 3_000, 5_000, 10_000]).unwrap();
+        let faults = Faults::draw(r, ttl_ms);
+        Self {
+            nodes: r.range(2, 5) as usize,
+            cells: r.range(2, 10) as usize,
+            ttl_ms,
+            faults,
+            store_latency_ms: (1, *r.pick(&[10, 40, 120]).unwrap()),
+            request_gap_ms: (2, r.range(20, 120)),
+            max_resident: r.range(2, 8) as usize,
+            max_activations: r.range(1, 4) as usize,
+            sticky_eviction: r.chance(0.5),
+            idle_evict_ms: r.chance(0.3).then(|| r.range(500, 5_000)),
+            // The same 20 s of faults and 25 s of calm as `crashing`.
+            ..Self::crashing(0.0)
+        }
+    }
+}
+
+impl Faults {
+    /// A fault mix for one swarm seed: each fault on in about half the
+    /// seeds, at a drawn strength. Pauses and partitions last up to three
+    /// lease lifetimes, long enough for a peer to take cells over.
+    fn draw(r: &mut Rng, ttl_ms: u64) -> Self {
         let maybe = |r: &mut Rng, lo: u64, hi: u64| {
             let rate = r.range(lo, hi) as f64;
             if r.chance(0.5) {
@@ -221,8 +244,7 @@ impl SimConfig {
             }
         };
         let either = |r: &mut Rng, p: f64| if r.chance(0.5) { p } else { 0.0 };
-        let ttl_ms = *r.pick(&[2_000, 3_000, 5_000, 10_000]).unwrap();
-        let faults = Faults {
+        Self {
             crashes: maybe(r, 1, 6),
             wipe_probability: either(r, 0.3),
             pauses: maybe(r, 1, 8),
@@ -238,23 +260,6 @@ impl SimConfig {
             store_lost_response: either(r, 0.03),
             store_spike_probability: either(r, 0.02),
             store_spike_ms: r.range(500, 4_000),
-        };
-        Self {
-            nodes: r.range(2, 5) as usize,
-            cells: r.range(2, 10) as usize,
-            ttl_ms,
-            duration_ms: 45_000,
-            chaos_ms: 20_000,
-            faults,
-            store_latency_ms: (1, *r.pick(&[10, 40, 120]).unwrap()),
-            request_gap_ms: (2, r.range(20, 120)),
-            write_probability: 0.6,
-            max_resident: r.range(2, 8) as usize,
-            max_activations: r.range(1, 4) as usize,
-            sticky_eviction: r.chance(0.5),
-            idle_evict_ms: r.chance(0.3).then(|| r.range(500, 5_000)),
-            mutation: None,
-            trace: false,
         }
     }
 }
