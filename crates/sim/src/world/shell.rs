@@ -735,6 +735,13 @@ impl World {
                     op,
                     result: Err(failure),
                 }),
+                // `epoch_chain` lists every epoch and refuses a restore into
+                // an epoch some later writer already uploaded at: this
+                // claim was superseded before its restore got here.
+                _ if self.store.used_since(&cell, epoch) => core(Event::RestoreCompleted {
+                    op,
+                    result: Err(Failure::Definite),
+                }),
                 _ => Work::Replica(ReplicaWork::ChainRead {
                     op,
                     chain: self.store.read_chain(&cell, epoch),

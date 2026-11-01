@@ -212,6 +212,14 @@ impl Store {
         }
     }
 
+    /// Whether a prefix at `epoch` or above holds objects.
+    pub fn used_since(&self, cell: &str, epoch: Epoch) -> bool {
+        (self
+            .prefixes
+            .range((cell.to_string(), epoch)..=(cell.to_string(), Epoch::MAX)))
+        .any(|(_, writes)| !writes.is_empty())
+    }
+
     /// What a restore at `epoch` reads: the newest prefix below it that
     /// holds data. Every upload carries the whole database, so that one
     /// prefix is the whole chain.
