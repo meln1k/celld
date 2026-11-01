@@ -281,10 +281,7 @@ impl World {
             // No eviction snapshots yet, so nothing on disk is ever a safe
             // source: always read the chain from the bucket.
             let epoch = spec.epoch;
-            let fold = (self.machines[node].proc().tails.iter())
-                .filter(|((c, _), _)| *c == cell)
-                .map(|((_, ended), content)| (*ended, content.clone()))
-                .collect();
+            let fold = (self.machines[node].proc().tails.keys()).any(|(c, _)| *c == cell);
             let req = StoreReq::ReadChain {
                 op,
                 cell,
@@ -304,8 +301,11 @@ impl World {
         epoch: Epoch,
         chain: Option<Vec<WriteId>>,
     ) {
-        // The fold applied with the read.
-        (self.machines[node].proc_mut().tails).retain(|(c, _), _| *c != cell);
+        // The fold applied with the read: drop the tails the bucket now
+        // holds. One it missed stays for the bundle loop and the next fold.
+        let store = &self.store;
+        (self.machines[node].proc_mut().tails)
+            .retain(|(c, e), tail| *c != cell || store.durable_len(c, *e) < tail.len());
         let restored = chain.is_some();
         self.stats.restored += 1;
         let chain = chain.unwrap_or_default();

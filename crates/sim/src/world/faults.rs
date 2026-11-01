@@ -63,8 +63,12 @@ impl World {
         if self.t >= self.config.chaos_ms {
             return;
         }
+        // A crash also hits a boot waiting on its predecessor's log.
         let up: Vec<usize> = (0..self.machines.len())
-            .filter(|&node| self.machines[node].up())
+            .filter(|&node| {
+                let m = &self.machines[node];
+                m.up() || (matches!(fault, Fault::Crash) && m.booting)
+            })
             .collect();
         if let Some(&node) = self.fault_rng.pick(&up) {
             match fault {

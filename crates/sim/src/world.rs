@@ -124,6 +124,20 @@ enum Item {
     Operator(Act),
     /// The supervisor starts a new process on the node.
     Restart { node: usize },
+    /// A booting process's recovery of its predecessor's log reaches the
+    /// bucket and the followers. Its answer returns after `answer_ms`, or
+    /// never.
+    BootRecover {
+        node: usize,
+        boot: u64,
+        answer_ms: Option<u64>,
+    },
+    /// A booting process hears whether its predecessor's log is recovered.
+    Booted {
+        node: usize,
+        boot: u64,
+        recovered: bool,
+    },
     /// A paused process runs again.
     Resume { node: usize, inc: u64 },
     /// A node's network comes back.
@@ -191,6 +205,9 @@ struct Machine {
     /// serves its follower disk meanwhile, as `recover_with_follower_listener`
     /// does, so a fleet-wide restart cannot wait on itself.
     booting: bool,
+    /// The boot attempt under way: an answer for an earlier one, which a
+    /// kill or a retry replaced, is dropped.
+    boot: u64,
     proc: Option<Process>,
 }
 
@@ -205,6 +222,7 @@ impl Machine {
             partition: None,
             reload: None,
             booting: false,
+            boot: 0,
             proc: None,
         }
     }
@@ -611,6 +629,16 @@ impl World {
             Item::Fault(fault) => self.fault(fault),
             Item::Operator(act) => self.operator(act),
             Item::Restart { node } => self.restart(node),
+            Item::BootRecover {
+                node,
+                boot,
+                answer_ms,
+            } => self.boot_recover(node, boot, answer_ms),
+            Item::Booted {
+                node,
+                boot,
+                recovered,
+            } => self.booted(node, boot, recovered),
             Item::Resume { node, inc } => self.resume(node, inc),
             Item::Heal { node, partition } => self.heal(node, partition),
             Item::Probe => self.probe(),
@@ -639,20 +667,23 @@ impl World {
         }
     }
 
-    /// Start a new process on `node`: a fresh core that first acquires its
-    /// node lease.
+    /// The supervisor boots a process on `node`. In the fleet posture the
+    /// boot first recovers its predecessor's log (`node_log`).
     fn restart(&mut self, node: usize) {
         let m = &self.machines[node];
         if m.up() || m.retired {
             return;
         }
-        if self.recover_predecessor(node).is_err() {
-            // The boot waits until its predecessor's log is recovered.
-            self.machines[node].booting = true;
-            self.note(|| format!("boot n{node} waits for its predecessor's log"));
-            self.after(1_000, Item::Restart { node });
-            return;
+        if self.config.fleet {
+            self.boot(node);
+        } else {
+            self.start(node);
         }
+    }
+
+    /// Start a new process on `node`: a fresh core that first acquires its
+    /// node lease.
+    fn start(&mut self, node: usize) {
         self.machines[node].booting = false;
         // Large enough that a suspend can hold the clock back without it
         // ever reaching zero.
@@ -736,6 +767,9 @@ impl World {
     fn crash(&mut self, node: usize, wipe: bool) {
         let who = self.who(node);
         if !self.machines[node].up() {
+            if self.machines[node].booting {
+                self.kill_boot(node, wipe);
+            }
             return;
         }
         self.judge_death(node);

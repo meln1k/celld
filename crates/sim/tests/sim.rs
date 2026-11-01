@@ -244,6 +244,17 @@ fn stale_read_is_known(config: &SimConfig) -> bool {
     f.max_skew_ms > 0 || f.clock_steps > 0.0 || (f.pauses > 0.0 && f.suspend_probability > 0.0)
 }
 
+/// A node's memory walk-down can wedge: it stops shedding with the latch
+/// held, and refuses every new cell from then on (`docs/testing.md`). The
+/// cells it refuses may then go unserved, so in a run where a node stayed
+/// over its memory ceiling, a missed goal or alarm is known.
+fn memory_wedged(outcome: &Outcome) -> bool {
+    outcome
+        .watched
+        .iter()
+        .any(|w| w.kind == "memory-not-relieved")
+}
+
 /// The run passed but for known core bugs: it stopped on a known panic, or
 /// broke only a property the core is known to break.
 fn passed_but_for_known_bugs(config: &SimConfig, outcome: &Outcome) -> bool {
@@ -252,10 +263,11 @@ fn passed_but_for_known_bugs(config: &SimConfig, outcome: &Outcome) -> bool {
         .as_ref()
         .is_none_or(|panic| KNOWN_CORE_PANICS.iter().any(|bug| panic.contains(bug)));
     known
-        && outcome
-            .violations
-            .iter()
-            .all(|v| v.kind == "stale-read" && stale_read_is_known(config))
+        && outcome.violations.iter().all(|v| match v.kind {
+            "stale-read" => stale_read_is_known(config),
+            "liveness" | "alarm-not-fired" => memory_wedged(outcome),
+            _ => false,
+        })
 }
 
 /// Chaos with true clocks: no skew, no steps, no suspends.

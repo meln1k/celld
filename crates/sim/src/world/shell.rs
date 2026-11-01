@@ -50,7 +50,7 @@ impl Slot {
 }
 
 /// What happens to one bucket call.
-enum Fate {
+pub(super) enum Fate {
     /// It applies after `request_ms`, and its answer comes back
     /// `response_ms` later.
     Answered { request_ms: u64, response_ms: u64 },
@@ -117,12 +117,13 @@ pub(super) enum StoreReq {
         content: Vec<WriteId>,
     },
     /// A restore reads the newest chain below its epoch, after folding the
-    /// cell's retained tails into the bucket (`fold_cell`).
+    /// cell's tail into the bucket when an epoch here left one
+    /// (`fold_cell`).
     ReadChain {
         op: OpId,
         cell: String,
         epoch: Epoch,
-        fold: Vec<(Epoch, Vec<WriteId>)>,
+        fold: bool,
     },
     /// Publish the wake entry of the cell's alarm. With `retire`, then
     /// retire the entries it makes obsolete, as `maintain_wake_entry` does.
@@ -492,7 +493,7 @@ impl World {
     /// Draw the fate of one call: its latencies, then the faults that
     /// override them. A partition overrides everything: the call never
     /// gets out.
-    fn fate(&mut self, node: usize, timeout: u64) -> Fate {
+    pub(super) fn fate(&mut self, node: usize, timeout: u64) -> Fate {
         let mut request_ms = self.latency();
         let mut response_ms = self.latency();
         // The failure the caller hears, and whether the call applied anyway.
@@ -724,17 +725,18 @@ impl World {
                 cell,
                 epoch,
                 fold,
-            } => {
-                for (ended, content) in fold {
-                    self.land_upload(&sender, &cell, ended, &content);
-                }
-                Work::Replica(ReplicaWork::ChainRead {
+            } => match fold.then(|| self.fold_tail(node, inc, &cell)) {
+                Some(Err(failure)) => core(Event::RestoreCompleted {
+                    op,
+                    result: Err(failure),
+                }),
+                _ => Work::Replica(ReplicaWork::ChainRead {
                     op,
                     chain: self.store.read_chain(&cell, epoch),
                     cell,
                     epoch,
-                })
-            }
+                }),
+            },
             StoreReq::Wake {
                 cell,
                 alarm,
