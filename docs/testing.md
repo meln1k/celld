@@ -122,14 +122,24 @@ Half of the swarm seeds run the fleet posture (`CELLD_DURABILITY=fleet`,
 
 - Each process leads a log with up to two followers on other machines.
   Each commit ships to them, and once both have confirmed it, the output gate
-  releases the response with no read of the owner record. The bucket gets the
-  writes every 2 s.
+  releases the response with no read of the owner record. Every 2 s the
+  bundle loop puts one bundle per session in the bucket, holding every open
+  database with writes past what the bucket covers. A bundle counts for the
+  gate only if the lease still says the log is open when it lands. It counts
+  for no restore: a stop's final upload, a fold or a recovery copies its rows
+  into the cell's prefix.
+- A follower that has not confirmed a frame within 1.5 s degrades its
+  leader: nothing ships, and the gate waits for bundles. Once the bucket
+  holds everything the log shipped, the leader reopens the log at the next
+  log epoch with up to two live peers. The new epoch has no fleet acks yet,
+  and its followers hold only the rows shipped after the reopen.
 - A cell epoch that ends without its final upload, after a reset or a fence,
-  keeps its confirmed writes as a tail, which the bundle loop flushes. The
-  cell's next activation on that process first folds in what the session's
-  followers hold of the cell, as `fold_cell` does. If the session may have
-  fleet acks and no follower that answers holds the whole session, the
-  activation fails rather than open a database missing acknowledged writes.
+  keeps what its log shipped or a bundle covered as a tail. The cell's next
+  activation on that process first folds in the session's bundles and what
+  its current followers hold of the cell, as `fold_cell` does, and drops the
+  tail. If the session may have fleet acks and no follower that answers
+  holds the whole log epoch, the activation fails rather than open a
+  database missing acknowledged writes.
 - Taking over a cell whose dead owner's log is not sealed, or restarting
   after such a process, first recovers that log. Recovery seals every
   follower that answers, so the dead leader can prove nothing more, and
@@ -139,9 +149,11 @@ Half of the swarm seeds run the fleet posture (`CELLD_DURABILITY=fleet`,
   gathers. One that may have (`may_have_fleet_acks`) and has no follower
   holding the whole session waits for every follower that might come back,
   then declares a bounded loss, and the oracle forgets what that loss
-  covers. Recovery reads and writes the bucket, so it fails, times out, or
-  applies with its answer lost, as a bucket call does, at boot too.
-- A graceful exit whose writes are all in the bucket seals its own log.
+  covers. Recovery drains every bundle of the session first. It reads and
+  writes the bucket, so it fails, times out, or applies with its answer
+  lost, as a bucket call does, at boot too.
+- A graceful exit seals its own log if its prefixes hold everything it
+  shipped and bundled, and no tail waits for a fold.
 
 Most swarm seeds, and the chaos runs, have some handlers throw at the end of
 their turn, after any write they made. As in production, the error answer
@@ -268,34 +280,34 @@ core, not to the simulator or to the property itself.
 once the fleet is quiet, 15 s after the faults end, so that a bucket call lost
 just before the end has timed out. The others judge at the moment their fact
 arrives. **unclaimed-handoff** and **base-deleted** have never fired on the
-current simulator, and **alarm-undiscoverable** has fired in one seed, so
-each has a planted bug that the test suite requires it to catch, as it does
+current simulator, and **alarm-undiscoverable** fires only after a known
+bug lost the write behind it, so each has a planted bug that the test suite requires it to catch, as it does
 for an enforced check. The sweep below is the evidence that the others can
 fire, except **deploy-stuck**, which has never fired, so nothing yet shows
 that it can. In 100,000 swarm seeds:
 
-- 408 seeds kept an idle cell resident, 361 of them in a run where a
+- 401 seeds kept an idle cell resident, 353 of them in a run where a
   walk-down had wedged: the core evicts idle cells only while it is not
   shedding.
-- 288 seeds claimed during a preserve, never during a drain. An eviction
+- 287 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
   cell, though `begin_preserve` retires cold work.
-- 57 seeds resumed a superseded epoch: after faulty clocks, the slow clean
+- 55 seeds resumed a superseded epoch: after faulty clocks, the slow clean
   reload below, or a claim during a preserve.
-- 1 seed (swarm 33191) left an acknowledged alarm with no wake entry due by
-  its time: the slow clean reload below acknowledged the write that set it
-  into a superseded epoch.
-- 5 seeds left a durable alarm unfired when the audit ended.
-- 10 seeds lost a proven alarm handler commit (11 with validation
-  compiled out), all after the
-  slow clean reload below or a clock fault: the same failures that lose acknowledged writes, seen through an alarm.
+- 4 seeds (5 with validation compiled out) left an acknowledged alarm with
+  no wake entry due by its time, every one after a failed activation handed
+  its cell away (below) and lost the write that set it.
+- 4 seeds left a durable alarm unfired when the audit ended.
+- 136 seeds lost a proven alarm handler commit (167 with validation
+  compiled out), all after a failed activation handed the cell away, the
+  slow clean reload below, or a clock fault: the same failures that lose
+  acknowledged writes, seen through an alarm.
 - With validation compiled out, 1,790 seeds kept an outbound socket open
   after its runtime stopped. With it on, the live-transport invariant stops
   those runs first. These hits are not yet traced.
 
-The simulator does not yet model V8, or, in the fleet log, bundles, the
-recovery claim, and reconfiguring a session when a follower dies (its acks
-fall back to the bucket). Its memory has no allocator slack, cgroup or
+The simulator does not yet model V8, or, in the fleet log, the recovery
+claim, gray-failure eviction, compaction of bundle rows, and bundle GC. Its memory has no allocator slack, cgroup or
 containers, no noise between samples, and returns a cell's whole share when
 the cell goes, and its heap's the moment the heap is empty.
 
@@ -331,15 +343,25 @@ The core on `main` fails some seeds.
   none, so the owner goes on acknowledging writes the claim then restores
   without (swarm 38836, after a 0.9 s step against a 5 s lease). A VM
   suspend does the same (swarm 40737).
-- **A failed tail fold hands the cell away** (**lost-write**). A cell epoch
-  that ended without its final upload leaves fleet-acked writes in its
-  node's tail. When the cell next activates there, `fold_cell` finds no
-  complete follower (the one that has every frame is down) and fails the
-  activation, as it must. The core then gives the cell away, by rebalance
-  or release, and the peer that adopts it restores from the bucket alone:
-  nothing folds the first node's tail for it, so the acknowledged writes
-  are gone (swarm 92204). Production's healing pass, which may repair this
-  later, is not modelled.
+- **A failed activation hands the cell away** (**lost-write**). A cell
+  epoch that ended without its final upload leaves acknowledged writes that
+  only its node's followers and bundles hold, and only that node's tail
+  names. When the cell next activates there, `fold_cell` finds no complete
+  follower (the one that has every frame is down) and fails the
+  activation, as it must, or the restore's bucket read fails. The core then
+  gives the cell away, by rebalance or release, and the peer that adopts
+  it restores from the bucket alone: nothing folds the first node's tail
+  for it, so the acknowledged writes are gone (swarm 92204, 32015).
+  Production's healing pass, which may repair this later, is not modelled.
+- **A degraded log waits forever on a tail** (**liveness**,
+  **alarm-not-fired**). A leader whose follower missed a frame degrades,
+  and reopens its log only once the bucket holds every row it shipped
+  (`all_fragment_rows_tiered`), of stopped cells too. A cell reset while
+  degraded leaves a tail whose shipped rows no bundle carried: the bundle
+  loop flushes only open databases, and only the fold uploads a tail. The
+  fold needs a complete follower, and the follower that missed the frame
+  never becomes one, so the fold fails, the log never reopens, and the cell
+  never activates on that node again (swarm 1809, 2864, 5099).
 - **Eleven `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.
@@ -380,19 +402,24 @@ The core on `main` fails some seeds.
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-In 100,000 swarm seeds, 11,421 failed in a debug build: 10,166 on the
-invariants (3,120 of them on live transports, 2,530 on alarms firing while
-not resident), 846 on liveness or `alarm-not-fired`, 400 on stale reads,
-and 9 on lost writes in the fleet posture. All but 37 of the liveness and
-alarm failures are seeds where a node's memory walk-down wedged, and those
-37 are the capacity livelock; 1,246 seeds wedged in all, most of them with
-every cell in one heap. With validation compiled out, 1,651 failed: 1,014
-on liveness or `alarm-not-fired` (972 of them wedged), 480 on stale reads,
-144 on
-`evicted-pinned` (the core goes on to evict a cell whose live transport the
-invariant would have caught), and 13 on lost writes in the fleet posture:
-9 after a failed tail fold, 2 after a slow clean reload, and 2 after a
-clock fault. Between them, the seeds entered
+In 100,000 swarm seeds, 11,985 failed in a debug build: 10,260 on the
+invariants (3,094 of them on live transports, 2,583 on alarms firing while
+not resident), 1,040 on liveness or `alarm-not-fired`, 377 on stale reads,
+303 on lost writes and 5 on late acknowledgements in the fleet posture. Of
+the liveness and alarm failures, 806 are seeds where a node's memory
+walk-down wedged, 195 a degraded log waiting on a tail, and 39 the capacity
+livelock; 1,261 seeds wedged in all, most of them with every cell in one
+heap. Of the lost writes, 294 followed a failed activation (283 a failed
+fold, 11 a failed bucket read) and 9 a clock fault; the late
+acknowledgements all followed a clock fault or a slow clean reload. With
+validation compiled out, 2,191 failed: 1,206 on liveness or
+`alarm-not-fired` (952 wedged, 211 waiting on a tail, 43 the capacity
+livelock), 455 on stale reads, 151 on `evicted-pinned` (the core goes on to
+evict a cell whose live transport the invariant would have caught), 373 on
+lost writes in the fleet posture: 361 after a failed activation, 11 after a
+clock fault, and 1 after the release-ceiling invariant would have stopped
+the run (the core releases a cell it swapped out, with no final upload),
+and 6 on late acknowledgements. Between them, the seeds entered
 every phase.
 
 The known failures are listed seed by seed in

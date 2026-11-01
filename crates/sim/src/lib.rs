@@ -218,10 +218,18 @@ pub enum Mutation {
     /// The collector deletes every wake entry it lists, retired or not.
     /// Caught by `alarm-undiscoverable`.
     CollectUnretired,
+    /// A bundle flush counts as durable without the re-read that proves
+    /// the session's log was still open when it landed, so a fenced leader
+    /// acknowledges writes no recovery drained. Caught by `lost-write`.
+    CreditAfterSeal,
+    /// A degraded shipper reopens its log before the bucket holds what it
+    /// shipped, so the new epoch's recovery finds no witness to the old
+    /// epoch's fleet acks and needs none. Caught by `lost-write`.
+    ReopenUntiered,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 24] = [
+    pub const ALL: [Mutation; 26] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -246,6 +254,8 @@ impl Mutation {
         Mutation::StaleSnapshot,
         Mutation::GcUnlisted,
         Mutation::CollectUnretired,
+        Mutation::CreditAfterSeal,
+        Mutation::ReopenUntiered,
     ];
 }
 

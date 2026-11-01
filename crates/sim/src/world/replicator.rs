@@ -55,8 +55,11 @@ pub(super) struct Replica {
     lineage: usize,
     /// Length when the epoch opened: the chain it was restored from.
     start_len: usize,
-    /// Length the bucket is known to hold for this epoch.
+    /// Length the bucket is known to hold for this epoch in its prefix.
     uploaded: usize,
+    /// Length a credited bundle flush covers (`durable_txid`): durable for
+    /// the output gate, but not in the per-cell layout a restore reads.
+    bundled: usize,
     /// Length every follower of the process's log confirmed holding.
     fleet: usize,
     uploading: bool,
@@ -234,11 +237,12 @@ impl World {
             for deadline in replica.deadlines.values() {
                 self.cancel(*deadline);
             }
-            // What the followers confirmed may be acknowledged
-            // and is not in the bucket yet: keep it as a tail
+            // What the log shipped or a bundle covers may be acknowledged
+            // and is not in the per-cell layout yet: keep it as a tail
             // (`note_undrained_tail`).
-            if replica.fleet > replica.uploaded {
-                let tail = replica.content[..replica.fleet].to_vec();
+            let acked = self.shipped_len(node, &key.0, epoch).max(replica.bundled);
+            if acked > replica.uploaded {
+                let tail = replica.content[..acked].to_vec();
                 self.machines[node]
                     .proc_mut()
                     .tails
@@ -339,11 +343,9 @@ impl World {
         epoch: Epoch,
         chain: Option<Vec<WriteId>>,
     ) {
-        // The fold applied with the read: drop the tails the bucket now
-        // holds. One it missed stays for the bundle loop and the next fold.
-        let store = &self.store;
-        (self.machines[node].proc_mut().tails)
-            .retain(|(c, e), tail| *c != cell || store.durable_len(c, *e) < tail.len());
+        // The fold applied with the read: the cell's tails are gone, as
+        // `fold_cell`'s success clears its `dirty_tails` entry.
+        (self.machines[node].proc_mut().tails).retain(|(c, _), _| *c != cell);
         let restored = chain.is_some();
         self.stats.restored += 1;
         let chain = chain.unwrap_or_default();
@@ -375,6 +377,7 @@ impl World {
             start_len: len,
             // What it opened with is already in the bucket, below this epoch.
             uploaded: len,
+            bundled: 0,
             fleet: 0,
             uploading: false,
             capture_len: 0,
@@ -600,6 +603,37 @@ impl World {
         self.store_call(node, req);
     }
 
+    /// A bundle flush landed and was `credited`: the gate may count the
+    /// rows it carried as durable.
+    pub(super) fn bundled(&mut self, node: usize, rows: Vec<(String, Epoch, usize)>) {
+        let mono = self.mono(node);
+        let p = self.machines[node].proc_mut();
+        p.node_proof_ms = p.node_proof_ms.max(mono);
+        for (cell, epoch, len) in rows {
+            let key = (cell.clone(), epoch);
+            if let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) {
+                replica.bundled = replica.bundled.max(len);
+                self.settle_proofs(node, &cell, epoch);
+            }
+        }
+    }
+
+    /// How much of the cell epoch the bucket covers for this process: its
+    /// uploads and its credited bundles (`durable_txid`).
+    pub(super) fn durable_here(&self, node: usize, cell: &str, epoch: Epoch) -> usize {
+        let replicas = &self.machines[node].proc().replicas;
+        (replicas.get(&(cell.to_string(), epoch))).map_or(0, |r| r.uploaded.max(r.bundled))
+    }
+
+    /// The rows the next bundle flush carries: each open database with
+    /// writes past what the bucket covers (`req_seq > synced_seq`).
+    pub(super) fn bundle_rows(&self, node: usize) -> Vec<(String, Epoch, Vec<WriteId>)> {
+        (self.machines[node].proc().replicas.iter())
+            .filter(|(_, r)| r.content.len() > r.uploaded.max(r.bundled))
+            .map(|((cell, epoch), r)| (cell.clone(), *epoch, r.content.clone()))
+            .collect()
+    }
+
     /// An upload failed, or nobody knows whether it applied. Upload again
     /// after a backoff: an upload is idempotent.
     pub(super) fn upload_failed(&mut self, node: usize, cell: String, epoch: Epoch) {
@@ -673,6 +707,7 @@ impl World {
             return;
         };
         let uploaded = replica.uploaded as u64;
+        let durable = replica.uploaded.max(replica.bundled) as u64;
         let fleet = replica.fleet as u64;
         let mut answers = Vec::new();
         let mut settled = Vec::new();
@@ -683,8 +718,8 @@ impl World {
             let answer = if waiter.position() <= fleet {
                 fleet_proved = true;
                 waiter.answer_from(Ok(fleet), ProofSource::Fleet)
-            } else if waiter.position() <= uploaded {
-                waiter.answer(Ok(uploaded))
+            } else if waiter.position() <= durable {
+                waiter.answer(Ok(durable))
             } else {
                 return true;
             };

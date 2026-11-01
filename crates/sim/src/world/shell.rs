@@ -127,6 +127,18 @@ pub(super) enum StoreReq {
         epoch: Epoch,
         fold: bool,
     },
+    /// One flush of a session's bundle loop.
+    Bundle {
+        session: String,
+        rows: Vec<(String, Epoch, Vec<WriteId>)>,
+    },
+    /// A degraded shipper's lease write that reopens its log at the epoch
+    /// after `from` with `ensemble`.
+    Reopen {
+        session: String,
+        from: u64,
+        ensemble: Vec<usize>,
+    },
     /// One step of an owner's epoch GC pass.
     Gc(GcReq),
     /// One step of a wake loop.
@@ -616,6 +628,11 @@ impl World {
             StoreReq::Wake { gate: None, .. } => Work::Nothing,
             // The pass ends; the next tick starts another.
             StoreReq::Gc(_) => Work::Nothing,
+            StoreReq::Bundle { .. } => Work::Log(LogWork::Bundled {
+                rows: Vec::new(),
+                credited: false,
+            }),
+            StoreReq::Reopen { .. } => Work::Log(LogWork::Reopened(None)),
             StoreReq::Waker(req) => World::waker_failed(req),
         }
     }
@@ -763,6 +780,34 @@ impl World {
                 }),
             },
             StoreReq::Gc(req) => self.gc_apply(node, req),
+            StoreReq::Bundle { session, rows } => {
+                let lens: Vec<_> = (rows.iter())
+                    .map(|(cell, epoch, content)| (cell.clone(), *epoch, content.len()))
+                    .collect();
+                self.store.put_bundle(&session, rows);
+                for (cell, epoch, _) in &lens {
+                    let held = self.store.prefix(cell, *epoch).len();
+                    self.checker.prefix_grew(self.t, cell, *epoch, held);
+                    self.judge_discoverable(cell);
+                }
+                // The PUT applies whatever happens; its rows count only if
+                // the lease still says this session's log is open.
+                let credited = self.config.mutation == Some(Mutation::CreditAfterSeal)
+                    || self.store.read_lease(&name).is_some_and(|lease| {
+                        lease.generation == session && lease.log_state == Some(LogState::Open)
+                    });
+                Work::Log(LogWork::Bundled {
+                    rows: lens,
+                    credited,
+                })
+            }
+            StoreReq::Reopen {
+                session,
+                from,
+                ensemble,
+            } => Work::Log(LogWork::Reopened(
+                self.apply_reopen(&name, &session, from, ensemble),
+            )),
             StoreReq::Waker(req) => self.waker_apply(node, req),
             StoreReq::Wake {
                 cell,

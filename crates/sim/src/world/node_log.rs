@@ -9,28 +9,46 @@
 //!   it on its disk. Once every follower has confirmed a position, the
 //!   output gate may release it: `DurableReached { source: Fleet }`, with
 //!   no read of the owner record. The bucket gets the same writes only on
-//!   the bundle loop's tick.
+//!   the bundle loop's tick, as one bundle of the session
+//!   (`log/<session>/bundle/<seq>`) for every open database with writes
+//!   past what the bucket covers. A bundle counts as durable for the gate
+//!   only if the lease still says the log is open once it lands
+//!   (`bundle_credit_allowed`): a fenced leader's late bundle proves
+//!   nothing. No restore reads bundles; a stop's final upload, a fold and a
+//!   recovery copy their rows into the per-cell prefixes.
 //! - When a node takes over a cell from a dead owner whose lease says its
 //!   log is not sealed, the core asks for `RecoverNodeLog` first. Recovery
 //!   seals every follower it can reach, so the dead leader can never again
 //!   prove a write through them, uploads what they hold into the bucket,
 //!   and marks the lease body `Sealed`. A restart does the same for its own
 //!   predecessor before it takes the lease over.
-//! - A cell epoch that ends without its final upload keeps what its
-//!   followers confirmed as a tail (`Process::tails`), which the bundle
-//!   loop flushes. The cell's next restore here first folds in what the
-//!   followers hold of it (`fold_cell`).
+//! - A cell epoch that ends without its final upload keeps what its log
+//!   shipped or a bundle covers as a tail (`Process::tails`).
+//!   The cell's next restore here first folds in what the followers and
+//!   the session's bundles hold of it (`fold_cell`); a recovery drains every
+//!   bundle of the session.
 //! - A follower is a complete witness when it holds every frame of the
-//!   session up to the highest it received. Without one, a session that
-//!   may have fleet acks fails a fold, and makes recovery wait for every
-//!   follower that might still come back; once all are conclusively gone,
-//!   recovery declares a bounded loss, as production does. A booting
-//!   process answers for its disk while it waits for its own predecessor
+//!   session's current log epoch up to the highest it received. Without
+//!   one, a session that may have fleet acks at that epoch fails a fold,
+//!   and makes recovery wait for every follower that might still come
+//!   back; once all are conclusively gone, recovery declares a bounded
+//!   loss, as production does. A booting process answers for its disk
+//!   while it waits for its own predecessor
 //!   (`recover_with_follower_listener`).
+//! - A member that has not confirmed a frame within the backstop degrades
+//!   the shipper: nothing ships, and the gate rides the bundle loop. Once
+//!   the bucket holds everything the log shipped, of open databases and
+//!   tails (`may_reconfigure`), the degraded leader reopens the log at the
+//!   next log epoch with up to two live peers, by a lease write that
+//!   applies only while the lease is still its own and open. The new epoch
+//!   has no fleet acks yet, and its fragments start where the old epoch's
+//!   shipping stopped: a joiner holds only the rows from there on, and a
+//!   follower drops what it held of an earlier epoch when it adopts a new
+//!   one. Fold and recovery read the current epoch's members only.
 //!
-//! Not modelled: reconfiguring the ensemble when a follower dies (the
-//! session's acks fall back to the bucket instead), and the bundles
-//! themselves (a flush uploads into the cell's prefix).
+//! Not modelled: gray-failure eviction (`log_evict`'s latency verdicts and
+//! quarantine), the swap rate cap, compaction of bundle rows into per-cell
+//! objects, and bundle GC (bundles are never deleted).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,16 +65,39 @@ const FLUSH_MS: u64 = 2_000;
 const FOLLOWERS: usize = 2;
 /// One-way latency between two nodes.
 const PEER_MS: (u64, u64) = (1, 5);
+/// How long an append may stay unconfirmed before its member counts as
+/// failed and the shipper degrades (`log_evict`'s backstop).
+const APPEND_BACKSTOP_MS: u64 = 1_500;
+/// How often a degraded shipper tries to re-recruit its ensemble
+/// (`maintain`, from the posture watch).
+const MAINTAIN_MS: u64 = 1_000;
 
 /// The log a process leads.
 pub(super) struct Log {
     session: String,
+    /// The log epoch the shipper ships at: the record's, once the leader
+    /// heard its reopen applied.
+    epoch: u64,
     /// A lease write carrying `Open` landed: fleet proofs may begin.
     open: bool,
+    /// A member failed an append: nothing ships until a reopen installs
+    /// a new ensemble, and the gate rides the bundle loop.
+    degraded: bool,
+    /// A reopen's lease write is in flight.
+    reopening: bool,
+    /// The members that confirmed each frame of this epoch still inside
+    /// its backstop.
+    pending: BTreeMap<u64, BTreeSet<usize>>,
     /// The longest database of each cell epoch each follower confirmed.
     confirmed: BTreeMap<(usize, String, Epoch), usize>,
     /// The longest database of each cell epoch shipped so far.
     shipped: BTreeMap<(String, Epoch), usize>,
+    /// Where this log epoch's fragment of each cell epoch starts: what
+    /// was shipped when it reopened, which its barrier put in the bucket.
+    /// A joiner holds only the rows from there on.
+    floor: BTreeMap<(String, Epoch), usize>,
+    /// A bundle flush is in flight: the loop awaits it before its next.
+    bundling: bool,
 }
 
 /// What a machine's disk holds as a follower. A wipe loses all of it.
@@ -71,21 +112,27 @@ pub(super) struct FollowerDisk {
     /// Sessions recovery sealed here: it refuses their appends forever.
     sealed: BTreeSet<String>,
     copies: BTreeMap<(String, String, Epoch), Vec<WriteId>>,
+    /// Where each copy's fragment starts: the rows below it are the
+    /// bucket's to supply.
+    floors: BTreeMap<(String, String, Epoch), usize>,
 }
 
-/// The frames of one session a follower holds.
+/// The frames of one log epoch of a session a follower holds.
 #[derive(Clone, Copy, Default)]
 struct Frames {
+    epoch: u64,
     held: u64,
     highest: u64,
 }
 
-/// One session as its log record names it: its leader, its followers,
-/// how many frames it has shipped, and whether the fleet may have proved a
-/// write for it (`may_have_fleet_acks`, set as the first credit is).
+/// One session as its log record names it: its leader, its log epoch and
+/// that epoch's followers, how many frames it has shipped at it, and
+/// whether the fleet may have proved a write at it (`may_have_fleet_acks`,
+/// set as the first credit is, cleared by a reopen).
 pub(super) struct Session {
     node: usize,
     inc: u64,
+    epoch: u64,
     ensemble: Vec<usize>,
     frames: u64,
     proved: bool,
@@ -120,15 +167,20 @@ pub(super) enum LogWork {
     Append {
         session: String,
         leader: (usize, u64),
-        /// The frame's place in the session, from 1.
+        log_epoch: u64,
+        /// The frame's place in the log epoch, from 1.
         frame: u64,
         cell: String,
         epoch: Epoch,
+        /// Where the fragment starts (`Log::floor`).
+        from: usize,
         content: Vec<WriteId>,
     },
     /// A follower confirmed holding `len` writes of a cell epoch.
     Confirmed {
         follower: usize,
+        log_epoch: u64,
+        frame: u64,
         cell: String,
         epoch: Epoch,
         len: usize,
@@ -138,6 +190,19 @@ pub(super) enum LogWork {
     LeaseOpened(Event),
     /// The bundle loop's tick.
     Flush,
+    /// A bundle flush of these rows landed, or failed: only a `credited`
+    /// one covers them.
+    Bundled {
+        rows: Vec<(String, Epoch, usize)>,
+        credited: bool,
+    },
+    /// A frame's backstop ran out: every member must have confirmed it.
+    Backstop { log_epoch: u64, frame: u64 },
+    /// The degraded shipper's maintenance tick.
+    Maintain,
+    /// A reopen's lease write answered: the record's epoch and ensemble
+    /// if it moved past the shipper's, or nothing.
+    Reopened(Option<(u64, Vec<usize>)>),
     /// `RecoverNodeLog` for the cells of `owner`, answered `answer_ms`
     /// later unless the answer is lost.
     Recover {
@@ -157,35 +222,50 @@ impl World {
             LogWork::Append {
                 session,
                 leader,
+                log_epoch,
                 frame,
                 cell,
                 epoch,
+                from,
                 content,
-            } => self.append(node, session, leader, frame, cell, epoch, content),
+            } => {
+                let at = (log_epoch, frame);
+                self.append(node, session, leader, at, cell, epoch, from, content)
+            }
             LogWork::Confirmed {
                 follower,
+                log_epoch,
+                frame,
                 cell,
                 epoch,
                 len,
-            } => self.confirmed(node, follower, cell, epoch, len),
+            } => self.confirmed(node, follower, (log_epoch, frame), cell, epoch, len),
+            LogWork::Backstop { log_epoch, frame } => self.backstop(node, log_epoch, frame),
+            LogWork::Maintain => self.maintain(node),
+            LogWork::Reopened(record) => self.reopened(node, record),
             LogWork::LeaseOpened(event) => {
                 self.log_opened(node);
                 self.drive(node, event);
             }
             LogWork::Flush => {
                 self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
-                let open: Vec<_> = self.open_epochs(node);
-                for (cell, epoch) in open {
-                    self.upload(node, &cell, epoch);
+                let rows = self.bundle_rows(node);
+                let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+                    return;
+                };
+                if log.bundling || rows.is_empty() {
+                    return;
                 }
-                let tails = self.machines[node].proc().tails.clone();
-                for ((cell, epoch), content) in tails {
-                    let req = StoreReq::Upload {
-                        cell,
-                        epoch,
-                        content,
-                    };
-                    self.store_call(node, req);
+                log.bundling = true;
+                let session = log.session.clone();
+                self.store_call(node, StoreReq::Bundle { session, rows });
+            }
+            LogWork::Bundled { rows, credited } => {
+                if let Some(log) = self.machines[node].proc_mut().log.as_mut() {
+                    log.bundling = false;
+                }
+                if credited {
+                    self.bundled(node, rows);
                 }
             }
             LogWork::Recover {
@@ -233,6 +313,7 @@ impl World {
         let entry = Session {
             node,
             inc,
+            epoch: 1,
             ensemble: ensemble.clone(),
             frames: 0,
             proved: false,
@@ -242,9 +323,15 @@ impl World {
         self.checker.log_opened(&who, &ensemble);
         self.machines[node].proc_mut().log = Some(Log {
             session,
+            epoch: 1,
             open: false,
+            degraded: false,
+            reopening: false,
+            pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
             shipped: BTreeMap::new(),
+            floor: BTreeMap::new(),
+            bundling: false,
         });
         self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
     }
@@ -260,6 +347,14 @@ impl World {
                 Upload::Wait { evict } => evict,
                 Upload::Landed { stopping } => stopping,
             }
+    }
+
+    /// The longest database of the cell epoch the process's log shipped.
+    pub(super) fn shipped_len(&self, node: usize, cell: &str, epoch: Epoch) -> usize {
+        let log = self.machines[node].proc().log.as_ref();
+        log.and_then(|log| log.shipped.get(&(cell.to_string(), epoch)))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The fleet just proved a write for this process: its session may
@@ -327,22 +422,34 @@ impl World {
         let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
         };
-        if !log.open {
+        if !log.open || log.degraded {
             return;
         }
         let len = log.shipped.entry((cell.to_string(), epoch)).or_default();
         *len = (*len).max(content.len());
-        let session = log.session.clone();
+        let (session, log_epoch) = (log.session.clone(), log.epoch);
+        let from = log.floor.get(&(cell.to_string(), epoch)).copied();
+        let from = from.unwrap_or(0);
         let entry = self.session_mut(&session);
         entry.frames += 1;
         let (frame, ensemble) = (entry.frames, entry.ensemble.clone());
+        let backstop = Work::Log(LogWork::Backstop { log_epoch, frame });
+        self.work(node, APPEND_BACKSTOP_MS, backstop);
+        let log = self.machines[node]
+            .proc_mut()
+            .log
+            .as_mut()
+            .expect("checked");
+        log.pending.insert(frame, BTreeSet::new());
         for follower in ensemble {
             let work = Work::Log(LogWork::Append {
                 session: session.clone(),
                 leader,
+                log_epoch,
                 frame,
                 cell: cell.to_string(),
                 epoch,
+                from,
                 content: content.clone(),
             });
             self.peer_send(node, follower, None, work);
@@ -350,17 +457,20 @@ impl World {
     }
 
     /// A follower receives a cell epoch's database. It keeps it on its disk
-    /// and confirms, unless recovery sealed the session here. A follower
-    /// that does not know the session joins it now.
+    /// and confirms, unless recovery sealed the session here or it already
+    /// follows a later log epoch of it. A follower that does not know the
+    /// session joins it now; one that knows an earlier epoch adopts this
+    /// one and drops what it held of the earlier (`adopt`).
     #[allow(clippy::too_many_arguments)]
     fn append(
         &mut self,
         node: usize,
         session: String,
         leader: (usize, u64),
-        frame: u64,
+        (log_epoch, frame): (u64, u64),
         cell: String,
         epoch: Epoch,
+        from: usize,
         content: Vec<WriteId>,
     ) {
         let ignore_seal = self.config.mutation == Some(Mutation::FollowerIgnoresSeal);
@@ -369,11 +479,25 @@ impl World {
             return;
         }
         let frames = disk.joined.entry(session.clone()).or_default();
+        if log_epoch < frames.epoch {
+            return;
+        }
+        if log_epoch > frames.epoch {
+            *frames = Frames {
+                epoch: log_epoch,
+                ..Frames::default()
+            };
+            disk.copies.retain(|(s, _, _), _| *s != session);
+            disk.floors.retain(|(s, _, _), _| *s != session);
+        }
+        let frames = disk.joined.get_mut(&session).expect("joined");
         frames.held += 1;
         frames.highest = frames.highest.max(frame);
+        let key = (session.clone(), cell.clone(), epoch);
+        disk.floors.entry(key).or_insert(from);
         let copy = disk
             .copies
-            .entry((session, cell.clone(), epoch))
+            .entry((session.clone(), cell.clone(), epoch))
             .or_default();
         if content.len() > copy.len() {
             *copy = content;
@@ -384,10 +508,16 @@ impl World {
         let held = copy.clone();
         let len = held.len();
         let leader_who = self.who_at(leader.0, leader.1);
-        self.checker
-            .follower_fsynced(&leader_who, node, &cell, epoch, &held);
+        // The oracle counts a copy of the record's epoch only: what a
+        // member holds of an earlier one, the reopen's barrier tiered.
+        if self.session(&session).epoch == log_epoch {
+            self.checker
+                .follower_fsynced(&leader_who, node, &cell, epoch, &held);
+        }
         let work = Work::Log(LogWork::Confirmed {
             follower: node,
+            log_epoch,
+            frame,
             cell,
             epoch,
             len,
@@ -396,11 +526,26 @@ impl World {
     }
 
     /// A follower's confirmation reaches its leader. Once every follower
-    /// holds a position, the fleet has proved it.
-    fn confirmed(&mut self, node: usize, follower: usize, cell: String, epoch: Epoch, len: usize) {
+    /// holds a position, the fleet has proved it. A confirmation of an
+    /// earlier log epoch proves nothing.
+    fn confirmed(
+        &mut self,
+        node: usize,
+        follower: usize,
+        (log_epoch, frame): (u64, u64),
+        cell: String,
+        epoch: Epoch,
+        len: usize,
+    ) {
         let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
         };
+        if log.epoch != log_epoch {
+            return;
+        }
+        if let Some(confirmers) = log.pending.get_mut(&frame) {
+            confirmers.insert(follower);
+        }
         let held = log
             .confirmed
             .entry((follower, cell.clone(), epoch))
@@ -415,6 +560,143 @@ impl World {
             .min()
             .unwrap_or(0);
         self.fleet_reached(node, &cell, epoch, fleet);
+    }
+
+    /// A frame's backstop ran out. A member that has not confirmed it
+    /// failed its append: degrade (`degrade_shared`).
+    fn backstop(&mut self, node: usize, log_epoch: u64, frame: u64) {
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return;
+        };
+        let Some(confirmers) = log.pending.remove(&frame) else {
+            return;
+        };
+        let session = log.session.clone();
+        if log.epoch != log_epoch || log.degraded {
+            return;
+        }
+        if confirmers.len() < self.session(&session).ensemble.len() {
+            self.note(|| format!("n{node} degrades {session} epoch {log_epoch}: frame {frame}"));
+            let log = self.machines[node]
+                .proc_mut()
+                .log
+                .as_mut()
+                .expect("checked");
+            log.degraded = true;
+            log.pending.clear();
+            self.work(node, MAINTAIN_MS, Work::Log(LogWork::Maintain));
+        }
+    }
+
+    /// The degraded shipper's tick (`maintain`): once every database's
+    /// shipped rows are in the bucket, its own and its tails'
+    /// (`may_reconfigure`), reopen the log at the next epoch with up to two
+    /// live peers. Until then, and while a reopen is in flight, try again.
+    fn maintain(&mut self, node: usize) {
+        let Some(log) = self.machines[node].proc().log.as_ref() else {
+            return;
+        };
+        if !log.degraded {
+            return;
+        }
+        let reopening = log.reopening;
+        self.work(node, MAINTAIN_MS, Work::Log(LogWork::Maintain));
+        let untiered = self.config.mutation == Some(Mutation::ReopenUntiered);
+        if reopening || !(untiered || self.all_shipped_tiered(node)) {
+            return;
+        }
+        let now = self.wall(node);
+        let mut peers: Vec<usize> = (0..self.machines.len())
+            .filter(|&m| m != node && !self.machines[m].retired)
+            .filter(|&m| {
+                let lease = self.store.read_lease(&self.machines[m].name);
+                lease.is_some_and(|lease| lease.expires_ms > now)
+            })
+            .collect();
+        let mut ensemble = Vec::new();
+        while ensemble.len() < FOLLOWERS && !peers.is_empty() {
+            let i = self.net_rng.below(peers.len() as u64) as usize;
+            ensemble.push(peers.remove(i));
+        }
+        if ensemble.is_empty() {
+            return;
+        }
+        let log = self.machines[node]
+            .proc_mut()
+            .log
+            .as_mut()
+            .expect("checked");
+        log.reopening = true;
+        let req = StoreReq::Reopen {
+            session: log.session.clone(),
+            from: log.epoch,
+            ensemble,
+        };
+        self.store_call(node, req);
+    }
+
+    /// `may_reconfigure`'s barrier: every row the log shipped of an open
+    /// database, and every tail, is in the bucket, in a prefix or a bundle.
+    fn all_shipped_tiered(&self, node: usize) -> bool {
+        let p = self.machines[node].proc();
+        let Some(log) = p.log.as_ref() else {
+            return true;
+        };
+        let tiered = |cell: &str, epoch: Epoch| {
+            let shipped = log.shipped.get(&(cell.to_string(), epoch)).copied();
+            let durable = self.durable_here(node, cell, epoch);
+            durable >= shipped.unwrap_or(0)
+        };
+        p.replicas.keys().all(|(cell, epoch)| tiered(cell, *epoch))
+            && (p.tails.iter())
+                .all(|((cell, epoch), tail)| self.store.durable_len(cell, *epoch) >= tail.len())
+    }
+
+    /// The reopen's lease write applies: if the lease is still this
+    /// session's and open, and the record still at `from`, move it to the
+    /// next epoch with `ensemble`, with no fleet acks yet.
+    pub(super) fn apply_reopen(
+        &mut self,
+        name: &str,
+        session: &str,
+        from: u64,
+        ensemble: Vec<usize>,
+    ) -> Option<(u64, Vec<usize>)> {
+        let lease = self.store.read_lease(name)?;
+        if lease.generation != session || lease.log_state != Some(LogState::Open) {
+            return None;
+        }
+        let entry = self.session_mut(session);
+        if entry.epoch == from {
+            entry.epoch += 1;
+            entry.ensemble = ensemble;
+            entry.frames = 0;
+            entry.proved = false;
+        }
+        (entry.epoch > from).then(|| (entry.epoch, entry.ensemble.clone()))
+    }
+
+    /// A reopen answered. If the record moved, install a shipper for its
+    /// epoch and ensemble, and ship every open database to it.
+    fn reopened(&mut self, node: usize, record: Option<(u64, Vec<usize>)>) {
+        let who = self.who(node);
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return;
+        };
+        log.reopening = false;
+        let Some((epoch, ensemble)) = record.filter(|(epoch, _)| *epoch > log.epoch) else {
+            return;
+        };
+        log.epoch = epoch;
+        log.degraded = false;
+        log.confirmed.clear();
+        log.floor = log.shipped.clone();
+        let session = log.session.clone();
+        self.note(|| format!("n{node} reopens {session} at epoch {epoch} with {ensemble:?}"));
+        self.checker.log_opened(&who, &ensemble);
+        for (cell, epoch) in self.open_epochs(node) {
+            self.ship(node, &cell, epoch);
+        }
     }
 
     /// `RecoverNodeLog`, at the instant it reaches the bucket and the
@@ -524,17 +806,29 @@ impl World {
             witnessed: false,
             undecided: false,
         };
-        for &member in &self.session(session).ensemble {
+        let entry = self.session(session);
+        for &member in &entry.ensemble {
             let m = &self.machines[member];
             if !m.serves_follower_disk() {
                 gathered.undecided |= !m.retired;
                 continue;
             }
             gathered.answering.push(member);
-            gathered.witnessed |= (m.disk.log.joined.get(session))
-                .is_some_and(|frames| frames.held == frames.highest);
-            for ((s, c, epoch), copy) in &m.disk.log.copies {
+            // A member still on an earlier log epoch holds nothing of this
+            // one; what it holds of the earlier, the reopen tiered.
+            let frames = m.disk.log.joined.get(session);
+            if frames.is_some_and(|f| f.epoch < entry.epoch) {
+                continue;
+            }
+            gathered.witnessed |= frames.is_some_and(|f| f.held == f.highest);
+            for (key @ (s, c, epoch), copy) in &m.disk.log.copies {
                 if s != session || cell.is_some_and(|cell| cell != c) {
+                    continue;
+                }
+                // A fragment that starts past what the bucket holds leaves
+                // a hole: its rows cannot be restored.
+                let from = m.disk.log.floors.get(key).copied().unwrap_or(0);
+                if self.store.prefix(c, *epoch).len() < from {
                     continue;
                 }
                 let longest = gathered.copies.entry((c.clone(), *epoch)).or_default();
@@ -572,6 +866,10 @@ impl World {
             let disk = &mut self.machines[member].disk.log;
             disk.sealed.insert(session.to_string());
         }
+        // Every bundle of the session, then what the followers hold.
+        for ((cell, epoch), content) in self.store.bundle_rows(session, None) {
+            self.land_upload(&dead, &cell, epoch, &content);
+        }
         for ((cell, epoch), content) in gathered.copies {
             self.land_upload(&dead, &cell, epoch, &content);
         }
@@ -599,23 +897,31 @@ impl World {
             return Err(Failure::Ambiguous);
         }
         let writer = self.who_at(node, inc);
+        for ((cell, epoch), content) in self.store.bundle_rows(&session, Some(cell)) {
+            self.land_upload(&writer, &cell, epoch, &content);
+        }
         for ((cell, epoch), content) in gathered.copies {
             self.land_upload(&writer, &cell, epoch, &content);
         }
         Ok(())
     }
 
-    /// A process exits gracefully. If the bucket holds everything its log
-    /// shipped, it seals its own log, and its successor has nothing to
-    /// recover.
+    /// A process exits gracefully. If the per-cell layout holds everything
+    /// its log shipped and its bundles carried, and no tail waits for a
+    /// fold, it seals its own log, and its successor has nothing to
+    /// recover. A bundle does not count (`graceful_seal_allowed`).
     pub(super) fn seal_own_log(&mut self, node: usize) {
-        let Some(log) = self.machines[node].proc().log.as_ref() else {
+        let p = self.machines[node].proc();
+        let Some(log) = p.log.as_ref() else {
             return;
         };
-        let flushed = log
-            .shipped
-            .iter()
-            .all(|((cell, epoch), len)| self.store.durable_len(cell, *epoch) >= *len);
+        let covered = |(cell, epoch): &(String, Epoch), len: usize| {
+            self.store.percell_len(cell, *epoch) >= len
+        };
+        let bundles = self.store.bundle_rows(&log.session, None);
+        let flushed = p.tails.is_empty()
+            && log.shipped.iter().all(|(key, len)| covered(key, *len))
+            && bundles.iter().all(|(key, rows)| covered(key, rows.len()));
         if flushed {
             let (name, session) = (self.machines[node].name.clone(), log.session.clone());
             self.store.seal_log(&name, &session);

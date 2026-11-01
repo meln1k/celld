@@ -443,6 +443,8 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::StaleSnapshot => &["lost-write"],
             Mutation::GcUnlisted => &["base-deleted"],
             Mutation::CollectUnretired => &["alarm-undiscoverable"],
+            Mutation::CreditAfterSeal => &["lost-write"],
+            Mutation::ReopenUntiered => &["lost-write"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -468,6 +470,40 @@ fn every_planted_bug_is_caught_by_its_check() {
             | Mutation::FollowerCorrupts => SimConfig {
                 fleet: true,
                 ..crashing_and_pausing()
+            },
+            // Only a shipper whose follower is cut off reopens its log, and
+            // the rows below the new fragments are lost only if the leader
+            // dies before a bundle covers them: lost bucket calls stall the
+            // bundle loop, and crashes end leaders.
+            Mutation::ReopenUntiered => SimConfig {
+                ttl_ms: 3_000,
+                fleet: true,
+                websocket_probability: 0.0,
+                faults: Faults {
+                    crashes: 6.0,
+                    partitions: 6.0,
+                    max_partition_ms: 6_000,
+                    store_lost_request: 0.1,
+                    ..Faults::default()
+                },
+                ..SimConfig::crashing(0.0)
+            },
+            // Only a bundle that lands after recovery sealed its session
+            // credits late: a leader suspended past its lease wakes before
+            // it notices, with its peer's recovery already done.
+            Mutation::CreditAfterSeal => SimConfig {
+                nodes: 2,
+                cells: 4,
+                ttl_ms: 2_000,
+                fleet: true,
+                websocket_probability: 0.0,
+                faults: Faults {
+                    pauses: 20.0,
+                    max_pause_ms: 4_000,
+                    suspend_probability: 1.0,
+                    ..Faults::default()
+                },
+                ..SimConfig::crashing(0.0)
             },
             // A stale snapshot loses writes only once its cell has moved
             // away and back: rebalances move cells, and a full node evicts.

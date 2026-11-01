@@ -273,9 +273,9 @@ struct Process {
     timers: BTreeMap<Slot, (u64, Timer, u64)>,
     next_ordinal: u64,
     replicas: BTreeMap<(String, Epoch), Replica>,
-    /// Fleet-confirmed writes of an epoch that ended without its final
-    /// upload (`dirty_tails`). The bundle loop still flushes them, and the
-    /// cell's next activation here folds them into the bucket first.
+    /// Fleet-confirmed or bundled writes of an epoch that ended without its
+    /// final upload (`dirty_tails`). The cell's next activation here folds
+    /// them into its prefix first.
     tails: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// When the last upload on this process landed, on its monotonic clock:
     /// production's `node_proof_ms`.

@@ -109,7 +109,7 @@ impl World {
     /// would load was set by a write whose handler answered its client, a
     /// wake entry must still be due by its time.
     pub(super) fn judge_discoverable(&mut self, cell: &str) {
-        let Some((epoch, content)) = self.store.newest(cell) else {
+        let Some((epoch, content)) = self.store.newest_held(cell) else {
             return;
         };
         let Some(at_ms) = self.alarm_of(content, epoch).at_ms() else {
@@ -254,7 +254,7 @@ impl World {
         let now = (WALL_EPOCH_MS + self.t) as i64;
         for cell in 0..self.config.cells {
             let cell = format!("c{cell}");
-            let Some((epoch, content)) = self.store.newest(&cell) else {
+            let Some((epoch, content)) = self.store.newest_held(&cell) else {
                 continue;
             };
             let at_ms = self.alarm_of(content, epoch).at_ms();

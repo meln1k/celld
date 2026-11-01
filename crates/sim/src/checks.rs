@@ -82,8 +82,8 @@ pub struct Checker {
     /// The last instant a process's ownership read found the record naming
     /// it at a cell epoch: (process, cell, epoch).
     verified_at: BTreeMap<(String, String, Epoch), u64>,
-    /// The followers of each process's log.
-    ensembles: BTreeMap<String, Vec<usize>>,
+    /// The followers of each log epoch of each process's log.
+    ensembles: BTreeMap<String, Vec<Vec<usize>>>,
     /// The longest database of each cell epoch each follower ever fsynced
     /// for a leader process: (leader, follower, cell, epoch).
     fsynced: BTreeMap<(String, usize, String, Epoch), Vec<WriteId>>,
@@ -285,9 +285,11 @@ impl Checker {
         );
     }
 
-    /// Process `who` opened a log that `ensemble` follows.
+    /// Process `who` opened a log that `ensemble` follows, or reopened it
+    /// at a new log epoch.
     pub fn log_opened(&mut self, who: &str, ensemble: &[usize]) {
-        self.ensembles.insert(who.to_string(), ensemble.to_vec());
+        let ensembles = self.ensembles.entry(who.to_string()).or_default();
+        ensembles.push(ensemble.to_vec());
     }
 
     /// A follower fsynced a cell epoch's database for leader `who`.
@@ -306,12 +308,14 @@ impl Checker {
         }
     }
 
-    /// Whether every follower of `who`'s log has fsynced `seen`, write for
-    /// write, at this cell epoch. Such a write needs no ownership read: a
-    /// takeover recovers the log first, and recovery seals each follower
-    /// before it gathers what they hold.
+    /// Whether every follower of one log epoch of `who`'s log has fsynced
+    /// `seen`, write for write, at this cell epoch. Such a write needs no
+    /// ownership read: a takeover recovers the log first, and recovery
+    /// seals each follower before it gathers what they hold; a reopen first
+    /// puts what the old epoch shipped in the bucket.
     fn fleet_holds(&self, who: &str, cell: &str, epoch: Epoch, seen: &[WriteId]) -> bool {
-        self.ensembles.get(who).is_some_and(|ensemble| {
+        let mut ensembles = self.ensembles.get(who).into_iter().flatten();
+        ensembles.any(|ensemble| {
             ensemble.iter().all(|&f| {
                 let key = (who.to_string(), f, cell.to_string(), epoch);
                 self.fsynced
