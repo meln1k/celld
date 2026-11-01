@@ -72,8 +72,21 @@ about five minutes on 32 cores.
 
 ## Known core bugs
 
-The suite fails on any violation or panic except the known ones:
-`KNOWN_CORE_PANICS` and `passed_but_for_known_bugs` in
-`crates/sim/tests/sim.rs`, each described in `docs/testing.md`. When a core
-fix lands, remove its entry from both, so the suite guards against the bug's
-return. Do not add an entry without a traced seed and a description.
+`crates/sim/known-failures.txt` lists every seed known to fail, exactly how,
+in each mode: the suite's own configurations, and swarm seeds 0..10000. The
+suite and `--known` fail on any other failure, and on a listed seed that no
+longer fails as listed. Each listed failure must be a documented core bug:
+`KNOWN_CORE_PANICS` and `KNOWN_CORE_KINDS` in `crates/sim/tests/sim.rs`,
+described in `docs/testing.md`.
+
+```sh
+$B --swarm --seeds 0..10000 --known crates/sim/known-failures.txt  # judge
+$B --swarm --seeds 0..10000 --record | rg '^[0-9]+ swarm '         # lines
+```
+
+A failing suite test prints the lines it needs. Never regenerate the list
+blindly: trace every seed whose line changes, and name the bug or the
+simulator change behind it in the commit. When a core fix lands, its seeds
+stop failing and their lines go, so the suite guards against the bug's
+return. Add a new kind or invariant to the two constants only with a traced
+seed and a description in `docs/testing.md`.

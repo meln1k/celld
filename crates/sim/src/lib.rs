@@ -15,6 +15,7 @@
 
 mod checks;
 pub mod coverage;
+pub mod known;
 mod rng;
 mod store;
 mod world;

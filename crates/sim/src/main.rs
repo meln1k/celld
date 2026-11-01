@@ -1,5 +1,6 @@
 //! `celld-sim [--seed N | --seeds A..B] [--crashes PER_MINUTE | --chaos | --swarm]
-//! [--fleet] [--memory ROOM] [--mutation NAME] [--coverage] [--trace]`
+//! [--fleet] [--memory ROOM] [--mutation NAME] [--coverage] [--trace]
+//! [--known FILE | --record]`
 //!
 //! One seed prints what happened. A range prints one line per failing seed,
 //! with its first violation or panic, and one line per watched property a
@@ -9,10 +10,17 @@
 //! each node a memory ceiling that about `ROOM` cells fit under.
 //! `--coverage` prints every phase transition a range took, with how many
 //! seeds took it.
+//!
+//! A swarm range can be judged against the known failures
+//! (`crates/sim/src/known.rs`): `--known FILE` prints `NEW` for a seed that
+//! fails other than as listed and `STALE` for a listed seed that fails less
+//! or passes, and fails if there is either. `--record` prints the list line
+//! of every failing seed instead.
 
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
 
+use celld_sim::known::{Failure, KnownFailures, Verdict};
 use celld_sim::{run, Memory, Mutation, SimConfig};
 
 fn main() {
@@ -23,6 +31,7 @@ fn main() {
     let mut mutation = None;
     let mut coverage = false;
     let mut memory = None;
+    let (mut known, mut record) = (None, false);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -53,6 +62,14 @@ fn main() {
                 let room = args.next().and_then(|s| s.parse().ok());
                 memory = Some(Memory::with_room(room.expect("--memory ROOM")));
             }
+            "--known" => {
+                let path = args.next().expect("--known FILE");
+                // A developer tool reading its input, not node storage.
+                #[allow(clippy::disallowed_methods)]
+                let text = std::fs::read_to_string(&path).expect("read the known failures");
+                known = Some(KnownFailures::parse(&text).unwrap_or_else(|e| panic!("{path}: {e}")));
+            }
+            "--record" => record = true,
             "--chaos" => config = SimConfig::chaos(),
             "--crashes" => {
                 let rate = args.next().and_then(|s| s.parse().ok());
@@ -75,11 +92,15 @@ fn main() {
             ..base
         }
     };
+    assert!(
+        swarm || (known.is_none() && !record),
+        "the known failures list swarm seeds: add --swarm"
+    );
     if let Some(seeds) = seeds {
         // A core panic is caught and reported per seed; the default hook
         // would also print each one to stderr.
         std::panic::set_hook(Box::new(|_| {}));
-        let (total, mut failed) = (seeds.end - seeds.start, 0);
+        let (total, mut failed, mut unexpected) = (seeds.end - seeds.start, 0, 0);
         let mut watched = std::collections::BTreeMap::<&str, u64>::new();
         // Per transition: the seeds that took it, and how often in all.
         let mut covered = std::collections::BTreeMap::<(&str, &str), (u64, u64)>::new();
@@ -101,9 +122,28 @@ fn main() {
                 let v = outcome.violations.first()?;
                 Some(format!("t={} {}: {}", v.at_ms, v.kind, v.detail))
             });
-            if let Some(first) = first {
+            if let Some(first) = &first {
                 failed += 1;
-                println!("FAIL {seed}: {first}");
+                if record {
+                    let failure = Failure::of(&outcome).expect("failed");
+                    println!("{}", failure.line(seed, "swarm"));
+                } else if known.is_none() {
+                    println!("FAIL {seed}: {first}");
+                }
+            }
+            let line = |failure: &Failure| failure.line(seed, "swarm");
+            match known.as_ref().map(|k| k.judge(seed, "swarm", &outcome)) {
+                Some(Verdict::New { listed }) => {
+                    unexpected += 1;
+                    let now = line(&Failure::of(&outcome).expect("failed"));
+                    let was = listed.as_ref().map_or("nothing".into(), line);
+                    println!("NEW {seed}: {now} (listed: {was})");
+                }
+                Some(Verdict::Stale { listed }) => {
+                    unexpected += 1;
+                    println!("STALE {seed}: passed, but listed: {}", line(&listed));
+                }
+                _ => {}
             }
         }
         for (kind, seeds) in &watched {
@@ -123,7 +163,11 @@ fn main() {
             covered.len()
         );
         println!("{failed} of {total} seeds failed");
-        std::process::exit(i32::from(failed > 0));
+        if known.is_some() {
+            println!("{unexpected} of {total} seeds did not fail as listed");
+            std::process::exit(i32::from(unexpected > 0));
+        }
+        std::process::exit(i32::from(failed > 0 && !record));
     }
     let config = config_for(seed);
     if swarm {

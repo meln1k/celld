@@ -1,3 +1,4 @@
+use celld_sim::known::{Failure, KnownFailures, Verdict};
 use celld_sim::{run, Faults, Mutation, Operator, Outcome, SimConfig};
 
 #[test]
@@ -55,25 +56,21 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
     // Every restore must hold every write a client was told succeeded,
     // whether the bucket proved it or, in the fleet posture, the followers.
     let (mut restored, mut fleet_proofs, mut log_recoveries) = (0, 0, 0);
-    let (mut retried_recoveries, mut panicked) = (0, 0);
+    let (mut retried_recoveries, mut failed) = (0, 0);
+    let mut judge = Judge::new();
     for (seed, fleet) in (0..20).flat_map(|seed| [(seed, false), (seed, true)]) {
         let config = SimConfig {
             fleet,
             ..crashing_and_pausing()
         };
         let outcome = run(seed, &config);
-        if let Some(panic) = &outcome.panic {
-            // A known core invariant can end a run early, before it broke
-            // any property: see `crashing_and_pausing`.
-            let known = KNOWN_CORE_PANICS.iter().any(|bug| panic.contains(bug));
-            assert!(
-                known && outcome.violations.is_empty(),
-                "seed {seed} (fleet {fleet}): {outcome:?}"
-            );
-            panicked += 1;
+        let name = if fleet { "crashes-fleet" } else { "crashes" };
+        judge.check(seed, name, &outcome);
+        if !outcome.passed() {
+            // A known core bug, as `crashing_and_pausing` describes.
+            failed += 1;
             continue;
         }
-        assert!(outcome.passed(), "seed {seed} (fleet {fleet}): {outcome:?}");
         assert!(
             outcome.stats.crashes > 0,
             "seed {seed}: {:?}",
@@ -93,12 +90,10 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
             .copied()
             .unwrap_or(0);
     }
-    // Most runs must reach the end: a run a known panic stopped early
-    // proves nothing about lost writes.
-    assert!(
-        panicked <= 4,
-        "{panicked} of 40 runs stopped on a known panic"
-    );
+    judge.finish();
+    // Most runs must pass: a run a known bug stopped early proves nothing
+    // about lost writes.
+    assert!(failed <= 4, "{failed} of 40 runs failed on a known bug");
     // Takeovers happened, so the lost-write check had restores to judge;
     // followers proved writes, and dead leaders' logs were recovered.
     assert!(restored > 100, "only {restored} restores from the bucket");
@@ -196,8 +191,51 @@ fn crashing_and_pausing() -> SimConfig {
     }
 }
 
-/// `State::validate` failures in this core, deliberately not fixed here. A
-/// seed that hits one stops there; anything else is a new failure.
+/// The seeds known to fail, and exactly how (`crates/sim/src/known.rs`).
+const KNOWN_FAILURES: &str = include_str!("../known-failures.txt");
+
+/// Judges each run against the known failures. It fails once, at the end,
+/// with every run that did not fail as listed and the line the list needs
+/// for it, so one run of the suite shows the whole change to the list.
+struct Judge {
+    known: KnownFailures,
+    wrong: Vec<String>,
+}
+
+impl Judge {
+    fn new() -> Self {
+        let known = KnownFailures::parse(KNOWN_FAILURES).expect("known-failures.txt");
+        Self {
+            known,
+            wrong: Vec::new(),
+        }
+    }
+
+    /// Judge one run of `config`; whether it passed or failed as listed.
+    fn check(&mut self, seed: u64, config: &str, outcome: &Outcome) -> bool {
+        let verdict = self.known.judge(seed, config, outcome);
+        let needed = Failure::of(outcome).map_or("nothing".into(), |f| f.line(seed, config));
+        match &verdict {
+            Verdict::New { .. } => self.wrong.push(format!(
+                "NEW: {needed}: {:?} {:?}",
+                outcome.panic, outcome.violations
+            )),
+            Verdict::Stale { listed } => self.wrong.push(format!(
+                "STALE: passed, but listed: {}",
+                listed.line(seed, config)
+            )),
+            Verdict::Passed | Verdict::Known => {}
+        }
+        verdict.ok()
+    }
+
+    fn finish(self) {
+        assert!(self.wrong.is_empty(), "{}", self.wrong.join("\n"));
+    }
+}
+
+/// The `State::validate` failures of this core, deliberately not fixed
+/// here. The known failures may stop on these and no other.
 ///
 /// - The first two are fixed upstream on the `dst` branch (`ea471ee`,
 ///   `e46a685`).
@@ -234,47 +272,39 @@ const KNOWN_CORE_PANICS: [&str; 11] = [
     "is queued twice",
 ];
 
-/// A clean read is released without reading the owner record, so it is
-/// only as fresh as its node's belief in its own lease. That belief rests on
-/// two clocks this core trusts and `docs/guarantees.md` does not name: the
-/// wall clocks of the fleet must agree to well inside a lease, and the
-/// monotonic clock must count a VM suspend (Linux's `CLOCK_MONOTONIC`, which
-/// `Instant` reads, does not). The swarm breaks both, and a node then answers
-/// reads from an epoch a peer has already superseded. Writes stay safe.
+/// The properties the core's known bugs break (`docs/testing.md`). The
+/// known failures may break these and no other.
 ///
-/// So a stale read is known only in a run whose clocks were faulty: skewed,
-/// stepped, or suspended. Anywhere else it fails the suite. (A clean reload
-/// whose lease write lands late also reads stale with true clocks, in swarm
-/// seed 30084; no seed here hits it.)
-fn stale_read_is_known(config: &SimConfig) -> bool {
-    let f = &config.faults;
-    f.max_skew_ms > 0 || f.clock_steps > 0.0 || (f.pauses > 0.0 && f.suspend_probability > 0.0)
-}
+/// - `stale-read`: a clean read trusts the node's belief in its lease,
+///   which faulty clocks (a skew, a step, a suspend) or a slow clean reload
+///   break.
+/// - `lost-write` and `late-ack`, in the fleet posture: after a slow clean
+///   reload, a clock fault, or a failed tail fold that hands the cell away.
+/// - `liveness` and `alarm-not-fired`: a node whose memory walk-down wedged
+///   refuses every new cell, and a fleet at its residency cap evicts nothing
+///   to make room.
+/// - `evicted-pinned`, with validation compiled out: the core evicts a cell
+///   whose live transport `State::validate` would have caught.
+const KNOWN_CORE_KINDS: [&str; 6] = [
+    "stale-read",
+    "lost-write",
+    "late-ack",
+    "liveness",
+    "alarm-not-fired",
+    "evicted-pinned",
+];
 
-/// A node's memory walk-down can wedge: it stops shedding with the latch
-/// held, and refuses every new cell from then on (`docs/testing.md`). The
-/// cells it refuses may then go unserved, so in a run where a node stayed
-/// over its memory ceiling, a missed goal or alarm is known.
-fn memory_wedged(outcome: &Outcome) -> bool {
-    outcome
-        .watched
-        .iter()
-        .any(|w| w.kind == "memory-not-relieved")
-}
-
-/// The run passed but for known core bugs: it stopped on a known panic, or
-/// broke only a property the core is known to break.
-fn passed_but_for_known_bugs(config: &SimConfig, outcome: &Outcome) -> bool {
-    let known = outcome
-        .panic
-        .as_ref()
-        .is_none_or(|panic| KNOWN_CORE_PANICS.iter().any(|bug| panic.contains(bug)));
-    known
-        && outcome.violations.iter().all(|v| match v.kind {
-            "stale-read" => stale_read_is_known(config),
-            "liveness" | "alarm-not-fired" => memory_wedged(outcome),
-            _ => false,
-        })
+#[test]
+fn the_known_failures_are_known_core_bugs() {
+    // Each listed failure must be one of the documented bugs: a new kind of
+    // failure is traced and described before it is listed.
+    let known = KnownFailures::parse(KNOWN_FAILURES).expect("known-failures.txt");
+    for failure in known.failures() {
+        let panic_known = (failure.panic.as_ref())
+            .is_none_or(|panic| KNOWN_CORE_PANICS.iter().any(|bug| panic.contains(bug)));
+        let kinds_known = (failure.kinds.iter()).all(|k| KNOWN_CORE_KINDS.contains(&k.as_str()));
+        assert!(panic_known && kinds_known, "{failure:?}");
+    }
 }
 
 /// Chaos with true clocks: no skew, no steps, no suspends.
@@ -298,21 +328,17 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     // shape per seed. All must break no property, and the faults must
     // actually have happened, or the runs proved nothing.
     let configs = (0..20)
-        .map(|seed| (seed, SimConfig::chaos()))
-        .chain((0..10).map(|seed| (seed, chaos_with_true_clocks())))
-        .chain((0..40).map(|seed| (seed, SimConfig::swarm(seed))));
+        .map(|seed| (seed, "chaos", SimConfig::chaos()))
+        .chain((0..10).map(|seed| (seed, "true-clocks", chaos_with_true_clocks())))
+        .chain((0..40).map(|seed| (seed, "swarm", SimConfig::swarm(seed))));
+    let mut judge = Judge::new();
     let (mut clean, mut total) = (0, 0);
     let mut faulted = celld_sim::Stats::default();
     let mut entered = std::collections::BTreeSet::new();
-    for (seed, config) in configs {
+    for (seed, name, config) in configs {
         let outcome = run(seed, &config);
         entered.extend(outcome.coverage.keys().map(|(_, to)| *to));
-        assert!(
-            passed_but_for_known_bugs(&config, &outcome),
-            "seed {seed}: {:?} {:?}",
-            outcome.panic,
-            outcome.violations
-        );
+        judge.check(seed, name, &outcome);
         total += 1;
         clean += u32::from(outcome.passed());
         faulted.pauses += outcome.stats.pauses;
@@ -332,6 +358,7 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         faulted.shedding_samples += outcome.stats.shedding_samples;
         faulted.errors += outcome.stats.errors;
     }
+    judge.finish();
     // Most seeds run to the end and through the liveness audit.
     assert!(
         clean * 4 > total * 3,

@@ -368,8 +368,15 @@ or `alarm-not-fired` (3,062 of them wedged), 527 on stale reads, 110 on
 invariant would have caught), and 22 on lost writes in the fleet posture:
 14 after a failed tail fold, 6 after a slow clean reload, and 2 after a
 clock fault. Between them, the seeds entered
-every phase. The test suite allows only the
-known failures, by name.
+every phase.
+
+The known failures are listed seed by seed in
+[`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
+failing seed of the suite's configurations and of swarm seeds 0..10000, in
+both modes, with every property kind it breaks and the invariant it stops on.
+A run is known only if it fails exactly as listed, so a new bug that fails
+like a known one in another seed, or adds to a known seed's failure, still
+fails the suite and the sweep.
 
 ```
 cargo test -p celld-sim                                    # the suite
@@ -377,6 +384,8 @@ cargo run -p celld-sim -- --seeds 0..1000 --swarm          # a sweep
 cargo run -p celld-sim -- --seed 1562 --swarm --trace      # replay one seed
 cargo run -p celld-sim -- --seeds 0..20 --crashes 6 --mutation IgnoreCasGuard
 cargo run -p celld-sim -- --seeds 0..1000 --swarm --coverage  # every transition
+cargo run -p celld-sim -- --seeds 0..10000 --swarm --known crates/sim/known-failures.txt
+cargo run -p celld-sim -- --seeds 0..10000 --swarm --record   # the list's lines
 ```
 
 A sweep prints one line for each failing seed. A large sweep runs faster with
