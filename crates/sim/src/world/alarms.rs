@@ -24,21 +24,20 @@
 //!   or re-arms it, with one write, and reports where (`AlarmFinished`).
 //! - `ReconcileWakeEntry` writes the wake entry of the alarm the core
 //!   settled on. Once that alarm is proven durable and owned, it raises the
-//!   cell's retirement certificate to it, and every entry below goes. Only
-//!   a certificate deletes entries, so an old one wakes the cell until a
-//!   newer installation is safely published.
-//! - Each process scans the bucket's due wake entries every second and
-//!   hints the core (`WakeHintAt`). The elected waker, here the lowest live
-//!   node, also hints cells whose owner is dead or absent.
+//!   cell's retirement certificate to it, and deletes the entries below.
+//!   Only a certificate deletes entries, so an old one wakes the cell until
+//!   a newer installation is safely published. A delete that fails leaves
+//!   its entry to the collector (`waker.rs`), which also hints due cells.
+//! - The wake loops in `waker.rs` scan the due entries every second and
+//!   hint the core (`WakeHintAt`).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use celld_logic::wake::{
-    elected_hint_needed, AlarmSnapshot, AlarmSource, PublicationId, Retirement,
-};
-use celld_logic::{Epoch, Event, Failure, OpId, ProofSource, RequestId, Timer, WakeHintScope};
+use celld_logic::wake::{AlarmSnapshot, AlarmSource, PublicationId, Retirement};
+use celld_logic::{Epoch, Event, Failure, OpId, ProofSource, RequestId, Timer};
 
 use super::shell::StoreReq;
+use super::waker::WakerReq;
 use super::{Work, World};
 use crate::{Mutation, WriteId};
 
@@ -46,8 +45,6 @@ use crate::{Mutation, WriteId};
 const ALARM_AHEAD_MS: (u64, u64) = (50, 3_000);
 /// How long an alarm handler runs.
 const ALARM_RUN_MS: (u64, u64) = (1, 30);
-/// The wake scan's period (`run_due_scans`).
-const WAKE_TICK_MS: u64 = 1_000;
 /// An alarm that came due this long before the probe's deadline must have
 /// fired by then.
 pub(super) const ALARM_SLACK_MS: u64 = 10_000;
@@ -87,11 +84,12 @@ pub(super) enum AlarmWork {
         alarm: AlarmSnapshot,
         report: bool,
         gate: Option<Waiter>,
+        /// It raised the cell's retirement certificate: delete the entries
+        /// the certificate retires.
+        retired: bool,
     },
     /// The wake entry write an arm gate waits on failed.
     GateFailed { waiter: Waiter },
-    /// The process lists the bucket's due wake entries.
-    Scan,
 }
 
 impl World {
@@ -103,14 +101,21 @@ impl World {
                 alarm,
                 report,
                 gate,
+                retired,
             } => {
+                if retired {
+                    let req = WakerReq::Delete {
+                        cell: cell.clone(),
+                        id: None,
+                    };
+                    self.waker_call(node, req);
+                }
                 self.wake_maintained(node, cell, alarm, report);
                 if let Some(waiter) = gate {
                     self.arm_gate_settled(node, waiter, true);
                 }
             }
             AlarmWork::GateFailed { waiter } => self.arm_gate_settled(node, waiter, false),
-            AlarmWork::Scan => self.wake_scan(node),
         }
     }
 
@@ -180,7 +185,7 @@ impl World {
 
     /// The host's view of the cell's alarm: from its open database, and
     /// covered once its wake entry is known to have landed.
-    fn observation(&self, node: usize, cell: &str) -> Option<(AlarmSnapshot, bool)> {
+    pub(super) fn observation(&self, node: usize, cell: &str) -> Option<(AlarmSnapshot, bool)> {
         let p = self.machines[node].proc();
         let epoch = p.published.get(cell)?;
         let alarm = self.reported(self.alarm_of(self.seen(node, cell, *epoch)?, *epoch));
@@ -505,62 +510,6 @@ impl World {
                 result: Err(Failure::Definite),
             };
             self.deliver(node, 1, event);
-        }
-    }
-
-    /// Start the process's periodic wake scan.
-    pub(super) fn start_wake_scans(&mut self, node: usize) {
-        let delay = self.net_rng.range(1, WAKE_TICK_MS);
-        self.work(node, delay, Work::Alarm(AlarmWork::Scan));
-    }
-
-    /// List the due wake entries and hint the core about each.
-    ///
-    /// The listing and the lease reads behind the election read the bucket
-    /// directly, at this instant: no latency and no failed calls, only a
-    /// partition stops them. Production's scan retries on its own timer and
-    /// never reports to the core, so a failed listing only delays a hint.
-    pub(super) fn wake_scan(&mut self, node: usize) {
-        self.work(node, WAKE_TICK_MS, Work::Alarm(AlarmWork::Scan));
-        let p = self.machines[node].proc();
-        if self.machines[node].partition.is_some()
-            || !p.state.node_authoritative()
-            || self.preserving(node)
-        {
-            return;
-        }
-        let now = self.wall(node);
-        let me = self.machines[node].name.clone();
-        let live = |w: &World, name: &str| {
-            w.store
-                .read_lease(name)
-                .is_some_and(|lease| lease.expires_ms > now)
-        };
-        // The waker lease, simplified: the lowest live node holds it.
-        let elected = self
-            .machines
-            .iter()
-            .find(|m| live(self, &m.name))
-            .is_some_and(|m| m.name == me);
-        for (cell, entry_ms) in self.store.wake_due(now as i64) {
-            let scope = if elected {
-                let owner = self.store.owner(&cell).and_then(|(owner, _)| owner);
-                let owner_live = owner.is_some_and(|owner| live(self, owner));
-                if !elected_hint_needed(owner, &me, owner_live) {
-                    continue;
-                }
-                WakeHintScope::Fleet
-            } else {
-                WakeHintScope::Owned
-            };
-            self.stats.wake_hints += 1;
-            let event = Event::WakeHintAt {
-                cell,
-                entry_ms,
-                scope,
-                now_mono_ms: 0,
-            };
-            self.drive(node, event);
         }
     }
 }

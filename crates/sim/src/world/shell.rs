@@ -15,6 +15,7 @@ use super::faults::Partition;
 use super::gc::GcReq;
 use super::node_log::LogWork;
 use super::replicator::ReplicaWork;
+use super::waker::WakerReq;
 use super::{Item, Pending, Work, World, WALL_EPOCH_MS};
 use crate::store::Load;
 use crate::{Mutation, WriteId};
@@ -128,6 +129,8 @@ pub(super) enum StoreReq {
     },
     /// One step of an owner's epoch GC pass.
     Gc(GcReq),
+    /// One step of a wake loop.
+    Waker(WakerReq),
     /// Publish the wake entry of the cell's alarm. With `retire`, then
     /// retire the entries it makes obsolete, as `maintain_wake_entry` does.
     Wake {
@@ -610,6 +613,7 @@ impl World {
             StoreReq::Wake { gate: None, .. } => Work::Nothing,
             // The pass ends; the next tick starts another.
             StoreReq::Gc(_) => Work::Nothing,
+            StoreReq::Waker(req) => World::waker_failed(req),
         }
     }
 
@@ -756,6 +760,7 @@ impl World {
                 }),
             },
             StoreReq::Gc(req) => self.gc_apply(node, req),
+            StoreReq::Waker(req) => self.waker_apply(node, req),
             StoreReq::Wake {
                 cell,
                 alarm,
@@ -764,10 +769,10 @@ impl World {
                 gate,
             } => {
                 self.store.publish_wake(&cell, alarm);
-                if let Some(retirement) = retire
+                let retirement = retire
                     .then(|| self.retirement_proven(node, inc, &cell, alarm))
-                    .flatten()
-                {
+                    .flatten();
+                if let Some(retirement) = retirement {
                     self.store.retire_wake(&cell, retirement);
                 }
                 self.judge_discoverable(&cell);
@@ -776,6 +781,7 @@ impl World {
                     alarm,
                     report,
                     gate,
+                    retired: retirement.is_some(),
                 })
             }
         };

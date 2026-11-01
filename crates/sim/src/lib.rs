@@ -208,10 +208,13 @@ pub enum Mutation {
     /// base, without the listing that proves it, so it can delete the base a
     /// restore still needs. Caught by `base-deleted`.
     GcUnlisted,
+    /// The collector deletes every wake entry it lists, retired or not.
+    /// Caught by `alarm-undiscoverable`.
+    CollectUnretired,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 23] = [
+    pub const ALL: [Mutation; 24] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -235,6 +238,7 @@ impl Mutation {
         Mutation::RetireUnproven,
         Mutation::StaleSnapshot,
         Mutation::GcUnlisted,
+        Mutation::CollectUnretired,
     ];
 }
 

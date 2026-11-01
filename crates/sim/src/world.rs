@@ -47,6 +47,7 @@ mod replicator;
 mod shell;
 mod shutdown;
 mod sockets;
+mod waker;
 mod workers;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -77,6 +78,7 @@ use replicator::{Disk, Replica, ReplicaWork};
 use shell::{Slot, StoreReq};
 use shutdown::{Shutdown, ShutdownWork};
 use sockets::{Socket, SocketWork};
+use waker::{ProcWaker, WakerWork};
 
 type Time = u64;
 /// An item's place on the agenda, to cancel it by.
@@ -185,6 +187,7 @@ enum Work {
     Alarm(AlarmWork),
     Log(LogWork),
     Gc(GcWork),
+    Waker(WakerWork),
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -290,6 +293,7 @@ struct Process {
     generation: u64,
     /// What this process knows of its cells' alarms.
     alarms: ProcAlarms,
+    waker: ProcWaker,
     /// What the judges remember of this process.
     watch: Watch,
     /// The log this process leads, in the fleet posture.
@@ -318,6 +322,7 @@ impl Process {
             sockets: BTreeMap::new(),
             generation: 0,
             alarms: ProcAlarms::default(),
+            waker: ProcWaker::default(),
             watch: Watch::default(),
             log: None,
             memory: 0,
@@ -668,6 +673,7 @@ impl World {
             Work::Alarm(work) => self.alarm_work(node, work),
             Work::Log(work) => self.log_work(node, work),
             Work::Gc(work) => self.gc_work(node, work),
+            Work::Waker(work) => self.waker_work(node, work),
         }
     }
 
@@ -723,7 +729,7 @@ impl World {
         self.drive(node, event);
         let delay = self.net_rng.range(1, LOAD_SAMPLE_MS);
         self.work(node, delay, Work::LoadSample);
-        self.start_wake_scans(node);
+        self.start_wake_loops(node);
         self.start_epoch_gc(node);
     }
 

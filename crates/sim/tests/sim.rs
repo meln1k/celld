@@ -442,6 +442,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::RetireUnproven => &["alarm-undiscoverable"],
             Mutation::StaleSnapshot => &["lost-write"],
             Mutation::GcUnlisted => &["base-deleted"],
+            Mutation::CollectUnretired => &["alarm-undiscoverable"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.

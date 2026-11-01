@@ -13,11 +13,11 @@
 //! - wake entries, `wake/<minute>/<cell>/<id>`: one per alarm installation
 //!   that some node must wake its cell for.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use celld_logic::epoch_gc::ListedEpoch;
 use celld_logic::log_tier::LogState;
-use celld_logic::wake::{AlarmSnapshot, PublicationId, Retirement};
+use celld_logic::wake::{waker_may_claim, AlarmSnapshot, PublicationId, Retirement};
 use celld_logic::{
     format::BUCKET_FORMAT, CapacityPeer, CasGuard, CasOutcome, Epoch, LeaseCasOutcome,
     NodeLeaseRecord, OwnerRecord,
@@ -70,6 +70,8 @@ pub struct Store {
     /// installation an owner proved durable, below which every wake entry is
     /// obsolete.
     retirements: BTreeMap<String, Retirement>,
+    /// The waker role, `wake/waker.json`: its holder and when it expires.
+    waker: Option<(String, i64)>,
 }
 
 impl Store {
@@ -335,9 +337,9 @@ impl Store {
         }
     }
 
-    /// `publish_retirement` and the collector: raise the cell's certificate
-    /// to `retirement` unless it is already newer, then delete every entry
-    /// the certificate retires.
+    /// `publish_retirement`: raise the cell's certificate to `retirement`
+    /// unless it is already newer. The entries it retires stay until a
+    /// delete removes them.
     pub fn retire_wake(&mut self, cell: &str, retirement: Retirement) {
         let certificate = self
             .retirements
@@ -346,9 +348,58 @@ impl Store {
         if certificate.id < retirement.id {
             *certificate = retirement;
         }
-        let certificate = *certificate;
-        self.wake
-            .retain(|(c, id), _| c != cell || !certificate.retires(*id));
+    }
+
+    /// The cell's retirement certificate, `wake/retired/<cell>.json`.
+    pub fn retirement(&self, cell: &str) -> Option<Retirement> {
+        self.retirements.get(cell).copied()
+    }
+
+    /// Delete every wake entry of `cell` its certificate retires.
+    pub fn delete_retired(&mut self, cell: &str) {
+        if let Some(certificate) = self.retirement(cell) {
+            self.wake
+                .retain(|(c, id), _| c != cell || !certificate.retires(*id));
+        }
+    }
+
+    /// Delete one wake entry.
+    pub fn delete_wake(&mut self, cell: &str, id: PublicationId) {
+        self.wake.remove(&(cell.to_string(), id));
+    }
+
+    /// Every wake entry, by cell: its installation and the minute it is
+    /// filed under.
+    pub fn wake_entries(&self) -> BTreeMap<String, Vec<(PublicationId, i64)>> {
+        let mut cells: BTreeMap<String, Vec<(PublicationId, i64)>> = BTreeMap::new();
+        for ((cell, id), at_ms) in &self.wake {
+            let minute_ms = at_ms.div_euclid(60_000) * 60_000;
+            cells
+                .entry(cell.clone())
+                .or_default()
+                .push((*id, minute_ms));
+        }
+        cells
+    }
+
+    /// `try_hold_waker`: take or renew the waker role, `wake/waker.json`,
+    /// unless another node holds it unexpired.
+    pub fn try_hold_waker(&mut self, node: &str, now_ms: i64, ttl_ms: i64) -> bool {
+        if let Some((holder, expires_ms)) = &self.waker {
+            if !waker_may_claim(holder == node, *expires_ms, now_ms) {
+                return false;
+            }
+        }
+        self.waker = Some((node.to_string(), now_ms + ttl_ms));
+        true
+    }
+
+    /// The nodes whose lease has not expired at `now_ms` (`live_nodes`).
+    pub fn live_nodes(&self, now_ms: u64) -> BTreeSet<String> {
+        (self.leases.iter())
+            .filter(|(_, (record, _, _))| record.expires_ms > now_ms)
+            .map(|(node, _)| node.clone())
+            .collect()
     }
 
     /// Whether a scan will wake `cell` by `at_ms`: some wake entry for it, of

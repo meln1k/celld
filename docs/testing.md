@@ -105,9 +105,14 @@ cell's alarm, which lives in the database like any other write, with its
 installation id: opening the database at a new epoch moves the id into that
 epoch, as production's wake record does. Its wake
 entry goes to the bucket, a timer fires it on the owner, and each node scans
-the due wake entries every second to wake cells nobody holds. Old entries
-go only below a retirement certificate, which an owner raises once it has
-proven its current alarm durable and its ownership current.
+the due wake entries every second to wake cells nobody holds. One node holds
+the advisory waker role, a lease in the bucket, and hints the cells whose
+owner is dead or absent. Old entries go only below a retirement certificate,
+which an owner raises once it has proven its current alarm durable and its
+ownership current. Its eager delete of them can fail, and every node's
+collector lists the entries each second, deletes those the certificate
+retires, and wakes the due cells it does not. Each of these bucket calls can
+fail like any other.
 
 The simulated shell carries out every effect the core can return, and sends
 every event production sends, in its timed form.
@@ -261,29 +266,28 @@ for an enforced check. The sweep below is the evidence that the others can
 fire, except **deploy-stuck**, which has never fired, so nothing yet shows
 that it can. In 100,000 swarm seeds:
 
-- 1,087 seeds kept an idle cell resident, 1,049 of them in a run where a
+- 1,162 seeds kept an idle cell resident, 1,137 of them in a run where a
   walk-down had wedged: the core evicts idle cells only while it is not
   shedding.
-- 287 seeds claimed during a preserve, never during a drain. An eviction
+- 268 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
   cell, though `begin_preserve` retires cold work.
-- 50 seeds resumed a superseded epoch: after faulty clocks, the slow clean
+- 54 seeds resumed a superseded epoch: after faulty clocks, the slow clean
   reload below, or a claim during a preserve.
-- 1 seed (swarm 25403) left an acknowledged alarm with no wake entry due by
+- 1 seed (swarm 33191) left an acknowledged alarm with no wake entry due by
   its time: the slow clean reload below acknowledged the write that set it
   into a superseded epoch.
 - 21 seeds left a durable alarm unfired when the audit ended.
 - 8 seeds lost a proven alarm handler commit (9 with validation compiled
   out), all after the
   slow clean reload below or a clock fault: the same failures that lose acknowledged writes, seen through an alarm.
-- With validation compiled out, 1,809 seeds kept an outbound socket open
+- With validation compiled out, 1,788 seeds kept an outbound socket open
   after its runtime stopped. With it on, the live-transport invariant stops
   those runs first. These hits are not yet traced.
 
-The simulator does not yet model V8, the waker election (the lowest live
-node stands in for it), or, in the fleet log, bundles, the recovery claim,
-and reconfiguring a session when a follower dies (its acks fall back to the
-bucket). Its memory has no allocator slack, cgroup or
+The simulator does not yet model V8, or, in the fleet log, bundles, the
+recovery claim, and reconfiguring a session when a follower dies (its acks
+fall back to the bucket). Its memory has no allocator slack, cgroup or
 containers, no noise between samples, and returns a cell's whole share when
 the cell goes. It places no cell on an isolate, which the walk-down treats
 as production's one shared heap for a node below 32 cells.
@@ -369,16 +373,17 @@ The core on `main` fails some seeds.
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-In 100,000 swarm seeds, 12,745 failed in a debug build: 9,907 on the
-invariants (3,084 of them on live transports, 2,525 on alarms firing while
-not resident), 2,410 on liveness or `alarm-not-fired`, 412 on stale reads,
-and 16 on lost writes in the fleet posture. All but 36 of the liveness and
-alarm failures are seeds where a node's memory walk-down wedged; 3,728 seeds
-wedged in all. With validation compiled out, 3,500 failed: 2,873 on liveness
-or `alarm-not-fired` (2,834 of them wedged), 487 on stale reads, 122 on
+In 100,000 swarm seeds, 12,908 failed in a debug build: 9,998 on the
+invariants (3,116 of them on live transports, 2,526 on alarms firing while
+not resident), 2,498 on liveness or `alarm-not-fired`, 401 on stale reads,
+and 11 on lost writes in the fleet posture. All but 39 of the liveness and
+alarm failures are seeds where a node's memory walk-down wedged, and those
+39 are the capacity livelock; 3,791 seeds wedged in all. With validation
+compiled out, 3,597 failed: 2,977 on liveness or `alarm-not-fired` (2,934 of
+them wedged), 481 on stale reads, 126 on
 `evicted-pinned` (the core goes on to evict a cell whose live transport the
-invariant would have caught), and 18 on lost writes in the fleet posture:
-13 after a failed tail fold, 4 after a slow clean reload, and 1 after a
+invariant would have caught), and 13 on lost writes in the fleet posture:
+10 after a failed tail fold, 2 after a slow clean reload, and 1 after a
 clock fault. Between them, the seeds entered
 every phase.
 
