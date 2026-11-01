@@ -128,6 +128,15 @@ pub(super) enum StoreReq {
 }
 
 impl World {
+    /// The core is evicting `cell`: what it leaves behind must be safe to
+    /// leave. No transport pins it, and its alarm has a wake entry.
+    fn judge_eviction(&mut self, node: usize, cell: &str, epoch: Epoch) {
+        let who = self.who(node);
+        let pinned = self.pinned(node, cell);
+        let uncovered = self.alarm_uncovered(node, cell, epoch);
+        self.checker.evicting(self.t, &who, cell, pinned, uncovered);
+    }
+
     /// Carry out one effect. It either finishes now (its event goes on
     /// `immediate`, as in `Actor::drive`) or starts work whose completion
     /// is scheduled on the agenda.
@@ -219,22 +228,13 @@ impl World {
                 cause,
                 bounded,
             } => {
-                if matches!(cause, StopCause::Evict { .. }) {
-                    let (who, pinned) = (self.who(node), self.pinned(node, &cell));
-                    // A runtime a newer epoch superseded gives up nothing:
-                    // the bucket rightly retired its wake entries.
-                    let current = self.store.owner(&cell).is_none_or(|(_, e)| e <= epoch);
-                    let uncovered = current
-                        && self
-                            .seen(node, &cell, epoch)
-                            .and_then(|content| self.alarm_of(content, epoch).at_ms())
-                            .is_some_and(|at_ms| !self.store.wake_covers(&cell, at_ms));
-                    self.checker
-                        .evicting(self.t, &who, &cell, pinned, uncovered);
+                let evict = matches!(cause, StopCause::Evict { .. });
+                if evict {
+                    self.judge_eviction(node, &cell, epoch);
                 }
-                let leak = matches!(cause, StopCause::Evict { .. })
-                    && self.config.mutation == Some(Mutation::StaleRegistry);
-                if !leak {
+                // Production drops the runtime from its registry in the
+                // same step. The planted bug leaves an evicted one there.
+                if !(evict && self.config.mutation == Some(Mutation::StaleRegistry)) {
                     self.machines[node].proc_mut().published.remove(&cell);
                 }
                 self.stop_runtime(node, op, cell, epoch, cause, bounded);
@@ -738,6 +738,38 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
         | Event::GenerationChanged { now_mono_ms, .. }
         | Event::WakeHintAt { now_mono_ms, .. } => *now_mono_ms = mono,
         Event::OwnerRead { now_ms, .. } | Event::NodeLeaseRead { now_ms, .. } => *now_ms = wall,
-        _ => {}
+        // Stamped where it is built: the core judges a capacity sample at
+        // the instant the bucket took it, not when the answer arrives.
+        Event::CapacityPeersRead { .. } => {}
+        // No clock. Listed by name, so a new event is classified here
+        // before it compiles.
+        Event::LocalCellsRead { .. }
+        | Event::Request { .. }
+        | Event::WorkerRequest { .. }
+        | Event::BeginPreserve
+        | Event::Cancel { .. }
+        | Event::ActivityFinished { .. }
+        | Event::Output { .. }
+        | Event::DurableReached { .. }
+        | Event::OwnershipVerified { .. }
+        | Event::WebSocketOpened { .. }
+        | Event::WebSocketClosed { .. }
+        | Event::WakeHint { .. }
+        | Event::NodeLogRecovered { .. }
+        | Event::OwnerCasCompleted { .. }
+        | Event::OwnerReleased { .. }
+        | Event::SuccessorAdopted { .. }
+        | Event::RestoreCompleted { .. }
+        | Event::RuntimeStarted { .. }
+        | Event::Published { .. }
+        | Event::DurabilityChecked { .. }
+        | Event::RuntimeStopped { .. }
+        | Event::RuntimeStopFailed { .. }
+        | Event::RuntimeStopCancelled { .. }
+        | Event::Evict { .. }
+        | Event::InvalidateRemote { .. }
+        | Event::NodeFenced
+        | Event::ReleaseAll
+        | Event::Rebalance { .. } => {}
     }
 }

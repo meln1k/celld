@@ -22,8 +22,9 @@ use std::collections::VecDeque;
 use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route, WebSocketId};
 
 use super::faults::Partition;
-use super::{Item, Pending, Time, Work, World, OPERATION_DEADLINE_MS};
-use crate::{Mutation, WriteId};
+use super::{alarms, Item, Pending, Time, Work, World, OPERATION_DEADLINE_MS};
+use crate::checks::Reveal;
+use crate::WriteId;
 
 /// When clients start sending. Nodes need a few round trips for their
 /// leases first; a request before that is refused, which proves nothing.
@@ -173,36 +174,24 @@ impl RouteRetry {
     }
 }
 
-/// An effect a handler raised (a `fetch()` to a third party), held at the
-/// output gate: what it can reveal, sampled when the handler raised it.
-pub(super) struct Gate {
-    cell: String,
-    epoch: Epoch,
-    committed: Option<(WriteId, u64)>,
-    seen: Vec<WriteId>,
-    sent_at: Time,
-    position: Option<u64>,
-    observed: Option<u64>,
-}
-
 /// One delivery of a client request to one node's core.
 pub(super) struct Req {
     op: u64,
     /// The cell and whether the handler writes: a copy of the client's, so
     /// the handler runs on even after the client stopped waiting.
-    cell: String,
+    pub(super) cell: String,
     write: bool,
     upgrade: bool,
-    sent_at: Time,
+    pub(super) sent_at: Time,
     /// How the request got here. A forwarded request is never forwarded on.
     via: Via,
     /// The epoch the request ran at, once routed locally.
-    epoch: Option<Epoch>,
+    pub(super) epoch: Option<Epoch>,
     /// The handler has answered: its activity is over, and its response
     /// waits at the output gate.
     answered: bool,
     /// The write the handler committed and its position.
-    committed: Option<(WriteId, u64)>,
+    pub(super) committed: Option<(WriteId, u64)>,
     /// The handler's write also sets the cell's alarm this far ahead, or
     /// clears it.
     alarm: Option<Option<u64>>,
@@ -673,81 +662,6 @@ impl World {
         self.work(node, end, Work::Client(ClientWork::End { request }));
     }
 
-    /// The handler calls out to a third party. The call can reveal what it
-    /// has seen, so it waits at the output gate: the shell routes a gate
-    /// request for the cell (`GateRequestAt`), then holds the call as an
-    /// output until the core releases it.
-    pub(super) fn handler_effect(&mut self, node: usize, request: RequestId) {
-        let Some(req) = self.machines[node].proc().client(request) else {
-            return;
-        };
-        let (cell, epoch, committed, sent_at) = (
-            req.cell.clone(),
-            req.epoch.unwrap(),
-            req.committed,
-            req.sent_at,
-        );
-        let Some((opened, saw)) = self.positions(node, &cell, epoch) else {
-            return;
-        };
-        let (position, observed) = match committed {
-            Some(_) => (Some(saw), None),
-            None => (None, (saw > opened).then_some(saw)),
-        };
-        let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
-        let seen = self.seen(node, &cell, epoch).unwrap().to_vec();
-        let held = Gate {
-            cell: cell.clone(),
-            epoch,
-            committed,
-            seen,
-            sent_at,
-            position,
-            observed,
-        };
-        let gate = self.pend(node, Pending::Gate(held));
-        let event = Event::GateRequestAt {
-            request: gate,
-            cell,
-            now_mono_ms: 0,
-        };
-        self.drive(node, event);
-    }
-
-    /// The core routed a gate request. Routed here, the held call becomes
-    /// an output; routed anywhere else, the cell left mid-call and the call
-    /// fails closed.
-    pub(super) fn gate_routed(
-        &mut self,
-        node: usize,
-        request: RequestId,
-        result: &Result<Route, RequestError>,
-    ) {
-        let p = self.machines[node].proc_mut();
-        let gate = p.gate(request).expect("a gate request");
-        let delay = self.net_rng.range(0, 2);
-        match result {
-            Ok(Route::Local) => {
-                let event = Event::OutputAt {
-                    request,
-                    channel: Channel::Fetch,
-                    position: gate.position,
-                    observed: gate.observed,
-                    epoch: Some(gate.epoch),
-                    now_mono_ms: 0,
-                };
-                self.deliver(node, delay, event);
-            }
-            Ok(Route::Remote { .. }) => {
-                p.pending.remove(&request);
-                self.deliver(node, delay, Event::ActivityFinished { request });
-            }
-            Err(_) => {
-                p.pending.remove(&request);
-            }
-        }
-    }
-
     /// The handler's write goes into the open database, and the replicator
     /// starts uploading it.
     /// If the runtime was stopped under it, the database is closed and the
@@ -766,14 +680,7 @@ impl World {
                     // alarm observer reports the change.
                     let alarm = self.alarm_written(node, &cell, epoch, committed.0, ahead_ms);
                     let alarm = self.reported(alarm);
-                    let event = Event::AlarmObserved {
-                        cell,
-                        alarm,
-                        covered: false,
-                        now_ms: 0,
-                        now_mono_ms: 0,
-                    };
-                    self.deliver(node, 0, event);
+                    self.deliver(node, 0, alarms::observed(&cell, alarm, false));
                 }
             }
             None => self.handler_failed(node, request),
@@ -795,22 +702,12 @@ impl World {
             return;
         };
         let cell = req.cell.clone();
-        let Some((opened, saw)) = self.positions(node, &cell, req.epoch.unwrap()) else {
+        let wrote = req.committed.is_some();
+        let Some(egress) = self.egress(node, &cell, req.epoch.unwrap(), wrote) else {
             return self.handler_failed(node, request);
         };
-        // As production samples at egress: a handler that wrote asks for
-        // everything committed when it answered, its own write and any
-        // other handler's before it. A read reports what it saw above the
-        // epoch's opening content, so the gate holds it behind writes that
-        // are not proven yet.
-        let (position, observed) = match req.committed {
-            Some(_) => (Some(saw), None),
-            None => (None, (saw > opened).then_some(saw)),
-        };
-        let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
-        let seen = self.seen(node, &cell, req.epoch.unwrap()).unwrap().to_vec();
         let req = self.machines[node].proc_mut().client_mut(request).unwrap();
-        req.seen = seen;
+        req.seen = egress.seen;
         req.answered = true;
         if req.upgrade {
             // The handler accepts a WebSocket before it answers.
@@ -821,8 +718,8 @@ impl World {
             Event::OutputAt {
                 request,
                 channel: Channel::Response,
-                position,
-                observed,
+                position: egress.position,
+                observed: egress.observed,
                 epoch: None,
                 now_mono_ms: 0,
             },
@@ -856,43 +753,17 @@ impl World {
             self.stats.acked_writes += 1;
         }
         let who = self.who(node);
-        self.checker.response_released(
-            self.t,
-            &self.store,
-            &who,
-            &req.cell,
+        let op = req.op;
+        let reveal = Reveal {
+            cell: req.cell,
             epoch,
-            req.committed,
-            &req.seen,
-            req.sent_at,
-        );
-        self.settle(req.op, true);
-    }
-
-    /// The gate let a handler's call leave, or refused it. One that left
-    /// revealed what its handler had seen, so the oracle judges it as it
-    /// judges a response. Either way the gate's pin on the cell ends.
-    fn gate_released(&mut self, node: usize, request: RequestId, result: Result<(), RequestError>) {
-        let Some(gate) = self.machines[node].proc_mut().take_gate(request) else {
-            return;
+            committed: req.committed,
+            seen: req.seen,
+            sent_at: req.sent_at,
         };
-        if result.is_ok() {
-            self.stats.effects += 1;
-            let who = self.who(node);
-            self.checker.response_released(
-                self.t,
-                &self.store,
-                &who,
-                &gate.cell,
-                gate.epoch,
-                gate.committed,
-                &gate.seen,
-                gate.sent_at,
-            );
-        }
-        let delay = self.net_rng.range(0, 2);
-        let cell = gate.cell;
-        self.work(node, delay, Work::ActivityDone { request, cell });
+        self.checker
+            .response_released(self.t, &self.store, &who, &reveal);
+        self.settle(op, true);
     }
 
     /// The client hears its answer. Only the first one counts: a request

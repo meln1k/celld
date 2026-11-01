@@ -156,17 +156,22 @@ impl World {
         Some((alarm, covered))
     }
 
+    /// Whether `cell`'s runtime at `epoch` holds an armed alarm that no
+    /// wake entry in the bucket comes due for by its time. A runtime a newer
+    /// epoch superseded gives up nothing: its entries were rightly retired.
+    pub(super) fn alarm_uncovered(&self, node: usize, cell: &str, epoch: Epoch) -> bool {
+        let current = self.store.owner(cell).is_none_or(|(_, e)| e <= epoch);
+        current
+            && self
+                .seen(node, cell, epoch)
+                .and_then(|content| self.alarm_of(content, epoch).at_ms())
+                .is_some_and(|at_ms| !self.store.wake_covers(cell, at_ms))
+    }
+
     /// An activity on the cell is over: report its alarm, then finish it.
     pub(super) fn activity_done(&mut self, node: usize, request: RequestId, cell: &str) {
         if let Some((alarm, covered)) = self.observation(node, cell) {
-            let event = Event::AlarmObserved {
-                cell: cell.to_string(),
-                alarm,
-                covered,
-                now_ms: 0,
-                now_mono_ms: 0,
-            };
-            self.drive(node, event);
+            self.drive(node, observed(cell, alarm, covered));
         }
         self.drive(node, Event::ActivityFinished { request });
     }
@@ -243,14 +248,7 @@ impl World {
         }
         if report {
             if let Some((alarm, covered)) = self.observation(node, &cell) {
-                let event = Event::AlarmObserved {
-                    cell,
-                    alarm,
-                    covered,
-                    now_ms: 0,
-                    now_mono_ms: 0,
-                };
-                self.drive(node, event);
+                self.drive(node, observed(&cell, alarm, covered));
             }
         }
     }
@@ -267,13 +265,7 @@ impl World {
             return;
         };
         if covered || alarm.at_ms().is_none() {
-            immediate.push_back(Event::AlarmObserved {
-                cell: cell.to_string(),
-                alarm,
-                covered,
-                now_ms: 0,
-                now_mono_ms: 0,
-            });
+            immediate.push_back(observed(cell, alarm, covered));
         } else {
             self.publish_wake(node, cell, alarm, true);
         }
@@ -425,5 +417,17 @@ impl World {
                 self.checker.alarm_unfired(self.t, &cell, now - at_ms);
             }
         }
+    }
+}
+
+/// The runtime's report of a cell's alarm (`AlarmObserved`). `stamp` sets
+/// its clocks when it reaches the core.
+pub(super) fn observed(cell: &str, alarm: AlarmSnapshot, covered: bool) -> Event {
+    Event::AlarmObserved {
+        cell: cell.to_string(),
+        alarm,
+        covered,
+        now_ms: 0,
+        now_mono_ms: 0,
     }
 }

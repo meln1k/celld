@@ -21,6 +21,18 @@ pub struct Violation {
     pub detail: String,
 }
 
+/// What an output that left a cell revealed: the cell's database as its
+/// handler saw it, the write it committed, if any, and when its client sent
+/// the request.
+pub struct Reveal {
+    pub cell: String,
+    pub epoch: Epoch,
+    /// The handler's write and its position.
+    pub committed: Option<(WriteId, u64)>,
+    pub seen: Vec<WriteId>,
+    pub sent_at: u64,
+}
+
 #[derive(Default)]
 pub struct Checker {
     /// Every ownership claim the bucket applied: (cell, epoch, node). A
@@ -261,18 +273,15 @@ impl Checker {
     /// the bucket is acknowledged only after a read of the owner record,
     /// made once the bucket held the write, named this process's node at
     /// this epoch (`docs/guarantees.md`).
-    #[allow(clippy::too_many_arguments)]
-    pub fn response_released(
-        &mut self,
-        t: u64,
-        store: &Store,
-        who: &str,
-        cell: &str,
-        epoch: Epoch,
-        committed: Option<(WriteId, u64)>,
-        seen: &[WriteId],
-        sent_at: u64,
-    ) {
+    pub fn response_released(&mut self, t: u64, store: &Store, who: &str, reveal: &Reveal) {
+        let Reveal {
+            cell,
+            epoch,
+            committed,
+            seen,
+            sent_at,
+        } = reveal;
+        let (cell, epoch, committed, sent_at) = (cell.as_str(), *epoch, *committed, *sent_at);
         let saw = seen.len() as u64;
         let missed = self
             .acked_at

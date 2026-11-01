@@ -14,6 +14,8 @@
 //! - `replicator`: each node's disk and open databases, their uploads and
 //!   the durability proofs, as `ltx_repl.rs` does.
 //! - `clients`: the workload and the scripted handler that serves it.
+//! - `gates`: what the handler's outputs ask of the output gate, and the
+//!   handler's calls held there.
 //! - `faults`: what goes wrong, and the supervisor that restarts a node.
 //! - `operator`: what an operator and the rest of a node do unprompted.
 //! - `shutdown`: graceful shutdowns, which drain or preserve a node.
@@ -32,6 +34,7 @@
 mod alarms;
 mod clients;
 mod faults;
+mod gates;
 mod handoff;
 mod liveness;
 mod operator;
@@ -55,8 +58,9 @@ use crate::store::Store;
 use crate::{Mutation, Outcome, Rng, SimConfig, Stats, WriteId};
 
 use alarms::{AlarmWork, ProcAlarms};
-use clients::{Bounce, ClientWork, Gate, Op, Req, Via};
+use clients::{Bounce, ClientWork, Op, Req, Via};
 use faults::{Fault, Partition};
+use gates::Gate;
 use handoff::{Adoption, Answer, HandoffWork, Offer};
 use liveness::Goal;
 use operator::{Act, OperatorWork};
