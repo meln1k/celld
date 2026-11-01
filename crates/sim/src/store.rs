@@ -52,6 +52,10 @@ pub struct Store {
     /// upload adds files and never rolls the prefix back. Keeping the longest
     /// list has the same effect.
     prefixes: BTreeMap<(String, Epoch), Vec<WriteId>>,
+    /// How long a chain each epoch was restored from. An older owner can
+    /// still extend the prefix below after the restore read it, and those
+    /// writes are not in this epoch's database.
+    bases: BTreeMap<(String, Epoch), usize>,
     /// Wake entries: (cell, installation) → when it is due, wall clock ms.
     wake: BTreeMap<(String, PublicationId), i64>,
     /// Each cell's retirement certificate, `wake/retired/<cell>`: the newest
@@ -211,7 +215,15 @@ impl Store {
     /// What a restore at `epoch` reads: the newest prefix below it that
     /// holds data. Every upload carries the whole database, so that one
     /// prefix is the whole chain.
-    pub fn read_chain(&self, cell: &str, epoch: Epoch) -> Option<Vec<WriteId>> {
+    pub fn read_chain(&mut self, cell: &str, epoch: Epoch) -> Option<Vec<WriteId>> {
+        let chain = self.chain(cell, epoch);
+        let len = chain.as_ref().map_or(0, Vec::len);
+        let base = self.bases.entry((cell.to_string(), epoch)).or_default();
+        *base = (*base).max(len);
+        chain
+    }
+
+    fn chain(&self, cell: &str, epoch: Epoch) -> Option<Vec<WriteId>> {
         // The planted bug skips the previous epoch's prefix, the usual source.
         let epoch = match self.mutation {
             Some(Mutation::StaleRestore) => epoch.saturating_sub(1),
@@ -242,10 +254,14 @@ impl Store {
 
     /// How much of epoch `epoch`'s database the bucket holds: its own prefix
     /// once anything was uploaded into it, or else the chain it was
-    /// restored from, which lives below it.
+    /// restored from, as long as the restore read it.
     pub fn durable_len(&self, cell: &str, epoch: Epoch) -> usize {
         match self.prefix(cell, epoch) {
-            [] => self.chain_below(cell, epoch).map_or(0, <[WriteId]>::len),
+            [] => self
+                .bases
+                .get(&(cell.to_string(), epoch))
+                .copied()
+                .unwrap_or(0),
             prefix => prefix.len(),
         }
     }
