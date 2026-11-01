@@ -203,6 +203,9 @@ struct Process {
     timers: BTreeMap<Slot, (u64, Timer, u64)>,
     next_ordinal: u64,
     replicas: BTreeMap<(String, Epoch), Replica>,
+    /// When the last upload on this process landed, on its monotonic clock:
+    /// production's `node_proof_ms`.
+    node_proof_ms: u64,
     /// The runtime registry: cells this process serves, at which epoch.
     published: BTreeMap<String, Epoch>,
     requests: BTreeMap<RequestId, Req>,
@@ -219,6 +222,7 @@ impl Process {
             timers: BTreeMap::new(),
             next_ordinal: 0,
             replicas: BTreeMap::new(),
+            node_proof_ms: 0,
             published: BTreeMap::new(),
             requests: BTreeMap::new(),
         }

@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 
+use celld_logic::durability::{proof_deadline, ProofProgress, ProofWait};
 use celld_logic::{
     Epoch, Event, Failure, LocalCell, OpId, ProofSource, RestoreOutcome, RestoreSpec, StopCause,
 };
@@ -19,9 +20,10 @@ use super::shell::StoreReq;
 use super::{Work, World, OPERATION_DEADLINE_MS};
 use crate::{Mutation, WriteId};
 
-/// How long the replicator works on one durability proof before it says it
-/// could not give it.
-const PROOF_DEADLINE_MS: u64 = 10_000;
+/// The budget for one durability proof (`DEFAULT_DURABILITY_TIMEOUT_SECS`
+/// in `ltx_repl.rs`). The gate's proof spends it as
+/// `celld_logic::durability` says; an eviction's waits it out once.
+const PROOF_BUDGET_MS: u64 = 10_000;
 
 /// A node's disk: the database files no process has open.
 #[derive(Default)]
@@ -37,6 +39,10 @@ pub(super) struct Replica {
     /// Length the bucket is known to hold for this epoch.
     uploaded: usize,
     uploading: bool,
+    /// The longest upload begun so far, and when it began on the monotonic
+    /// clock: production's `capture_seq` and `capture_started_ms`.
+    capture_len: u64,
+    capture_started_ms: u64,
     /// Proofs waiting for `uploaded` to reach a position.
     waiters: Vec<Waiter>,
     /// An eviction stop waiting for its final upload: the operation that
@@ -46,8 +52,9 @@ pub(super) struct Replica {
 
 /// A durability proof someone is waiting on.
 enum Waiter {
-    /// The output gate's proof for one response (`AwaitDurable`).
-    Gate { op: OpId, position: u64 },
+    /// The output gate's proof for one response (`AwaitDurable`). Its
+    /// ticket is the position.
+    Gate { op: OpId, wait: ProofWait },
     /// An eviction's proof that everything so far is durable
     /// (`EnsureDurable`).
     Evict { op: OpId, position: u64 },
@@ -62,7 +69,8 @@ impl Waiter {
 
     fn position(&self) -> u64 {
         match self {
-            Waiter::Gate { position, .. } | Waiter::Evict { position, .. } => *position,
+            Waiter::Gate { wait, .. } => wait.ticket,
+            Waiter::Evict { position, .. } => *position,
         }
     }
 
@@ -138,7 +146,7 @@ impl World {
                     Work::ProofDeadline { cell, epoch, op },
                 );
             }
-            self.settle_waiters(node, &key.0, epoch);
+            self.settle_proofs(node, &key.0, epoch);
             return self.upload(node, &key.0, epoch);
         }
         if let Some(replica) = self.machines[node].proc_mut().replicas.remove(&key) {
@@ -208,6 +216,8 @@ impl World {
             // What it opened with is already in the bucket, below this epoch.
             uploaded: len,
             uploading: false,
+            capture_len: 0,
+            capture_started_ms: 0,
             waiters: Vec::new(),
             stop: None,
         };
@@ -257,11 +267,16 @@ impl World {
         epoch: Epoch,
         position: u64,
     ) {
+        let wait = ProofWait {
+            started_ms: self.mono(node),
+            ticket: position,
+            budget_ms: PROOF_BUDGET_MS,
+        };
+        let waiter = Waiter::Gate { op, wait };
         if self.config.mutation == Some(Mutation::AckBeforeUpload) {
-            let event = Waiter::Gate { op, position }.answer(Ok(position));
-            return self.deliver(node, 1, event);
+            return self.deliver(node, 1, waiter.answer(Ok(position)));
         }
-        self.wait_for_upload(node, cell, epoch, Waiter::Gate { op, position });
+        self.wait_for_upload(node, cell, epoch, waiter);
     }
 
     /// An eviction's proof: answer once the bucket holds every write
@@ -306,24 +321,39 @@ impl World {
             epoch,
             op,
         };
-        self.work(node, PROOF_DEADLINE_MS, deadline);
-        self.settle_waiters(node, cell, epoch);
+        // A gate's deadline only ever moves later, so its first wake is at
+        // the earliest it can be: one budget from now.
+        self.work(node, PROOF_BUDGET_MS, deadline);
+        self.settle_proofs(node, cell, epoch);
         self.upload(node, cell, epoch);
     }
 
     /// A proof, or a stop's final upload, ran out of time.
     pub(super) fn proof_deadline(&mut self, node: usize, cell: String, epoch: Epoch, op: OpId) {
-        let Some(replica) = self.machines[node]
-            .proc_mut()
-            .replicas
-            .get_mut(&(cell, epoch))
-        else {
+        let mono = self.mono(node);
+        let p = self.machines[node].proc_mut();
+        let node_proof_ms = p.node_proof_ms;
+        let Some(replica) = p.replicas.get_mut(&(cell.clone(), epoch)) else {
             return;
         };
         let event = if replica.stop == Some(op) {
             replica.stop = None;
             Event::RuntimeStopFailed { op }
         } else if let Some(i) = replica.waiters.iter().position(|w| w.op() == op) {
+            if let Waiter::Gate { wait, .. } = &replica.waiters[i] {
+                // As production does on every wake: recompute, and fail only
+                // a deadline still in the past.
+                let progress = ProofProgress {
+                    node_proof_ms,
+                    capture_seq: replica.capture_len,
+                    capture_started_ms: replica.capture_started_ms,
+                };
+                let deadline = proof_deadline(wait, &progress);
+                if mono < deadline {
+                    let work = Work::ProofDeadline { cell, epoch, op };
+                    return self.work(node, deadline - mono, work);
+                }
+            }
             replica.waiters.remove(i).answer(Err(Failure::Ambiguous))
         } else {
             return;
@@ -334,6 +364,7 @@ impl World {
     /// Upload the epoch's database if the bucket is behind it and no upload
     /// is in flight. One upload at a time; its answer starts the next.
     pub(super) fn upload(&mut self, node: usize, cell: &str, epoch: Epoch) {
+        let mono = self.mono(node);
         let Some(replica) = self.machines[node]
             .proc_mut()
             .replicas
@@ -345,6 +376,12 @@ impl World {
             return;
         }
         replica.uploading = true;
+        let len = replica.content.len() as u64;
+        if len > replica.capture_len {
+            // A retry of the same writes keeps the budget it already spent.
+            replica.capture_len = len;
+            replica.capture_started_ms = mono;
+        }
         let req = StoreReq::Upload {
             cell: cell.to_string(),
             epoch,
@@ -369,6 +406,10 @@ impl World {
 
     /// The bucket confirmed an upload of `len` writes.
     pub(super) fn uploaded(&mut self, node: usize, cell: String, epoch: Epoch, len: usize) {
+        // A proof landed: the node is making progress (`note_proof`).
+        let mono = self.mono(node);
+        let p = self.machines[node].proc_mut();
+        p.node_proof_ms = p.node_proof_ms.max(mono);
         if let Some(replica) = self.machines[node]
             .proc_mut()
             .replicas
@@ -376,7 +417,7 @@ impl World {
         {
             replica.uploading = false;
             replica.uploaded = replica.uploaded.max(len);
-            self.settle_waiters(node, &cell, epoch);
+            self.settle_proofs(node, &cell, epoch);
             self.upload(node, &cell, epoch);
         }
     }
@@ -384,7 +425,7 @@ impl World {
     /// Answer every proof the bucket now covers, and finish a stop whose
     /// final upload landed. Answers are scheduled, not driven, because this
     /// can run inside `execute`.
-    fn settle_waiters(&mut self, node: usize, cell: &str, epoch: Epoch) {
+    fn settle_proofs(&mut self, node: usize, cell: &str, epoch: Epoch) {
         let key = (cell.to_string(), epoch);
         let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
             return;
