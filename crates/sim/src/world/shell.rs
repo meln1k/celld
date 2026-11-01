@@ -41,6 +41,20 @@ impl Slot {
     }
 }
 
+/// What happens to one bucket call.
+enum Fate {
+    /// It applies after `request_ms`, and its answer comes back
+    /// `response_ms` later.
+    Answered { request_ms: u64, response_ms: u64 },
+    /// The caller hears `failure` after `at`. With `applies_after`, the
+    /// request still reaches the bucket then; nobody hears its answer.
+    Failed {
+        failure: Failure,
+        at: u64,
+        applies_after: Option<u64>,
+    },
+}
+
 /// A request on its way to the bucket. The core's own requests carry its
 /// `op`; uploads and chain reads belong to the replicator.
 #[derive(Debug)]
@@ -322,53 +336,82 @@ impl World {
     /// the core hears anything; here the core sees every failure of the
     /// one attempt, so its own retry paths run far more often.
     fn store_call_within(&mut self, node: usize, req: StoreReq, timeout: u64) {
+        let inc = self.machines[node].inc;
+        let (request_ms, answer_ms) = match self.fate(node, timeout) {
+            Fate::Answered {
+                request_ms,
+                response_ms,
+            } => (request_ms, Some(response_ms)),
+            Fate::Failed {
+                failure,
+                at,
+                applies_after,
+            } => {
+                self.stats.store_failures += 1;
+                let work = self.store_failed(node, &req, failure);
+                self.work(node, at.max(1), work);
+                match applies_after {
+                    Some(request_ms) => (request_ms, None),
+                    None => return,
+                }
+            }
+        };
+        let item = Item::StoreApply {
+            node,
+            inc,
+            req,
+            answer_ms,
+        };
+        self.after(request_ms, item);
+    }
+
+    /// Draw the fate of one call: its latencies, then the faults that
+    /// override them. A partition overrides everything: the call never
+    /// gets out.
+    fn fate(&mut self, node: usize, timeout: u64) -> Fate {
         let mut request_ms = self.latency();
         let mut response_ms = self.latency();
-        let mut applies = true;
-        let mut failure = None;
+        // The failure the caller hears, and whether the call applied anyway.
+        let mut lost = None;
         if self.t < self.config.chaos_ms {
-            let f = self.config.faults.clone();
+            let f = &self.config.faults;
             if self.net_rng.chance(f.store_spike_probability) {
                 request_ms += self.net_rng.range(0, f.store_spike_ms);
             }
             if self.net_rng.chance(f.store_spike_probability) {
                 response_ms += self.net_rng.range(0, f.store_spike_ms);
             }
-            if self.net_rng.chance(f.store_definite) {
-                (applies, failure) = (false, Some(Failure::Definite));
+            lost = if self.net_rng.chance(f.store_definite) {
+                Some((Failure::Definite, false))
             } else if self.net_rng.chance(f.store_lost_request) {
-                (applies, failure) = (false, Some(Failure::Ambiguous));
+                Some((Failure::Ambiguous, false))
             } else if self.net_rng.chance(f.store_lost_response) {
-                failure = Some(Failure::Ambiguous);
-            }
-        }
-        match self.machines[node].partition {
-            Some((_, Partition::Refuse)) => (applies, failure) = (false, Some(Failure::Definite)),
-            Some((_, Partition::Hang)) => (applies, failure) = (false, Some(Failure::Ambiguous)),
-            None => {}
-        }
-        if failure.is_none() && request_ms + response_ms > timeout {
-            failure = Some(Failure::Ambiguous);
-        }
-        if let Some(failure) = failure {
-            self.stats.store_failures += 1;
-            let at = match failure {
-                Failure::Definite => request_ms.min(timeout),
-                Failure::Ambiguous => timeout,
+                Some((Failure::Ambiguous, true))
+            } else {
+                None
             };
-            let work = self.store_failed(node, &req, failure);
-            self.work(node, at.max(1), work);
         }
-        if applies {
-            let inc = self.machines[node].inc;
-            let answer_ms = failure.is_none().then_some(response_ms);
-            let item = Item::StoreApply {
-                node,
-                inc,
-                req,
-                answer_ms,
-            };
-            self.after(request_ms, item);
+        let lost = match self.machines[node].partition {
+            Some((_, Partition::Refuse)) => Some((Failure::Definite, false)),
+            Some((_, Partition::Hang)) => Some((Failure::Ambiguous, false)),
+            None => lost,
+        };
+        // Too slow: the caller gives up, and the request still applies, late.
+        let slow = request_ms + response_ms > timeout;
+        let lost = lost.or(slow.then_some((Failure::Ambiguous, true)));
+        match lost {
+            None => Fate::Answered {
+                request_ms,
+                response_ms,
+            },
+            Some((failure, applies)) => Fate::Failed {
+                failure,
+                at: match failure {
+                    Failure::Definite => request_ms.min(timeout),
+                    Failure::Ambiguous => timeout,
+                },
+                applies_after: applies.then_some(request_ms),
+            },
         }
     }
 
