@@ -246,10 +246,11 @@ core, not to the simulator or to the property itself.
 **deploy-stuck**, **idle-not-evicted** and **memory-not-relieved** judge only
 once the fleet is quiet, 15 s after the faults end, so that a bucket call lost
 just before the end has timed out. The others judge at the moment their fact
-arrives. No planted bug exercises a watched property yet. The sweep below is
-the evidence that seven of them can fire; **deploy-stuck**,
-**alarm-undiscoverable** and **unclaimed-handoff** have never fired on the
-current simulator, so nothing yet shows that they can. In 100,000 swarm seeds:
+arrives. **alarm-undiscoverable** and **unclaimed-handoff** have never fired on
+the current simulator, so each has a planted bug that the test suite requires
+it to catch, as it does for an enforced check. The sweep below is the evidence
+that the others can fire, except **deploy-stuck**, which has never fired, so
+nothing yet shows that it can. In 100,000 swarm seeds:
 
 - 1,163 seeds kept an idle cell resident, 1,130 of them on a node whose
   walk-down had wedged: the core evicts idle cells only while it is not

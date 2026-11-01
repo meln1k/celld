@@ -411,11 +411,21 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::FollowerIgnoresSeal => &["late-ack"],
             Mutation::ErrorsBypassGate => &["read-before-durable"],
             Mutation::FollowerCorrupts => &["unverified-ack"],
+            Mutation::AcceptUnclaimed => &["unclaimed-handoff"],
+            Mutation::RetireUnproven => &["alarm-undiscoverable"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
             Mutation::PhantomSocketClose => SimConfig {
                 websocket_probability: 0.05,
+                operator: Operator {
+                    drains: 6.0,
+                    ..SimConfig::calm().operator
+                },
+                ..SimConfig::calm()
+            },
+            // Only a drain or a rebalance offers cells to peers.
+            Mutation::AcceptUnclaimed => SimConfig {
                 operator: Operator {
                     drains: 6.0,
                     ..SimConfig::calm().operator
@@ -443,7 +453,10 @@ fn every_planted_bug_is_caught_by_its_check() {
         let mut missing: Vec<&str> = expected.to_vec();
         for seed in 0..20 {
             let outcome = run(seed, &config);
-            missing.retain(|kind| !outcome.violations.iter().any(|v| v.kind == *kind));
+            // A watched property counts too: its bug shows it can fire.
+            let hits = outcome.violations.iter().chain(&outcome.watched);
+            let fired: Vec<&str> = hits.map(|v| v.kind).collect();
+            missing.retain(|kind| !fired.contains(kind));
             if missing.is_empty() {
                 break;
             }

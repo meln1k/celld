@@ -302,8 +302,9 @@ impl World {
             && self
                 .seen(node, cell, epoch)
                 .is_some_and(|content| self.alarm_of(content, epoch).same_installation(alarm));
-        let durable = self.store.durable_len(cell, epoch) as u64 >= source.position;
-        let owned = self.store.owner(cell) == Some((Some(m.name.as_str()), epoch));
+        let unproven = self.config.mutation == Some(Mutation::RetireUnproven);
+        let durable = unproven || self.store.durable_len(cell, epoch) as u64 >= source.position;
+        let owned = unproven || self.store.owner(cell) == Some((Some(m.name.as_str()), epoch));
         (current && durable && owned).then_some(Retirement {
             id: source.id,
             at_ms: alarm.at_ms(),

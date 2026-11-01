@@ -13,6 +13,7 @@ use celld_logic::{AdoptedCell, Epoch, Event, Failure, OpId, RequestId, Route};
 
 use super::faults::Partition;
 use super::{Item, Pending, Time, Work, World, OPERATION_DEADLINE_MS, PEER_PROTOCOL};
+use crate::Mutation;
 
 /// How long the donor waits before searching again when no peer took a
 /// cell (`HANDOFF_RETRY_DELAY`).
@@ -207,7 +208,12 @@ impl World {
             return self.answer_offer(offer, Answer::Failed, delay);
         }
         let cell = offer.cell.clone();
+        let released = offer.released_epoch;
         let request = self.pend(node, Pending::Offer(offer));
+        if self.config.mutation == Some(Mutation::AcceptUnclaimed) {
+            let adopted = self.adopted(node, released + 1);
+            return self.finish_offer(node, request, Answer::Accepted(adopted));
+        }
         let event = Event::HandoffRequestAt {
             request,
             cell,

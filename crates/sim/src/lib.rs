@@ -186,10 +186,19 @@ pub enum Mutation {
     /// owner can still prove writes through the fleet. Caught by
     /// `late-ack`.
     FollowerIgnoresSeal,
+    /// A peer answers a handoff offer that it accepted the moment the offer
+    /// arrives, at the next epoch, without claiming the cell. Caught by
+    /// `unclaimed-handoff`.
+    AcceptUnclaimed,
+    /// A retirement certificate is raised to the alarm the core settled on
+    /// without its proof: durable in the bucket, and owned. Its entries
+    /// below go while the bucket may still hold an older alarm. Caught by
+    /// `alarm-undiscoverable`.
+    RetireUnproven,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 19] = [
+    pub const ALL: [Mutation; 21] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -209,6 +218,8 @@ impl Mutation {
         Mutation::FollowerIgnoresSeal,
         Mutation::ErrorsBypassGate,
         Mutation::FollowerCorrupts,
+        Mutation::AcceptUnclaimed,
+        Mutation::RetireUnproven,
     ];
 }
 
