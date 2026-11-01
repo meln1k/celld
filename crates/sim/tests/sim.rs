@@ -55,7 +55,7 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
     // Every restore must hold every write a client was told succeeded,
     // whether the bucket proved it or, in the fleet posture, the followers.
     let (mut restored, mut fleet_proofs, mut log_recoveries) = (0, 0, 0);
-    let mut retried_recoveries = 0;
+    let (mut retried_recoveries, mut panicked) = (0, 0);
     for (seed, fleet) in (0..20).flat_map(|seed| [(seed, false), (seed, true)]) {
         let config = SimConfig {
             fleet,
@@ -70,6 +70,7 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
                 known && outcome.violations.is_empty(),
                 "seed {seed} (fleet {fleet}): {outcome:?}"
             );
+            panicked += 1;
             continue;
         }
         assert!(outcome.passed(), "seed {seed} (fleet {fleet}): {outcome:?}");
@@ -92,6 +93,12 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
             .copied()
             .unwrap_or(0);
     }
+    // Most runs must reach the end: a run a known panic stopped early
+    // proves nothing about lost writes.
+    assert!(
+        panicked <= 4,
+        "{panicked} of 40 runs stopped on a known panic"
+    );
     // Takeovers happened, so the lost-write check had restores to judge;
     // followers proved writes, and dead leaders' logs were recovered.
     assert!(restored > 100, "only {restored} restores from the bucket");
@@ -358,6 +365,15 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         .filter(|phase| *phase != "waiting_owner_log_recovery" && !entered.contains(phase))
         .collect();
     assert!(never.is_empty(), "phases never entered: {never:?}");
+    // And `coverage::name` names no phase outside the list, which this
+    // check would otherwise never ask about.
+    let unlisted: Vec<&str> = (entered.iter().copied())
+        .filter(|phase| !celld_sim::coverage::PHASES.contains(phase))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "phases missing from PHASES: {unlisted:?}"
+    );
 }
 
 #[test]

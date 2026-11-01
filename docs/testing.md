@@ -234,10 +234,12 @@ core, not to the simulator or to the property itself.
 - **memory-not-relieved**: a node with no socket open stayed latched on
   memory pressure for over 10 s.
 
-The last four judge only once the fleet is quiet, and 15 s after the faults
-end, so that a bucket call lost just before the end has timed out. A planted
-bug makes each of the first six fire; the core's walk-down wedge below makes
-the seventh fire. In 100,000 swarm seeds:
+**deploy-stuck**, **idle-not-evicted** and **memory-not-relieved** judge only
+once the fleet is quiet, 15 s after the faults end, so that a bucket call lost
+just before the end has timed out. The others judge at the moment their fact
+arrives. No planted bug exercises a watched property yet. The sweep below is
+the evidence that six of them can fire; **deploy-stuck** has never fired, so
+nothing yet shows that it can. In 100,000 swarm seeds:
 
 - 1,163 seeds kept an idle cell resident, 1,130 of them on a node whose
   walk-down had wedged: the core evicts idle cells only while it is not
@@ -247,6 +249,10 @@ the seventh fire. In 100,000 swarm seeds:
   cell, though `begin_preserve` retires cold work.
 - 55 seeds resumed a superseded epoch: after faulty clocks, the slow clean
   reload below, or a claim during a preserve.
+- 31 seeds left a durable alarm unfired when the audit ended.
+- With validation compiled out, 1,833 seeds kept an outbound socket open
+  after its runtime stopped. With it on, the live-transport invariant stops
+  those runs first. These hits are not yet traced.
 
 The simulator does not yet model V8, eviction snapshots, the waker election
 (the lowest live node stands in for it), or, in the fleet log, bundles, the

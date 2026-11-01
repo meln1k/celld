@@ -1,11 +1,14 @@
 //! `celld-sim [--seed N | --seeds A..B] [--crashes PER_MINUTE | --chaos | --swarm]
-//! [--fleet] [--mutation NAME] [--trace]`
+//! [--fleet] [--memory ROOM] [--mutation NAME] [--coverage] [--trace]`
 //!
 //! One seed prints what happened. A range prints one line per failing seed,
 //! with its first violation or panic, and one line per watched property a
 //! seed hit, then counts. Watched hits never fail a seed. `--swarm` draws each
 //! seed's configuration from the seed itself. `--mutation` plants a known
-//! bug, named as in `Mutation`, to watch a check catch it.
+//! bug, named as in `Mutation`, to watch a check catch it. `--memory` gives
+//! each node a memory ceiling that about `ROOM` cells fit under.
+//! `--coverage` prints every phase transition a range took, with how many
+//! seeds took it.
 
 // A developer tool's report, not celld's stdout contract.
 #![allow(clippy::disallowed_macros)]
