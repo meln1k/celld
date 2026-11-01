@@ -18,6 +18,7 @@
 //! - `operator`: what an operator and the rest of a node do unprompted.
 //! - `shutdown`: graceful shutdowns, which drain or preserve a node.
 //! - `handoff`: draining and rebalancing, which hand cells to peers.
+//! - `sockets`: WebSockets the workload opens, and the messages on them.
 //! - `liveness`: the probe and the audit that end every run.
 //!
 //! A node is a [`Machine`] with a disk. The [`Process`] on it can die and
@@ -34,6 +35,7 @@ mod operator;
 mod replicator;
 mod shell;
 mod shutdown;
+mod sockets;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
@@ -41,7 +43,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use celld_logic::{
     on_event, pressure, Config, Epoch, Event, NodeLeaseSpec, OpId, OwnershipOnEvict, RequestId,
-    State, Timer,
+    State, Timer, WebSocketId,
 };
 
 use crate::checks::Checker;
@@ -56,6 +58,7 @@ use operator::Act;
 use replicator::{Disk, Replica};
 use shell::{Slot, StoreReq};
 use shutdown::{Mode, Shutdown};
+use sockets::Socket;
 
 type Time = u64;
 /// An item's place on the agenda, to cancel it by.
@@ -168,6 +171,10 @@ enum Work {
     AdoptSearch { op: OpId },
     /// A peer answered the donor's offer.
     OfferAnswered { op: OpId, answer: Answer },
+    /// A client sends on its WebSocket.
+    SocketMessage { websocket: WebSocketId },
+    /// A client closes its WebSocket.
+    SocketClosed { websocket: WebSocketId },
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -259,6 +266,8 @@ struct Process {
     adoptions: BTreeMap<OpId, Adoption>,
     /// Offers from donors this process's core is deciding on.
     offers: BTreeMap<RequestId, Offer>,
+    /// The WebSockets this process holds open.
+    sockets: BTreeMap<WebSocketId, Socket>,
 }
 
 impl Process {
@@ -279,6 +288,7 @@ impl Process {
             shutdown: None,
             adoptions: BTreeMap::new(),
             offers: BTreeMap::new(),
+            sockets: BTreeMap::new(),
         }
     }
 }
@@ -298,6 +308,7 @@ pub struct World {
     next_op: u64,
     next_request: RequestId,
     next_write: WriteId,
+    next_socket: WebSocketId,
     net_rng: Rng,
     work_rng: Rng,
     fault_rng: Rng,
@@ -342,6 +353,7 @@ impl World {
             next_op: 1,
             next_request: 1,
             next_write: 1,
+            next_socket: 1,
             net_rng,
             work_rng,
             fault_rng,
@@ -499,6 +511,8 @@ impl World {
             Work::Rebalance { cells } => self.drive(node, Event::Rebalance { cells }),
             Work::AdoptSearch { op } => self.adopt_search(node, op),
             Work::OfferAnswered { op, answer } => self.offer_answered(node, op, answer),
+            Work::SocketMessage { websocket } => self.socket_message(node, websocket),
+            Work::SocketClosed { websocket } => self.socket_closed(node, websocket),
             Work::Nudge => self.drive(
                 node,
                 Event::NudgeNodeLease {

@@ -208,6 +208,10 @@ impl World {
                 cause,
                 bounded,
             } => {
+                if matches!(cause, StopCause::Evict { .. }) {
+                    let (who, pinned) = (self.who(node), self.pinned(node, &cell));
+                    self.checker.evicting(self.t, &who, &cell, pinned);
+                }
                 let leak = matches!(cause, StopCause::Evict { .. })
                     && self.config.mutation == Some(Mutation::StaleRegistry);
                 if !leak {
@@ -276,12 +280,10 @@ impl World {
                 ..
             } => {
                 self.abort_requests(node, requests);
-                for websocket in websockets {
-                    immediate.push_back(Event::WebSocketClosed {
-                        cell: cell.clone(),
-                        websocket,
-                    });
-                }
+                self.close_sockets(node, &cell, websockets, immediate);
+            }
+            Effect::CloseWebSocket { cell, websocket } => {
+                self.close_sockets(node, &cell, vec![websocket], immediate)
             }
             Effect::EvictionAdmission { request, result } => {
                 self.eviction_admitted(node, request, result)
@@ -645,6 +647,11 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
             now_mono_ms,
         }
         | Event::HandoffRequestAt {
+            now_ms,
+            now_mono_ms,
+            ..
+        }
+        | Event::WebSocketRequestAt {
             now_ms,
             now_mono_ms,
             ..

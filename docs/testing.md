@@ -83,7 +83,9 @@ protocol variants verify that the checkers detect the faults.
 `celld-logic` cores in one thread, on one simulated clock, against one
 simulated bucket. A simulated shell carries out each effect the way
 `crates/celld/actor.rs` does. A cell is a scripted handler that can commit one
-write and answers through the output gate. Some clients give up before they
+write and answers through the output gate. A handler can upgrade its request
+to a WebSocket, whose messages are requests of their own. Some clients give up
+before they
 hear back, an operator evicts cells by hand and shuts nodes down, a balancer
 gives idle cells away, and the log tier nudges node leases. A node that shuts
 down or gives a cell away offers it to its peers until one acquires it, as
@@ -118,6 +120,8 @@ The checks, in `crates/sim/src/checks.rs`:
 - **epoch-reused**: an ownership claim did not advance the cell's epoch.
 - **evicted-but-serving**: the core reported an eviction while the cell's
   runtime was still published.
+- **evicted-pinned**: the core evicted a cell that held a regular or outbound
+  WebSocket open.
 - **stale-read**: a response missed a write that a client had already been
   told succeeded when the request was sent.
 - **liveness**: once every fault is over, each cell takes a write within
@@ -145,7 +149,7 @@ The core on `main` fails some seeds.
   until a write fails its ownership read, 8 s later in one seed. A VM
   suspend, which `CLOCK_MONOTONIC` does not count, does the same. Writes
   stay safe.
-- **Five `State::validate` invariants:**
+- **Six `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.
   - The same in `Inactive`: a client gives up on the only request for a cell
@@ -154,6 +158,10 @@ The core on `main` fails some seeds.
     eviction is already in flight.
   - `handoff cell … is outside the pipeline in Fenced`: a node loses its
     lease while it is handing a cell off, then gets a request for that cell.
+  - `cell … has a live transport while not resident`: a failed proof or
+    ownership read resets a cell that holds a regular or outbound WebSocket.
+    One failed bucket read is enough, so the simulator opens few sockets
+    under faults.
 - **A capacity livelock.** A full fleet can pass an unowned cell between
   peers that are all at their residency cap, so the cell is never served.
 

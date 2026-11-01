@@ -45,6 +45,8 @@ pub struct SimConfig {
     pub write_probability: f64,
     /// Share of requests whose client gives up before it hears back.
     pub cancel_probability: f64,
+    /// Share of requests whose handler upgrades them to a WebSocket.
+    pub websocket_probability: f64,
     /// What the operator and the rest of each node do unprompted.
     pub operator: Operator,
     /// The core's residency cap: residents plus cells being activated.
@@ -104,13 +106,16 @@ pub enum Mutation {
     /// believes in its node lease long after peers think it expired. Caught
     /// by `stale-read`.
     SlowMonoClock,
+    /// A WebSocket the core asks to close is reported closed but stays
+    /// open. Caught by `evicted-pinned` when a drain then evicts its cell.
+    PhantomSocketClose,
     /// An eviction stops the runtime but leaves it in the registry. Caught
     /// by `evicted-but-serving`.
     StaleRegistry,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 12] = [
+    pub const ALL: [Mutation; 13] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -123,6 +128,7 @@ impl Mutation {
         Mutation::StaleEpoch,
         Mutation::SlowMonoClock,
         Mutation::StaleRegistry,
+        Mutation::PhantomSocketClose,
     ];
 }
 
@@ -193,6 +199,7 @@ impl SimConfig {
             request_gap_ms: (5, 60),
             write_probability: 0.6,
             cancel_probability: 0.0,
+            websocket_probability: 0.02,
             operator: Operator {
                 evictions: 30.0,
                 nudges: 6.0,
@@ -249,6 +256,9 @@ impl SimConfig {
                 store_spike_ms: 3_000,
             },
             cancel_probability: 0.05,
+            // Rare: a reset of a cell holding a socket trips a known core
+            // invariant, and ends the run.
+            websocket_probability: 0.002,
             operator: Operator {
                 drains: 2.0,
                 preserves: 2.0,
@@ -284,6 +294,7 @@ impl SimConfig {
             idle_evict_ms: r.chance(0.3).then(|| r.range(500, 5_000)),
             // Drawn last, so the draws above keep the shapes they had.
             cancel_probability: *r.pick(&[0.0, 0.02, 0.1]).unwrap(),
+            websocket_probability: *r.pick(&[0.0, 0.002, 0.01]).unwrap(),
             operator: Operator::draw(r),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
@@ -382,6 +393,8 @@ pub struct Stats {
     /// Planned replacements, and databases a replacement resumed in place.
     pub preserves: u64,
     pub resumed: u64,
+    /// WebSockets handlers opened.
+    pub sockets: u64,
 }
 
 /// What a run produced.

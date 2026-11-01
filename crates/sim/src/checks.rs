@@ -179,6 +179,19 @@ impl Checker {
         }
     }
 
+    /// **An open transport pins its cell.** A regular or outbound WebSocket
+    /// cannot move with ownership, so the core must not evict a cell that
+    /// holds one open; a handoff closes them first.
+    pub fn evicting(&mut self, t: u64, who: &str, cell: &str, pinned: bool) {
+        if pinned {
+            self.violation(
+                t,
+                "evicted-pinned",
+                format!("{who} evicted {cell} with a regular or outbound WebSocket open"),
+            );
+        }
+    }
+
     /// **Liveness.** Once faults have healed, the fleet must serve every
     /// cell before the deadline.
     pub fn unserved(&mut self, t: u64, phase: &str, cell: &str) {

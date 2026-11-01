@@ -19,7 +19,7 @@
 use celld_logic::routing::{Attempt, Dispatcher};
 use std::collections::VecDeque;
 
-use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route};
+use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route, WebSocketId};
 
 use super::faults::Partition;
 use super::{Item, Time, Work, World, OPERATION_DEADLINE_MS};
@@ -51,6 +51,10 @@ pub(super) struct Op {
     goal: Option<usize>,
     /// When the client sent it.
     sent_at: Time,
+    /// The socket it was sent on, which lives on its ingress.
+    socket: Option<WebSocketId>,
+    /// Its handler upgrades it to a WebSocket.
+    upgrade: bool,
 }
 
 /// Why a forward came back without running.
@@ -176,6 +180,7 @@ pub(super) struct Req {
     /// the handler runs on even after the client stopped waiting.
     cell: String,
     write: bool,
+    upgrade: bool,
     sent_at: Time,
     /// How the request got here. A forwarded request is never forwarded on.
     via: Via,
@@ -239,6 +244,32 @@ impl World {
         let Some(ingress) = ingress else {
             return self.answer(goal, false);
         };
+        let upgrade = goal.is_none() && self.work_rng.chance(self.config.websocket_probability);
+        self.open_op(cell, write, ingress, goal, None, upgrade);
+    }
+
+    /// A client sends a request on its WebSocket. It reaches the socket's
+    /// node, which acts as its ingress.
+    pub(super) fn send_on_socket(
+        &mut self,
+        cell: String,
+        write: bool,
+        node: usize,
+        websocket: WebSocketId,
+    ) {
+        self.stats.requests += 1;
+        self.open_op(cell, write, node, None, Some(websocket), false);
+    }
+
+    fn open_op(
+        &mut self,
+        cell: String,
+        write: bool,
+        ingress: usize,
+        goal: Option<usize>,
+        socket: Option<WebSocketId>,
+        upgrade: bool,
+    ) {
         let op = self.next_op;
         self.next_op += 1;
         let entry = Op {
@@ -248,6 +279,8 @@ impl World {
             retry: RouteRetry::new(self.t),
             goal,
             sent_at: self.t,
+            socket,
+            upgrade,
         };
         self.ops.insert(op, entry);
         if goal.is_none() && self.work_rng.chance(self.config.cancel_probability) {
@@ -277,6 +310,7 @@ impl World {
             entry.write,
             entry.sent_at,
         );
+        let (socket, upgrade) = (entry.socket, entry.upgrade);
         let paused = self.machines[node]
             .proc
             .as_ref()
@@ -308,9 +342,10 @@ impl World {
             return;
         }
         let shutdown = self.machines[node].proc().shutdown.is_some();
-        if (via == Via::Client && shutdown) || self.preserving(node) {
-            // A shutting-down node admits no public request (`admit_public`),
-            // and a preserving actor refuses every request.
+        if (via == Via::Client && socket.is_none() && shutdown) || self.preserving(node) {
+            // A shutting-down node admits no new public request
+            // (`admit_public`), though a socket it holds still runs its last
+            // messages; a preserving actor refuses every request.
             return self.settle(op, false);
         }
         let request = self.next_request;
@@ -319,6 +354,7 @@ impl World {
             op,
             cell: cell.clone(),
             write,
+            upgrade,
             sent_at,
             via,
             epoch: None,
@@ -331,6 +367,14 @@ impl World {
             Event::CapacityRequestAt {
                 request,
                 cell,
+                now_mono_ms: 0,
+            }
+        } else if let (Via::Client, Some(websocket)) = (via, socket) {
+            Event::WebSocketRequestAt {
+                request,
+                cell,
+                websocket,
+                now_ms: 0,
                 now_mono_ms: 0,
             }
         } else {
@@ -633,6 +677,10 @@ impl World {
             .unwrap();
         req.seen = seen;
         req.answered = true;
+        if req.upgrade {
+            // The handler accepts a WebSocket before it answers.
+            self.open_socket(node, cell);
+        }
         self.drive(
             node,
             Event::OutputAt {

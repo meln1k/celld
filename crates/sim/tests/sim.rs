@@ -1,4 +1,4 @@
-use celld_sim::{run, Faults, Mutation, Outcome, SimConfig};
+use celld_sim::{run, Faults, Mutation, Operator, Outcome, SimConfig};
 
 #[test]
 fn calm_fleet_serves_every_request_and_breaks_nothing() {
@@ -124,9 +124,12 @@ fn a_swarm_seed_replays_its_configuration_and_its_run() {
 
 /// The crashing fleet, whose processes also pause past their leases: an
 /// owner that wakes up not knowing it lost its cells. No seed of it fails.
+/// It opens no WebSockets: a pause can reset a cell, and a reset of a cell
+/// holding one trips a known core invariant.
 fn crashing_and_pausing() -> SimConfig {
     let base = SimConfig::crashing(6.0);
     SimConfig {
+        websocket_probability: 0.0,
         faults: Faults {
             pauses: 6.0,
             max_pause_ms: 2 * base.ttl_ms,
@@ -149,12 +152,16 @@ fn crashing_and_pausing() -> SimConfig {
 ///   against `max_releases` on top of a full batch.
 /// - A node that loses its lease while a cell's handoff is in flight, and
 ///   then gets a request for that cell, fences the cell inside the pipeline.
-const KNOWN_CORE_PANICS: [&str; 5] = [
+/// - A reset (a failed proof or ownership read) of a cell holding a regular
+///   or outbound WebSocket moves it to `Cleaning` with the transport still
+///   counted.
+const KNOWN_CORE_PANICS: [&str; 6] = [
     "has no owning slot",
     "left the owner read in Fenced",
     "left the owner read in Inactive",
     "exceeds release ceiling",
     "is outside the pipeline in Fenced",
+    "has a live transport while not resident",
 ];
 
 /// A clean read is released without reading the owner record, so it is
@@ -209,6 +216,7 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         faulted.drains += outcome.stats.drains;
         faulted.handed_off += outcome.stats.handed_off;
         faulted.resumed += outcome.stats.resumed;
+        faulted.sockets += outcome.stats.sockets;
     }
     // Most seeds run to the end and through the liveness audit.
     assert!(
@@ -221,12 +229,14 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.crashes > 10, "{faulted:?}");
     // So did the operator's work: clients gave up, cells were evicted,
     // drained nodes handed cells to their peers, and preserved nodes'
-    // replacements resumed databases in place.
+    // replacements resumed databases in place, and handlers opened
+    // WebSockets.
     assert!(faulted.cancelled > 500, "{faulted:?}");
     assert!(faulted.evicted > 20, "{faulted:?}");
     assert!(faulted.drains > 10, "{faulted:?}");
     assert!(faulted.handed_off > 20, "{faulted:?}");
     assert!(faulted.resumed > 10, "{faulted:?}");
+    assert!(faulted.sockets > 20, "{faulted:?}");
 }
 
 #[test]
@@ -250,10 +260,23 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::StaleEpoch => &["epoch-reused"],
             Mutation::SlowMonoClock => &["stale-read"],
             Mutation::StaleRegistry => &["evicted-but-serving"],
+            Mutation::PhantomSocketClose => &["evicted-pinned"],
+        };
+        let base = match mutation {
+            // Only a drain closes a socket and then evicts its cell.
+            Mutation::PhantomSocketClose => SimConfig {
+                websocket_probability: 0.05,
+                operator: Operator {
+                    drains: 6.0,
+                    ..SimConfig::calm().operator
+                },
+                ..SimConfig::calm()
+            },
+            _ => crashing_and_pausing(),
         };
         let config = SimConfig {
             mutation: Some(mutation),
-            ..crashing_and_pausing()
+            ..base
         };
         let mut missing: Vec<&str> = expected.to_vec();
         for seed in 0..20 {
