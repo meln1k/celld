@@ -181,10 +181,10 @@ The last three judge only once the fleet is quiet, and 15 s after the faults
 end, so that a bucket call lost just before the end has timed out. A planted
 bug makes each of the six fire. In 100,000 swarm seeds:
 
-- 161 seeds claimed during a preserve, never during a drain. An eviction
+- 157 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
   cell, though `begin_preserve` retires cold work.
-- 64 seeds resumed a superseded epoch, 60 of them with faulty clocks. The
+- 75 seeds resumed a superseded epoch, 72 of them with faulty clocks. The
   rest are the slow clean reload below, or a resume after a claim during a
   preserve.
 
@@ -226,7 +226,8 @@ The core on `main` fails some seeds.
     One failed bucket read is enough, so the simulator opens few sockets
     under faults.
   - `cell … is firing an alarm while not resident`: an ownership read fails
-    while the cell's alarm handler is running.
+    while the cell's alarm handler is running, or while its reply waits for
+    the wake entry of the alarm it re-armed.
   - `handoff cell … is outside the pipeline in WaitingActivation`: a cell's
     alarm timer fires after its node evicted it and released its owner
     record.
@@ -242,12 +243,12 @@ The core on `main` fails some seeds.
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-In 100,000 swarm seeds, 10,212 failed in a debug build: 9,548 on the
-invariants (5,159 of them on live transports), 624 on stale reads and 40 on
-liveness. With validation compiled out, 959 failed: 734 on stale reads, 180
-on `evicted-pinned` (the core goes on to evict a cell whose live transport
-the invariant would have caught), 44 on liveness and one on an alarm that a
-livelocked cell never fired. The test suite allows only the known failures,
+In 100,000 swarm seeds, 13,321 failed in a debug build: 12,673 on the
+invariants (5,035 of them on live transports, 4,069 on alarms firing while
+not resident), 609 on stale reads and 39 on liveness. With validation
+compiled out, 989 failed: 749 on stale reads, 194 on `evicted-pinned` (the
+core goes on to evict a cell whose live transport the invariant would have
+caught) and 46 on liveness. The test suite allows only the known failures,
 by name.
 
 ```

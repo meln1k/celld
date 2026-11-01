@@ -5,11 +5,10 @@ use std::collections::VecDeque;
 
 use celld_logic::wake::AlarmSnapshot;
 use celld_logic::{
-    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, RequestId,
-    StopCause, Timer,
+    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, StopCause, Timer,
 };
 
-use super::alarms::AlarmWork;
+use super::alarms::{AlarmWork, Waiter};
 use super::faults::Partition;
 use super::replicator::ReplicaWork;
 use super::{Item, Pending, Work, World};
@@ -127,8 +126,8 @@ pub(super) enum StoreReq {
         alarm: AlarmSnapshot,
         report: bool,
         retire: bool,
-        /// The request whose response waits for this write (the arm gate).
-        gate: Option<RequestId>,
+        /// The reply that waits for this write (the arm gate).
+        gate: Option<Waiter>,
     },
 }
 
@@ -552,9 +551,8 @@ impl World {
             }),
             // The arm gate turns its response into a failure.
             StoreReq::Wake {
-                gate: Some(request),
-                ..
-            } => Work::Alarm(AlarmWork::GateFailed { request: *request }),
+                gate: Some(waiter), ..
+            } => Work::Alarm(AlarmWork::GateFailed { waiter: *waiter }),
             // Logged and left for a later scan or reconcile.
             StoreReq::Wake { gate: None, .. } => Work::Nothing,
         }

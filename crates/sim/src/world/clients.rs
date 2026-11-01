@@ -699,7 +699,7 @@ impl World {
                         let req = self.machines[node].proc_mut().client_mut(request).unwrap();
                         req.arm_gate = Some(ArmGate::Pending);
                     }
-                    let gate = Some(request);
+                    let gate = Some(alarms::Waiter::Request(request));
                     let alarm = self.alarm_written(node, &cell, epoch, committed.0, ahead_ms, gate);
                     let alarm = self.reported(alarm);
                     self.deliver(node, 0, alarms::observed(&cell, alarm, false));
@@ -800,7 +800,7 @@ impl World {
 
     /// The wake entry write the response's arm gate waits on landed or
     /// failed. A response the output gate already released goes now.
-    pub(super) fn arm_gate_settled(&mut self, node: usize, request: RequestId, landed: bool) {
+    pub(super) fn response_arm_settled(&mut self, node: usize, request: RequestId, landed: bool) {
         let Some(req) = self.machines[node].proc_mut().client_mut(request) else {
             return;
         };

@@ -13,8 +13,10 @@
 //!   the cell up now could leave nobody to wake it. The response of the
 //!   handler that set it waits for the write, and fails if the write fails
 //!   (`send_answer_after_arm_gates` in `js.rs`), so an alarm a client was
-//!   told was set is always covered. An alarm handler's own re-arm has no
-//!   client waiting.
+//!   told was set is always covered. An alarm handler that re-arms waits
+//!   the same way: the core hears `AlarmFinished` only once the write has
+//!   landed or failed, with the coverage that left. A handler's call to a
+//!   third party waits on the output gate alone, as in production.
 //! - Every activity reports the cell's alarm before it finishes
 //!   (`AlarmObserved`, then `ActivityFinished`), as the activity guard does.
 //! - The core arms a timer, and when it fires on a resident cell asks the
@@ -57,6 +59,18 @@ pub(super) struct ProcAlarms {
     covered: BTreeSet<(String, PublicationId)>,
     /// Alarm handlers running: the cell and epoch each fires on.
     firing: BTreeMap<OpId, (String, Epoch)>,
+    /// Alarm handlers that re-armed and finished, whose reply waits on its
+    /// arm gate: the cell, the epoch, the alarm and the write's position.
+    held: BTreeMap<OpId, (String, Epoch, AlarmSnapshot, u64)>,
+}
+
+/// Whose reply an arm gate holds.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Waiter {
+    /// A client request's response.
+    Request(RequestId),
+    /// An alarm handler's `AlarmFinished`.
+    Alarm(OpId),
 }
 
 /// The alarm work of one process.
@@ -68,10 +82,10 @@ pub(super) enum AlarmWork {
         cell: String,
         alarm: AlarmSnapshot,
         report: bool,
-        gate: Option<RequestId>,
+        gate: Option<Waiter>,
     },
-    /// The wake entry write a response's arm gate waits on failed.
-    GateFailed { request: RequestId },
+    /// The wake entry write an arm gate waits on failed.
+    GateFailed { waiter: Waiter },
     /// The process lists the bucket's due wake entries.
     Scan,
 }
@@ -87,11 +101,11 @@ impl World {
                 gate,
             } => {
                 self.wake_maintained(node, cell, alarm, report);
-                if let Some(request) = gate {
-                    self.arm_gate_settled(node, request, true);
+                if let Some(waiter) = gate {
+                    self.arm_gate_settled(node, waiter, true);
                 }
             }
-            AlarmWork::GateFailed { request } => self.arm_gate_settled(node, request, false),
+            AlarmWork::GateFailed { waiter } => self.arm_gate_settled(node, waiter, false),
             AlarmWork::Scan => self.wake_scan(node),
         }
     }
@@ -118,7 +132,7 @@ impl World {
 
     /// Record that `write`, committed at `epoch`, sets the cell's alarm
     /// `ahead_ms` from now (or clears it), and start its arm gate: the wake
-    /// entry write that the response of request `gate`, if any, waits on.
+    /// entry write that `gate`, if any, waits on.
     pub(super) fn alarm_written(
         &mut self,
         node: usize,
@@ -126,7 +140,7 @@ impl World {
         epoch: Epoch,
         write: WriteId,
         ahead_ms: Option<u64>,
-        gate: Option<RequestId>,
+        gate: Option<Waiter>,
     ) -> AlarmSnapshot {
         let at_ms = ahead_ms.map(|ahead| (self.wall(node) + ahead) as i64);
         self.alarm_writes.insert(write, at_ms);
@@ -165,11 +179,47 @@ impl World {
         let p = self.machines[node].proc();
         let epoch = p.published.get(cell)?;
         let alarm = self.reported(self.alarm_of(self.seen(node, cell, *epoch)?, *epoch));
-        let covered = match (alarm.at_ms(), alarm.source()) {
-            (Some(_), Some(source)) => p.alarms.covered.contains(&(cell.to_string(), source.id)),
+        Some((alarm, self.known_covered(node, cell, alarm)))
+    }
+
+    /// Whether this process has seen a wake entry for `alarm` land, as the
+    /// flusher's coverage cache knows (`alarm_covered` in production).
+    fn known_covered(&self, node: usize, cell: &str, alarm: AlarmSnapshot) -> bool {
+        let covered = &self.machines[node].proc().alarms.covered;
+        match (alarm.at_ms(), alarm.source()) {
+            (Some(_), Some(source)) => covered.contains(&(cell.to_string(), source.id)),
             _ => true,
-        };
-        Some((alarm, covered))
+        }
+    }
+
+    /// An arm gate settled: its wake entry write landed or failed. The reply
+    /// it held goes now.
+    fn arm_gate_settled(&mut self, node: usize, waiter: Waiter, landed: bool) {
+        match waiter {
+            Waiter::Request(request) => self.response_arm_settled(node, request, landed),
+            Waiter::Alarm(op) => {
+                if let Some(event) = self.alarm_reply(node, op) {
+                    self.drive(node, event);
+                }
+            }
+        }
+    }
+
+    /// Send the `AlarmFinished` a re-arming handler's arm gate held, with
+    /// the coverage the process now knows: covered once the entry landed,
+    /// not if it failed. Production reports `Ok` either way.
+    fn alarm_reply(&mut self, node: usize, op: OpId) -> Option<Event> {
+        let held = self.machines[node].proc_mut().alarms.held.remove(&op);
+        let (cell, epoch, alarm, position) = held?;
+        let covered = self.known_covered(node, &cell, alarm);
+        Some(Event::AlarmFinished {
+            op,
+            cell,
+            epoch,
+            now_ms: 0,
+            now_mono_ms: 0,
+            result: Ok((alarm, covered, Some(position))),
+        })
     }
 
     /// Whether `cell`'s runtime at `epoch` holds an armed alarm that no
@@ -222,14 +272,14 @@ impl World {
 
     /// Write the wake entry for an alarm. When `report` is set, tell the
     /// core the coverage once it lands, as a handoff's refresh does. When
-    /// `gate` is set, that request's response waits for the write.
+    /// `gate` is set, its reply waits for the write.
     pub(super) fn publish_wake(
         &mut self,
         node: usize,
         cell: &str,
         alarm: AlarmSnapshot,
         report: bool,
-        gate: Option<RequestId>,
+        gate: Option<Waiter>,
     ) {
         let req = StoreReq::Wake {
             cell: cell.to_string(),
@@ -358,10 +408,17 @@ impl World {
                     let (write, position) = self
                         .commit_write(node, &cell, epoch)
                         .expect("open database");
-                    let alarm = self.alarm_written(node, &cell, epoch, write, rearm, None);
+                    let gate = Some(Waiter::Alarm(op));
+                    let alarm = self.alarm_written(node, &cell, epoch, write, rearm, gate);
                     let alarm = self.reported(alarm);
                     self.stats.alarms_fired += 1;
-                    Ok((alarm, rearm.is_none(), Some(position)))
+                    if rearm.is_some() {
+                        // The re-arm's arm gate holds the reply.
+                        let held = (cell, epoch, alarm, position);
+                        self.machines[node].proc_mut().alarms.held.insert(op, held);
+                        return;
+                    }
+                    Ok((alarm, true, Some(position)))
                 } else {
                     let (alarm, covered) = self
                         .observation(node, &cell)
@@ -381,8 +438,14 @@ impl World {
         self.drive(node, event);
     }
 
-    /// A handoff aborted the alarm handler before it ran to the end.
+    /// A handoff aborted the alarm handler before it ran to the end. One
+    /// that already finished and waits on its arm gate stops waiting, and
+    /// reports what it knows: production drops the gated reply and reads
+    /// the coverage cache.
     pub(super) fn abort_alarm(&mut self, node: usize, op: OpId) {
+        if let Some(event) = self.alarm_reply(node, op) {
+            return self.deliver(node, 1, event);
+        }
         if let Some((cell, epoch)) = self.machines[node].proc_mut().alarms.firing.remove(&op) {
             let event = Event::AlarmFinished {
                 op,
