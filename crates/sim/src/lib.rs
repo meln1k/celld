@@ -76,6 +76,10 @@ pub struct SimConfig {
     /// writes to followers on other machines and acknowledges once they all
     /// hold them, and flushes to the bucket only every couple of seconds.
     pub fleet: bool,
+    /// Cells one V8 heap may host (`MAX_CELLS_PER_ISOLATE` in
+    /// `runtime.rs`, 32). A fleet this small fills more than one heap only
+    /// with a lower limit.
+    pub cells_per_heap: usize,
     /// The memory each process holds, and the machine it has. `None`
     /// reports no memory, so the core never sheds on pressure.
     pub memory: Option<Memory>,
@@ -89,15 +93,16 @@ pub struct SimConfig {
     pub trace: bool,
 }
 
-/// What a process's memory costs, in bytes. Its in-use memory is `base`
-/// plus `cell` for every database it holds open: a cell's runtime and its
-/// heap. The machine has `total`, so the core's ceiling is 80% of it and its
+/// What a process's memory costs, in bytes. Its in-use memory is `base`,
+/// plus `heap` for every V8 heap its cells' realms live in, plus `cell` for
+/// every database it holds open: a cell's realm and its pages. The machine has `total`, so the core's ceiling is 80% of it and its
 /// absolute cap 95% (`PressureConfig::from_limits`). A process's RSS is its
 /// in-use memory: no allocator slack, no cgroup and no containers.
 #[derive(Clone, Copy, Debug)]
 pub struct Memory {
     pub total: u64,
     pub base: u64,
+    pub heap: u64,
     pub cell: u64,
 }
 
@@ -105,16 +110,18 @@ impl Memory {
     const MB: u64 = 1 << 20;
 
     /// A machine whose ceiling a process crosses with somewhat more than
-    /// `room` cells open, and whose shedding brings it back to `room`.
+    /// `room` cells open in one heap, and whose shedding brings it back to
+    /// `room`. Cells spread over more heaps fit fewer.
     pub fn with_room(room: u64) -> Self {
-        let (base, cell) = (256 * Self::MB, 128 * Self::MB);
+        let (base, heap, cell) = (256 * Self::MB, 64 * Self::MB, 128 * Self::MB);
         // The low watermark, 80% of the ceiling, sits half a cell above
-        // `room` cells.
-        let low = base + cell * room + cell / 2;
+        // `room` cells in one heap.
+        let low = base + heap + cell * room + cell / 2;
         let ceiling = low * 5 / 4;
         Self {
             total: ceiling * 5 / 4,
             base,
+            heap,
             cell,
         }
     }
@@ -333,6 +340,7 @@ impl SimConfig {
             sticky_eviction: false,
             idle_evict_ms: None,
             fleet: false,
+            cells_per_heap: 32,
             memory: None,
             epoch_gc_grace_ms: None,
             mutation: None,
@@ -428,6 +436,7 @@ impl SimConfig {
             memory: r.chance(0.5).then(|| Memory::with_room(r.range(1, 4))),
             error_probability: *r.pick(&[0.0, 0.05, 0.2]).unwrap(),
             epoch_gc_grace_ms: r.chance(0.5).then(|| *r.pick(&[0, 2_000, 10_000]).unwrap()),
+            cells_per_heap: *r.pick(&[1, 2, 3, 32]).unwrap(),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
         }

@@ -150,13 +150,21 @@ for its arm gate. A handler stopped under it, by a closed database, fails
 outside its turn and reveals nothing.
 
 Half of the swarm seeds also model memory (`--memory ROOM`, `Memory` in
-`crates/sim/src/lib.rs`). A process holds a fixed base plus a fixed amount
-for each database it has open, and each load sample reports that to the
-core, as it is sampled before the first lease and every second after. The
-machine is sized so that the core's ceiling (`from_limits`: 80% of the
-machine) is crossed a little above ROOM open cells and its resume line sits
-just above ROOM. A node over the ceiling sheds, and its lease tells peers it
-is pressured and whether it has headroom.
+`crates/sim/src/lib.rs`). A process holds a fixed base, a fixed amount for
+each V8 heap its cells' realms live in, and a fixed amount for each database
+it has open, and each load sample reports that to the core, as it is sampled
+before the first lease and every second after. The machine is sized so that
+the core's ceiling (`from_limits`: 80% of the machine) is crossed a little
+above ROOM open cells in one heap and its resume line sits just above ROOM.
+A node over the ceiling sheds, and its lease tells peers it is pressured and
+whether it has headroom.
+
+Every seed places each starting runtime on a heap, as `runtime.rs` does with
+`isolate::place_cell`: the fullest heap of the current generation with room,
+or a new one. The core hears the heap and evicts from the heap closest to
+empty, and a heap is freed, with its memory, when its last cell leaves.
+Production lets a heap hold 32 cells, which a fleet this small never fills,
+so the swarm also draws a limit of 1, 2 or 3.
 
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
@@ -266,22 +274,22 @@ for an enforced check. The sweep below is the evidence that the others can
 fire, except **deploy-stuck**, which has never fired, so nothing yet shows
 that it can. In 100,000 swarm seeds:
 
-- 1,162 seeds kept an idle cell resident, 1,137 of them in a run where a
+- 408 seeds kept an idle cell resident, 361 of them in a run where a
   walk-down had wedged: the core evicts idle cells only while it is not
   shedding.
-- 268 seeds claimed during a preserve, never during a drain. An eviction
+- 288 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
   cell, though `begin_preserve` retires cold work.
-- 54 seeds resumed a superseded epoch: after faulty clocks, the slow clean
+- 57 seeds resumed a superseded epoch: after faulty clocks, the slow clean
   reload below, or a claim during a preserve.
 - 1 seed (swarm 33191) left an acknowledged alarm with no wake entry due by
   its time: the slow clean reload below acknowledged the write that set it
   into a superseded epoch.
-- 21 seeds left a durable alarm unfired when the audit ended.
-- 8 seeds lost a proven alarm handler commit (9 with validation compiled
-  out), all after the
+- 5 seeds left a durable alarm unfired when the audit ended.
+- 10 seeds lost a proven alarm handler commit (11 with validation
+  compiled out), all after the
   slow clean reload below or a clock fault: the same failures that lose acknowledged writes, seen through an alarm.
-- With validation compiled out, 1,788 seeds kept an outbound socket open
+- With validation compiled out, 1,790 seeds kept an outbound socket open
   after its runtime stopped. With it on, the live-transport invariant stops
   those runs first. These hits are not yet traced.
 
@@ -289,8 +297,7 @@ The simulator does not yet model V8, or, in the fleet log, bundles, the
 recovery claim, and reconfiguring a session when a follower dies (its acks
 fall back to the bucket). Its memory has no allocator slack, cgroup or
 containers, no noise between samples, and returns a cell's whole share when
-the cell goes. It places no cell on an isolate, which the walk-down treats
-as production's one shared heap for a node below 32 cells.
+the cell goes, and its heap's the moment the heap is empty.
 
 The core on `main` fails some seeds.
 
@@ -373,17 +380,18 @@ The core on `main` fails some seeds.
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-In 100,000 swarm seeds, 12,908 failed in a debug build: 9,998 on the
-invariants (3,116 of them on live transports, 2,526 on alarms firing while
-not resident), 2,498 on liveness or `alarm-not-fired`, 401 on stale reads,
-and 11 on lost writes in the fleet posture. All but 39 of the liveness and
+In 100,000 swarm seeds, 11,421 failed in a debug build: 10,166 on the
+invariants (3,120 of them on live transports, 2,530 on alarms firing while
+not resident), 846 on liveness or `alarm-not-fired`, 400 on stale reads,
+and 9 on lost writes in the fleet posture. All but 37 of the liveness and
 alarm failures are seeds where a node's memory walk-down wedged, and those
-39 are the capacity livelock; 3,791 seeds wedged in all. With validation
-compiled out, 3,597 failed: 2,977 on liveness or `alarm-not-fired` (2,934 of
-them wedged), 481 on stale reads, 126 on
+37 are the capacity livelock; 1,246 seeds wedged in all, most of them with
+every cell in one heap. With validation compiled out, 1,651 failed: 1,014
+on liveness or `alarm-not-fired` (972 of them wedged), 480 on stale reads,
+144 on
 `evicted-pinned` (the core goes on to evict a cell whose live transport the
 invariant would have caught), and 13 on lost writes in the fleet posture:
-10 after a failed tail fold, 2 after a slow clean reload, and 1 after a
+9 after a failed tail fold, 2 after a slow clean reload, and 2 after a
 clock fault. Between them, the seeds entered
 every phase.
 

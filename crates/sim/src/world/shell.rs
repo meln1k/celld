@@ -281,6 +281,8 @@ impl World {
                     let p = self.machines[node].proc_mut();
                     p.watch.stopped.push(cell.clone());
                 }
+                // The realm leaves its heap as the runtime closes.
+                self.machines[node].proc_mut().isolates.unplace(&cell);
                 self.stop_runtime(node, op, cell, epoch, cause, bounded);
             }
             Effect::StartRuntime { op, cell, epoch } => {
@@ -292,18 +294,19 @@ impl World {
                 let result = if self.machines[node]
                     .proc()
                     .replicas
-                    .contains_key(&(cell, epoch))
+                    .contains_key(&(cell.clone(), epoch))
                 {
                     Ok(())
                 } else {
                     Err(Failure::Definite)
                 };
-                // The generation the runtime was placed on.
+                // The generation and the heap the runtime was placed on.
                 let generation = self.machines[node].proc().generation;
+                let isolate = result.is_ok().then(|| self.place_cell(node, &cell));
                 let delay = self.net_rng.range(1, 10);
                 let event = Event::RuntimeStarted {
                     op,
-                    isolate: None,
+                    isolate,
                     generation,
                     result,
                 };

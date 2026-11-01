@@ -39,6 +39,7 @@ mod faults;
 mod gates;
 mod gc;
 mod handoff;
+mod isolates;
 mod judges;
 mod liveness;
 mod node_log;
@@ -294,6 +295,8 @@ struct Process {
     /// What this process knows of its cells' alarms.
     alarms: ProcAlarms,
     waker: ProcWaker,
+    /// The heaps its cells' realms live in.
+    isolates: isolates::Pool,
     /// What the judges remember of this process.
     watch: Watch,
     /// The log this process leads, in the fleet posture.
@@ -323,6 +326,7 @@ impl Process {
             generation: 0,
             alarms: ProcAlarms::default(),
             waker: ProcWaker::default(),
+            isolates: isolates::Pool::default(),
             watch: Watch::default(),
             log: None,
             memory: 0,
@@ -745,8 +749,9 @@ impl World {
     /// only the cell count varies; the sample still drives idle eviction.
     fn fold_load_sample(&mut self, node: usize) {
         let memory = self.config.memory.map_or(0, |m| {
-            let open = self.machines[node].proc().replicas.len() as u64;
-            m.base + m.cell * open
+            let p = self.machines[node].proc();
+            let (heaps, open) = (p.isolates.heaps() as u64, p.replicas.len() as u64);
+            m.base + m.heap * heaps + m.cell * open
         });
         self.machines[node].proc_mut().memory = memory;
         let load = pressure::Load {
