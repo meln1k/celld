@@ -391,7 +391,9 @@ cargo run -p celld-sim -- --seeds 0..10000 --swarm --record   # the list's lines
 A sweep prints one line for each failing seed. A large sweep runs faster with
 `CARGO_PROFILE_DEV_OPT_LEVEL=2`, which keeps debug assertions on. The
 [Simulation workflow](../.github/workflows/sim.yml) runs the suite in the
-debug profile on every change to `crates/logic` or `crates/sim`.
+debug profile on every change to `crates/logic` or `crates/sim`, and judges
+swarm seeds 0..10000 against the known failures in both modes
+(`crates/sim/sweep.sh`).
 
 ## Live fleets: what simulation cannot see
 

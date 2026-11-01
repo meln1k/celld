@@ -3,9 +3,12 @@ name: Simulation
 # The deterministic simulator of the coordination core (`crates/sim`).
 #
 # The image build already runs every crate's tests, but in the release
-# profile, where `State::validate` is compiled out. This job runs the
+# profile, where `State::validate` is compiled out. The `sim` job runs the
 # simulator in the dev profile, so the core's invariants are checked after
-# every event of every run.
+# every event of every run. The `sweep` job runs swarm seeds 0..10000 in both
+# modes and fails on any seed that does not fail exactly as
+# `crates/sim/known-failures.txt` lists. A seed replays exactly:
+# `celld-sim --swarm --seed N --trace`.
 on:
   push:
     branches:
@@ -57,3 +60,35 @@ jobs:
 
       - name: Test
         run: cargo test -p celld-sim --locked
+
+  sweep:
+    name: Sweep the core (${{ matrix.mode }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: validated
+            debug_assertions: "true"
+          - mode: unvalidated
+            debug_assertions: "false"
+    env:
+      CARGO_PROFILE_DEV_OPT_LEVEL: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: ${{ matrix.debug_assertions }}
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: ${{ matrix.debug_assertions }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Sweep
+        run: |
+          set -euo pipefail
+          cargo build -p celld-sim --locked
+          crates/sim/sweep.sh target/debug/celld-sim 0 10000

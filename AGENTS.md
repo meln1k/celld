@@ -80,9 +80,12 @@ longer fails as listed. Each listed failure must be a documented core bug:
 described in `docs/testing.md`.
 
 ```sh
-$B --swarm --seeds 0..10000 --known crates/sim/known-failures.txt  # judge
+crates/sim/sweep.sh $B 0 10000      # judge, on every core, as CI does
 $B --swarm --seeds 0..10000 --record | rg '^[0-9]+ swarm '         # lines
 ```
+
+CI (`.github/workflows/sim.yml`) runs that sweep in both modes on every
+change to `crates/logic` or `crates/sim`.
 
 A failing suite test prints the lines it needs. Never regenerate the list
 blindly: trace every seed whose line changes, and name the bug or the
