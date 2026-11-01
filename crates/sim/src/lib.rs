@@ -14,6 +14,7 @@
 //! The properties the run is checked against are in `checks.rs`.
 
 mod checks;
+pub mod coverage;
 mod rng;
 mod store;
 mod world;
@@ -483,6 +484,8 @@ pub struct Outcome {
     /// a run. See `checks.rs`.
     pub watched: Vec<Violation>,
     pub stats: Stats,
+    /// The phase transitions the cores took (`coverage.rs`).
+    pub coverage: coverage::Coverage,
 }
 
 impl Outcome {

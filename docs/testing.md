@@ -181,6 +181,14 @@ The checks, in `crates/sim/src/checks.rs`:
 In debug builds, the core's own `State::validate` runs after every event, and
 a failure ends the run.
 
+A check can judge only the phases the core actually reaches. The simulator
+reads every cell's phase before and after each event
+(`crates/sim/src/coverage.rs`). A sweep ends with the number of distinct
+transitions its seeds took and the phases none of them entered, and
+`--coverage` prints every transition with how many seeds took it. The fault tests require their runs to enter every
+phase of `Phase` but `WaitingOwnerLogRecovery`, so a simulator change that stops reaching one fails a test.
+A phase the core enters and leaves within one event is not seen.
+
 Each check has a planted bug (`Mutation` in `crates/sim/src/lib.rs`) in the
 simulated shell or bucket. A test requires every check to catch its bug, so a
 check cannot go blind without a test failing.
@@ -289,6 +297,7 @@ cargo test -p celld-sim                                    # the suite
 cargo run -p celld-sim -- --seeds 0..1000 --swarm          # a sweep
 cargo run -p celld-sim -- --seed 1562 --swarm --trace      # replay one seed
 cargo run -p celld-sim -- --seeds 0..20 --crashes 6 --mutation IgnoreCasGuard
+cargo run -p celld-sim -- --seeds 0..1000 --swarm --coverage  # every transition
 ```
 
 A sweep prints one line for each failing seed. A large sweep runs faster with

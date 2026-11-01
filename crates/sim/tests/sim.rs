@@ -276,8 +276,10 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         .chain((0..40).map(|seed| (seed, SimConfig::swarm(seed))));
     let (mut clean, mut total) = (0, 0);
     let mut faulted = celld_sim::Stats::default();
+    let mut entered = std::collections::BTreeSet::new();
     for (seed, config) in configs {
         let outcome = run(seed, &config);
+        entered.extend(outcome.coverage.keys().map(|(_, to)| *to));
         assert!(
             passed_but_for_known_bugs(&config, &outcome),
             "seed {seed}: {:?} {:?}",
@@ -323,6 +325,14 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.deploys > 20, "{faulted:?}");
     assert!(faulted.alarms_fired > 100, "{faulted:?}");
     assert!(faulted.wake_hints > 100, "{faulted:?}");
+    // And between them, the cores went through every phase a cell has, so
+    // every check had each phase to judge. A failed log recovery is too rare
+    // to count on here.
+    let never: Vec<&str> = celld_sim::coverage::PHASES
+        .into_iter()
+        .filter(|phase| *phase != "waiting_owner_log_recovery" && !entered.contains(phase))
+        .collect();
+    assert!(never.is_empty(), "phases never entered: {never:?}");
 }
 
 #[test]

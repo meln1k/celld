@@ -56,6 +56,7 @@ use celld_logic::{
 };
 
 use crate::checks::Checker;
+use crate::coverage::{self, Coverage};
 use crate::store::Store;
 use crate::{Mutation, Outcome, Rng, SimConfig, Stats, WriteId};
 
@@ -414,6 +415,9 @@ pub struct World {
     stopped: Vec<(usize, String)>,
     /// Every log session that opened, by its lease generation.
     sessions: BTreeMap<String, Session>,
+    /// The phase transitions the cores took, and every cell's name.
+    coverage: Coverage,
+    cell_names: Vec<String>,
     panic: Option<String>,
 }
 
@@ -432,6 +436,7 @@ impl World {
             .collect();
         let core = core_config(&config);
         let store = Store::new(config.mutation);
+        let cell_names = (0..config.cells).map(|c| format!("c{c}")).collect();
         Self {
             seed,
             config,
@@ -454,6 +459,8 @@ impl World {
             op_rng,
             checker: Checker::default(),
             stats: Stats::default(),
+            coverage: Coverage::new(),
+            cell_names,
             hash: Fnv(0xcbf2_9ce4_8422_2325),
             trace: Vec::new(),
             halts: Vec::new(),
@@ -793,7 +800,14 @@ impl World {
             shell::stamp(&mut event, self.wall(node), self.mono(node));
             self.record(node, "<-", &event);
             self.stats.events += 1;
+            let before = self.phases(node);
             let effects = on_event(&mut self.machines[node].proc_mut().state, event);
+            for (cell, from) in self.cell_names.iter().zip(before) {
+                let to = coverage::name(self.machines[node].proc().state.phase(cell));
+                if from != to {
+                    *self.coverage.entry((from, to)).or_default() += 1;
+                }
+            }
             for effect in effects {
                 self.record(node, "->", &effect);
                 self.execute(node, effect, &mut queue);
@@ -814,6 +828,14 @@ impl World {
         }
         // After the halt: a process that exits closes every socket it held.
         self.judge_stopped(node);
+    }
+
+    /// Every cell's phase on the process on `node`.
+    fn phases(&self, node: usize) -> Vec<&'static str> {
+        let state = &self.machines[node].proc().state;
+        (self.cell_names.iter())
+            .map(|cell| coverage::name(state.phase(cell)))
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -862,6 +884,7 @@ impl World {
             violations: self.checker.violations,
             watched: self.checker.watched,
             stats: self.stats,
+            coverage: self.coverage,
         }
     }
 }

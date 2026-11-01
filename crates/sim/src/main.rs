@@ -18,6 +18,7 @@ fn main() {
     let mut config = SimConfig::calm();
     let (mut swarm, mut trace, mut fleet) = (false, false, false);
     let mut mutation = None;
+    let mut coverage = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -37,6 +38,8 @@ fn main() {
                 mutation = Some(found);
             }
             "--trace" => trace = true,
+            // A sweep prints every phase transition its seeds took.
+            "--coverage" => coverage = true,
             "--swarm" => swarm = true,
             // The fleet posture for a fixed configuration; a swarm seed
             // draws its own.
@@ -68,8 +71,15 @@ fn main() {
         std::panic::set_hook(Box::new(|_| {}));
         let (total, mut failed) = (seeds.end - seeds.start, 0);
         let mut watched = std::collections::BTreeMap::<&str, u64>::new();
+        // Per transition: the seeds that took it, and how often in all.
+        let mut covered = std::collections::BTreeMap::<(&str, &str), (u64, u64)>::new();
         for seed in seeds {
             let outcome = run(seed, &config_for(seed));
+            for (transition, times) in &outcome.coverage {
+                let entry = covered.entry(*transition).or_default();
+                entry.0 += 1;
+                entry.1 += times;
+            }
             let mut kinds = std::collections::BTreeSet::new();
             for w in &outcome.watched {
                 if kinds.insert(w.kind) {
@@ -89,6 +99,19 @@ fn main() {
         for (kind, seeds) in &watched {
             println!("{seeds} of {total} seeds hit watched {kind}");
         }
+        if coverage {
+            for ((from, to), (seeds, times)) in &covered {
+                println!("COVER {from} -> {to}: {seeds} seeds, {times} times");
+            }
+        }
+        let never: Vec<&str> = celld_sim::coverage::PHASES
+            .into_iter()
+            .filter(|phase| !covered.keys().any(|(_, to)| to == phase))
+            .collect();
+        println!(
+            "{} phase transitions taken; phases never entered: {never:?}",
+            covered.len()
+        );
         println!("{failed} of {total} seeds failed");
         std::process::exit(i32::from(failed > 0));
     }
