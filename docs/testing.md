@@ -164,10 +164,12 @@ The checks, in `crates/sim/src/checks.rs`:
   because the woken owner reads the alarm its database really holds. A
   runtime that a newer epoch already superseded is exempt: its entries were
   rightly retired.
-- **crash-uncovered-alarm**: a process died holding an alarm that a client
-  was told was set, with no wake entry due by its time. As in production, a
-  handler that sets an alarm answers only once the alarm's wake entry lands,
-  and fails if that write fails.
+- **crash-uncovered-alarm**: a process died holding an alarm whose handler
+  told its client it was set, with no wake entry due by its time. As in
+  production, a handler that sets an alarm answers only once the alarm's wake
+  entry lands, and fails if that write fails. Its `fetch()` calls are not
+  held, so with a fast fleet proof a third party can learn of the write
+  before the entry lands, and the alarm waits for the next activation.
 - **alarm-not-fired**: when the liveness probe ends, a cell's newest durable
   database still holds an alarm that came due more than 10 s earlier.
 - **stale-read**: a response missed a write that a client had already been

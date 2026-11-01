@@ -36,6 +36,8 @@ pub struct Reveal {
     pub committed: Option<(WriteId, u64)>,
     pub seen: Vec<WriteId>,
     pub sent_at: u64,
+    /// The handler's answer to its client, not a `fetch()` it made.
+    pub answer: bool,
 }
 
 #[derive(Default)]
@@ -58,6 +60,9 @@ pub struct Checker {
     opened: BTreeMap<(String, Epoch), BTreeSet<WriteId>>,
     /// Every write a client was told succeeded: (cell, epoch, write).
     acked: BTreeSet<(String, Epoch, WriteId)>,
+    /// The acknowledged writes whose handler's own answer told its client:
+    /// (cell, write). Only the answer waits for the arm gate.
+    answered: BTreeSet<(String, WriteId)>,
     /// Each cell's acknowledged writes, with the instant each client heard.
     acked_at: BTreeMap<String, Vec<(u64, WriteId)>>,
     /// Every database that ever ran each cell epoch, as the list of writes
@@ -105,11 +110,10 @@ impl Checker {
         }
     }
 
-    /// Whether a client was told `write` of `cell` succeeded, at any epoch.
-    pub fn acknowledged(&self, cell: &str, write: WriteId) -> bool {
-        self.acked
-            .range((cell.to_string(), 0, 0)..=(cell.to_string(), Epoch::MAX, WriteId::MAX))
-            .any(|(_, _, w)| *w == write)
+    /// Whether the handler of `write` of `cell` answered its client that it
+    /// succeeded. A `fetch()` the handler made may have revealed it sooner.
+    pub fn answered(&self, cell: &str, write: WriteId) -> bool {
+        self.answered.contains(&(cell.to_string(), write))
     }
 
     /// Watched: **a resume never follows a takeover.** A clean reload opens
@@ -127,8 +131,9 @@ impl Checker {
 
     /// **An acknowledged alarm outlives its process.** The arm gate holds a
     /// response until a wake entry covers the alarm (README), so when a
-    /// process dies, every alarm a client was told was set must have a wake
-    /// entry due by its time.
+    /// process dies, every alarm whose handler answered its client must have
+    /// a wake entry due by its time. Its `fetch()`es are not held, as in
+    /// production, so a third party may learn of the alarm sooner.
     pub fn died_uncovered(&mut self, t: u64, who: &str, cell: &str, write: WriteId) {
         self.violation(
             t,
@@ -472,6 +477,7 @@ impl Checker {
             committed,
             seen,
             sent_at,
+            answer,
         } = reveal;
         let (cell, epoch, committed, sent_at) = (cell.as_str(), *epoch, *committed, *sent_at);
         let saw = seen.len() as u64;
@@ -563,6 +569,9 @@ impl Checker {
             );
         }
         self.acked.insert((cell.to_string(), epoch, write));
+        if *answer {
+            self.answered.insert((cell.to_string(), write));
+        }
         self.acked_at
             .entry(cell.to_string())
             .or_default()

@@ -255,7 +255,7 @@ impl World {
                 .find(|w| self.alarm_writes.contains_key(w))
                 .copied()
                 .expect("uncovered: armed");
-            if self.checker.acknowledged(&cell, last) {
+            if self.checker.answered(&cell, last) {
                 self.checker.died_uncovered(self.t, &who, &cell, last);
             }
         }

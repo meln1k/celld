@@ -792,6 +792,7 @@ impl World {
             committed: req.committed,
             seen: req.seen,
             sent_at: req.sent_at,
+            answer: true,
         };
         self.checker
             .response_released(self.t, &self.store, &who, &reveal);
