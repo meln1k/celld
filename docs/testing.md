@@ -124,7 +124,8 @@ Half of the swarm seeds run the fleet posture (`CELLD_DURABILITY=fleet`,
   while it waits. A follower that does not answer makes recovery fail, to be
   retried, unless its machine is gone for good. With no follower holding the
   whole session, recovery declares a bounded loss, and the oracle forgets
-  what that loss covers.
+  what that loss covers. Recovery reads and writes the bucket, so it fails,
+  times out, or applies with its answer lost, as a bucket call does.
 - A graceful exit whose writes are all in the bucket seals its own log.
 
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
@@ -186,7 +187,7 @@ reads every cell's phase before and after each event
 (`crates/sim/src/coverage.rs`). A sweep ends with the number of distinct
 transitions its seeds took and the phases none of them entered, and
 `--coverage` prints every transition with how many seeds took it. The fault tests require their runs to enter every
-phase of `Phase` but `WaitingOwnerLogRecovery`, so a simulator change that stops reaching one fails a test.
+phase of `Phase`, so a simulator change that stops reaching one fails a test.
 A phase the core enters and leaves within one event is not seen.
 
 Each check has a planted bug (`Mutation` in `crates/sim/src/lib.rs`) in the
@@ -214,10 +215,10 @@ The last three judge only once the fleet is quiet, and 15 s after the faults
 end, so that a bucket call lost just before the end has timed out. A planted
 bug makes each of the six fire. In 100,000 swarm seeds:
 
-- 194 seeds claimed during a preserve, never during a drain. An eviction
+- 206 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
   cell, though `begin_preserve` retires cold work.
-- 48 seeds resumed a superseded epoch: after faulty clocks, the slow clean
+- 50 seeds resumed a superseded epoch: after faulty clocks, the slow clean
   reload below, or a claim during a preserve.
 
 The simulator does not yet model V8, eviction snapshots, memory pressure, the
@@ -249,7 +250,7 @@ The core on `main` fails some seeds.
   needs no read of the owner record, so the replacement acknowledges writes
   at the superseded epoch. A peer that read the predecessor's sealed lease
   takes the cell over without recovering the replacement's log (swarm
-  55461, 56900, 79978).
+  24382, 56812, 56900).
 - **Eleven `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.
@@ -281,16 +282,18 @@ The core on `main` fails some seeds.
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
 
-In 100,000 swarm seeds, 9,709 failed in a debug build: 9,254 on the
-invariants (3,010 of them on live transports, 2,487 on alarms firing while
-not resident), 419 on stale reads, 33 on liveness, and 3 on the fleet
-posture's slow clean reload. With validation compiled out, 637 failed: 494
-on stale reads, 99 on `evicted-pinned` (the core goes on to evict a cell
-whose live transport the invariant would have caught), 40 on liveness, and 4
+In 100,000 swarm seeds, 9,706 failed in a debug build: 9,258 on the
+invariants (2,986 of them on live transports, 2,491 on alarms firing while
+not resident), 413 on stale reads, 34 on liveness, and 1 on the fleet
+posture's slow clean reload. With validation compiled out, 642 failed: 499
+on stale reads, 100 on `evicted-pinned` (the core goes on to evict a cell
+whose live transport the invariant would have caught), 39 on liveness, and 4
 on lost or late acks. One of those (swarm 54632) is not yet traced: the core
 claims a cell at a new epoch while its restore of the previous one is still
-in flight, and a clean reload later resumes the older database. The test suite allows only the known failures,
-by name.
+in flight, and a clean reload later resumes the older database. Between
+them, the seeds entered every phase through 96 distinct transitions, and 1,514
+seeds saw a log recovery fail and be retried. The test suite allows only the
+known failures, by name.
 
 ```
 cargo test -p celld-sim                                    # the suite

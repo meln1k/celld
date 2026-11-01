@@ -105,8 +105,13 @@ pub(super) enum LogWork {
     LeaseWritten(Event),
     /// The bundle loop's tick.
     Flush,
-    /// `RecoverNodeLog` for the cells of `owner`.
-    Recover { op: OpId, owner: String },
+    /// `RecoverNodeLog` for the cells of `owner`, answered `answer_ms`
+    /// later unless the answer is lost.
+    Recover {
+        op: OpId,
+        owner: String,
+        answer_ms: Option<u64>,
+    },
 }
 
 impl World {
@@ -164,13 +169,18 @@ impl World {
                     self.store_call(node, req);
                 }
             }
-            LogWork::Recover { op, owner } => {
+            LogWork::Recover {
+                op,
+                owner,
+                answer_ms,
+            } => {
                 let result = match self.config.mutation {
                     Some(Mutation::SkipLogRecovery) => Ok(()),
                     _ => self.recover(node, &owner),
                 };
-                let delay = self.net_rng.range(1, 20);
-                self.deliver(node, delay, Event::NodeLogRecovered { op, result });
+                if let Some(delay) = answer_ms {
+                    self.deliver(node, delay, Event::NodeLogRecovered { op, result });
+                }
             }
         }
     }

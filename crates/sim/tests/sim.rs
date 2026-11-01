@@ -55,6 +55,7 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
     // Every restore must hold every write a client was told succeeded,
     // whether the bucket proved it or, in the fleet posture, the followers.
     let (mut restored, mut fleet_proofs, mut log_recoveries) = (0, 0, 0);
+    let mut retried_recoveries = 0;
     for (seed, fleet) in (0..20).flat_map(|seed| [(seed, false), (seed, true)]) {
         let config = SimConfig {
             fleet,
@@ -85,12 +86,19 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
         restored += outcome.stats.restored;
         fleet_proofs += outcome.stats.fleet_proofs;
         log_recoveries += outcome.stats.log_recoveries;
+        retried_recoveries += outcome
+            .coverage
+            .get(&("recovering_owner_log", "waiting_owner_log_recovery"))
+            .copied()
+            .unwrap_or(0);
     }
     // Takeovers happened, so the lost-write check had restores to judge;
     // followers proved writes, and dead leaders' logs were recovered.
     assert!(restored > 100, "only {restored} restores from the bucket");
     assert!(fleet_proofs > 1_000, "only {fleet_proofs} fleet proofs");
     assert!(log_recoveries > 20, "only {log_recoveries} log recoveries");
+    // A recovery failed and the cell waited to retry it.
+    assert!(retried_recoveries > 0, "no failed log recovery");
 }
 
 #[test]
@@ -327,7 +335,7 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.wake_hints > 100, "{faulted:?}");
     // And between them, the cores went through every phase a cell has, so
     // every check had each phase to judge. A failed log recovery is too rare
-    // to count on here.
+    // here; the crash test covers it.
     let never: Vec<&str> = celld_sim::coverage::PHASES
         .into_iter()
         .filter(|phase| *phase != "waiting_owner_log_recovery" && !entered.contains(phase))

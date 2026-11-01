@@ -205,9 +205,32 @@ impl World {
                 self.deliver(node, delay, Event::LocalCellsRead { result: Ok(cells) });
             }
             Effect::RecoverNodeLog { op, owner, .. } => {
-                // One round trip to the bucket and the followers.
-                let delay = self.net_rng.range(1, 20);
-                self.work(node, delay, Work::Log(LogWork::Recover { op, owner }));
+                // Recovery reads and writes the bucket, so it fails as a
+                // bucket call does. It is idempotent, so one that fails can
+                // still have applied.
+                let (apply_ms, answer_ms) = match self.fate(node, STORE_TIMEOUT_MS) {
+                    Fate::Answered {
+                        request_ms,
+                        response_ms,
+                    } => (Some(request_ms), Some(response_ms)),
+                    Fate::Failed {
+                        failure,
+                        at,
+                        applies_after,
+                    } => {
+                        let result = Err(failure);
+                        self.deliver(node, at.max(1), Event::NodeLogRecovered { op, result });
+                        (applies_after, None)
+                    }
+                };
+                if let Some(apply_ms) = apply_ms {
+                    let work = LogWork::Recover {
+                        op,
+                        owner,
+                        answer_ms,
+                    };
+                    self.work(node, apply_ms, Work::Log(work));
+                }
             }
             Effect::ReadOwner { op, cell } => {
                 self.store_call(node, StoreReq::ReadOwner { op, cell })
