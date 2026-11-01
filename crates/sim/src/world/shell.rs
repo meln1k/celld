@@ -7,11 +7,11 @@ use celld_logic::{CasGuard, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId
 
 use super::faults::Partition;
 use super::{Item, Work, World};
-
-/// The bucket client's timeout for one call (`bucket.rs`).
-const STORE_TIMEOUT_MS: u64 = 15_000;
 use crate::store::Load;
 use crate::{Mutation, WriteId};
+
+/// The bucket client's timeout for one attempt (`bucket.rs`).
+const STORE_TIMEOUT_MS: u64 = 15_000;
 
 /// Which armed timer a new arm replaces. This follows `TimerSlot` in
 /// `crates/celld/actor.rs`: the lease timers coalesce, and the rest are
@@ -316,6 +316,11 @@ impl World {
     ///
     /// A failed call's answer is scheduled here, before the request moves.
     /// A late or lost answer to a call that did apply is simply never sent.
+    ///
+    /// This is deliberately harsher than production. Its bucket client
+    /// retries a failed read internally (two retries within 30 s) before
+    /// the core hears anything; here the core sees every failure of the
+    /// one attempt, so its own retry paths run far more often.
     fn store_call_within(&mut self, node: usize, req: StoreReq, timeout: u64) {
         let mut request_ms = self.latency();
         let mut response_ms = self.latency();
@@ -414,9 +419,11 @@ impl World {
                 cell: cell.clone(),
                 epoch: *epoch,
             },
+            // Production reports every failed restore as definite
+            // (`Effect::Restore` in `actor.rs`): nothing was opened.
             StoreReq::ReadChain { op, .. } => core(Event::RestoreCompleted {
                 op: *op,
-                result: Err(failure),
+                result: Err(Failure::Definite),
             }),
         }
     }

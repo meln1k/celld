@@ -19,6 +19,7 @@
 use celld_logic::routing::{Attempt, Dispatcher};
 use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route};
 
+use super::faults::Partition;
 use super::{Item, Time, Work, World, OPERATION_DEADLINE_MS};
 use crate::{Mutation, WriteId};
 
@@ -29,6 +30,9 @@ const CLIENTS_START_MS: u64 = 200;
 const CLIENTS_STOP_BEFORE_END_MS: u64 = 2_000;
 /// How long the ingress paces a retry after a capacity candidate refused.
 const CAPACITY_REFUSED_WAIT_MS: u64 = 25;
+/// How long a forward waits to connect before giving up
+/// (`PEER_CONNECT_TIMEOUT` in `machine.rs`).
+const PEER_CONNECT_TIMEOUT_MS: u64 = 3_000;
 
 /// One client request, from the client's side.
 pub(super) struct Op {
@@ -212,10 +216,16 @@ impl World {
         // A forward needs the network on both ends; a client reaches its
         // ingress through the load balancer either way.
         let ingress = self.ops[&op].ingress;
-        let cut_off =
-            self.machines[node].partition.is_some() || self.machines[ingress].partition.is_some();
-        if via.is_some() && cut_off {
-            return self.bounce(op, Bounce::Unreachable);
+        let partitions = [node, ingress].map(|n| self.machines[n].partition.map(|(_, mode)| mode));
+        if via.is_some() && partitions.iter().any(Option::is_some) {
+            // A refused connection fails at once; a hung one only when the
+            // connect timeout gives up. Either way it never connected.
+            let delay = if partitions.contains(&Some(Partition::Hang)) {
+                PEER_CONNECT_TIMEOUT_MS
+            } else {
+                self.net_rng.range(1, 5)
+            };
+            return self.bounce_after(op, Bounce::Unreachable, delay);
         }
         if !self.machines[node].up() {
             match via {
@@ -320,8 +330,12 @@ impl World {
 
     /// The forward comes back to the ingress without having run.
     fn bounce(&mut self, op: u64, why: Bounce) {
-        self.stats.bounced += 1;
         let delay = self.net_rng.range(1, 5);
+        self.bounce_after(op, why, delay);
+    }
+
+    fn bounce_after(&mut self, op: u64, why: Bounce, delay: u64) {
+        self.stats.bounced += 1;
         self.after(delay, Item::Bounced { op, why });
     }
 
