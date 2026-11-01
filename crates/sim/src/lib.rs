@@ -51,6 +51,10 @@ pub struct SimConfig {
     pub websocket_probability: f64,
     /// Share of handlers that call out to a third party mid-request.
     pub effect_probability: f64,
+    /// Share of handlers that throw inside their turn, after any write they
+    /// made. The error answer can quote what the handler read, so it
+    /// reveals the cell's state as a success does (`FailedInTurn`).
+    pub error_probability: f64,
     /// Share of writes that also set the cell's alarm, or clear it.
     pub alarm_probability: f64,
     /// Share of client sends that are top-level Worker requests, for no
@@ -159,6 +163,10 @@ pub enum Mutation {
     /// The shell never tells the core about a cell's alarm: every report
     /// and every restore says there is none. Caught by `alarm-not-fired`.
     AlarmsUnreported,
+    /// A handler's error answer goes straight to its client, past the
+    /// output gate, as it did before `FailedInTurn`. Caught by
+    /// `read-before-durable`.
+    ErrorsBypassGate,
     /// A wake entry write answers success but writes nothing. Caught by
     /// `uncovered-alarm` when the cell is then evicted, and by
     /// `crash-uncovered-alarm` when its process dies.
@@ -177,7 +185,7 @@ pub enum Mutation {
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 17] = [
+    pub const ALL: [Mutation; 18] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -195,6 +203,7 @@ impl Mutation {
         Mutation::AlarmsUnreported,
         Mutation::SkipLogRecovery,
         Mutation::FollowerIgnoresSeal,
+        Mutation::ErrorsBypassGate,
     ];
 }
 
@@ -270,6 +279,7 @@ impl SimConfig {
             cancel_probability: 0.0,
             websocket_probability: 0.02,
             effect_probability: 0.1,
+            error_probability: 0.0,
             worker_probability: 0.1,
             alarm_probability: 0.05,
             operator: Operator {
@@ -332,6 +342,7 @@ impl SimConfig {
                 store_spike_ms: 3_000,
             },
             cancel_probability: 0.05,
+            error_probability: 0.05,
             // Rare: a reset of a cell holding a socket trips a known core
             // invariant, and ends the run.
             websocket_probability: 0.002,
@@ -379,6 +390,7 @@ impl SimConfig {
             operator: Operator::draw(r),
             fleet: r.chance(0.5),
             memory: r.chance(0.5).then(|| Memory::with_room(r.range(1, 4))),
+            error_probability: *r.pick(&[0.0, 0.05, 0.2]).unwrap(),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
         }
@@ -497,6 +509,8 @@ pub struct Stats {
     pub fleet_proofs: u64,
     pub log_recoveries: u64,
     pub fleet_losses: u64,
+    /// Handlers' error answers that reached their clients.
+    pub errors: u64,
     /// Load samples after which a node was shedding on memory pressure.
     pub shedding_samples: u64,
 }

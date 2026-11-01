@@ -310,6 +310,7 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         faulted.alarms_fired += outcome.stats.alarms_fired;
         faulted.wake_hints += outcome.stats.wake_hints;
         faulted.shedding_samples += outcome.stats.shedding_samples;
+        faulted.errors += outcome.stats.errors;
     }
     // Most seeds run to the end and through the liveness audit.
     assert!(
@@ -324,8 +325,8 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     // drained nodes handed cells to their peers, and preserved nodes'
     // replacements resumed databases in place, handlers opened WebSockets,
     // nodes moved their cells onto new application generations, alarms
-    // fired, wake scans hinted cells whose alarms came due, and nodes over
-    // their memory ceiling shed cells.
+    // fired, wake scans hinted cells whose alarms came due, nodes over
+    // their memory ceiling shed cells, and handlers answered with errors.
     assert!(faulted.cancelled > 500, "{faulted:?}");
     assert!(faulted.evicted > 20, "{faulted:?}");
     assert!(faulted.drains > 10, "{faulted:?}");
@@ -336,6 +337,7 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.alarms_fired > 100, "{faulted:?}");
     assert!(faulted.wake_hints > 100, "{faulted:?}");
     assert!(faulted.shedding_samples > 100, "{faulted:?}");
+    assert!(faulted.errors > 100, "{faulted:?}");
     // And between them, the cores went through every phase a cell has, so
     // every check had each phase to judge. A failed log recovery is too rare
     // here; the crash test covers it.
@@ -372,6 +374,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::AlarmsUnreported => &["alarm-not-fired"],
             Mutation::SkipLogRecovery => &["lost-write"],
             Mutation::FollowerIgnoresSeal => &["late-ack"],
+            Mutation::ErrorsBypassGate => &["read-before-durable"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -386,6 +389,11 @@ fn every_planted_bug_is_caught_by_its_check() {
             // Only the fleet posture has a log to recover or seal.
             Mutation::SkipLogRecovery | Mutation::FollowerIgnoresSeal => SimConfig {
                 fleet: true,
+                ..crashing_and_pausing()
+            },
+            // Only a handler that throws answers with an error.
+            Mutation::ErrorsBypassGate => SimConfig {
+                error_probability: 0.2,
                 ..crashing_and_pausing()
             },
             _ => crashing_and_pausing(),

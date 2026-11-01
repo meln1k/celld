@@ -24,7 +24,7 @@ use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route, WebSock
 use super::faults::Partition;
 use super::{alarms, Item, Pending, Time, Work, World, OPERATION_DEADLINE_MS};
 use crate::checks::Reveal;
-use crate::WriteId;
+use crate::{Mutation, WriteId};
 
 /// When clients start sending. Nodes need a few round trips for their
 /// leases first; a request before that is refused, which proves nothing.
@@ -203,6 +203,8 @@ pub(super) struct Req {
     arm_gate: Option<ArmGate>,
     /// A response the output gate released while the arm gate was pending.
     held: bool,
+    /// The handler throws at the end of its turn instead of returning.
+    error: bool,
 }
 
 /// Where a response's arm gate has got to.
@@ -410,6 +412,7 @@ impl World {
             seen: Vec::new(),
             arm_gate: None,
             held: false,
+            error: false,
         };
         let request = self.pend(node, Pending::Client(req));
         let event = if via == Via::Capacity {
@@ -675,6 +678,13 @@ impl World {
             let at = self.work_rng.range(commit, end);
             self.work(node, at, Work::Client(ClientWork::Effect { request }));
         }
+        if self.work_rng.chance(self.config.error_probability) {
+            self.machines[node]
+                .proc_mut()
+                .client_mut(request)
+                .unwrap()
+                .error = true;
+        }
         self.work(node, end, Work::Client(ClientWork::End { request }));
     }
 
@@ -716,9 +726,9 @@ impl World {
         self.activity_done(node, request, &req.cell);
     }
 
-    /// The handler returns. Its response goes to the output gate, which
-    /// holds it until every write it could reveal is durable; then the
-    /// handler's activity is over.
+    /// The handler returns, or throws inside its turn. Either answer goes to
+    /// the output gate, which holds it until every write it could reveal is
+    /// durable (`answer_ticket`); then the handler's activity is over.
     pub(super) fn handler_end(&mut self, node: usize, request: RequestId) {
         let Some(req) = self.machines[node].proc().client(request) else {
             return;
@@ -731,6 +741,11 @@ impl World {
         let req = self.machines[node].proc_mut().client_mut(request).unwrap();
         req.seen = egress.seen;
         req.answered = true;
+        if req.error && self.config.mutation == Some(Mutation::ErrorsBypassGate) {
+            let req = self.machines[node].proc_mut().take_client(request).unwrap();
+            self.error_answered(node, req);
+            return self.activity_done(node, request, &cell);
+        }
         if req.upgrade {
             // The handler accepts a WebSocket before it answers.
             self.open_socket(node, cell.clone());
@@ -773,6 +788,14 @@ impl World {
         let Some(req) = p.take_client(request) else {
             return;
         };
+        if req.error {
+            // An error goes out after the arm gate whether it landed or not
+            // (`fail_with_arm_gates`). Refused, the client hears only that.
+            if result.is_ok() {
+                return self.error_answered(node, req);
+            }
+            return self.settle(req.op, false);
+        }
         let arm_failed = req.arm_gate == Some(ArmGate::Failed);
         if result.is_err() || arm_failed || !self.ops.contains_key(&req.op) {
             // Refused, or released to a client that already gave up when
@@ -797,6 +820,27 @@ impl World {
         self.checker
             .response_released(self.t, &self.store, &who, &reveal);
         self.settle(op, true);
+    }
+
+    /// The handler's error reaches its client: the request failed, and
+    /// the message revealed everything the handler saw, its own write too.
+    /// Unacknowledged, that write is judged like anything else it read.
+    fn error_answered(&mut self, node: usize, req: Req) {
+        if self.ops.contains_key(&req.op) {
+            self.stats.errors += 1;
+            let reveal = Reveal {
+                cell: req.cell,
+                epoch: req.epoch.expect("only a routed request answers"),
+                committed: None,
+                seen: req.seen,
+                sent_at: req.sent_at,
+                answer: false,
+            };
+            let who = self.who(node);
+            self.checker
+                .response_released(self.t, &self.store, &who, &reveal);
+        }
+        self.settle(req.op, false);
     }
 
     /// The wake entry write the response's arm gate waits on landed or
