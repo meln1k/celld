@@ -206,8 +206,9 @@ The core on `main` fails some seeds.
     `prune_stale_live`.
   - `activation waiter … is queued twice`: the same scan, for a cell that
     a request is also waiting on.
-- **A capacity livelock.** A full fleet can pass an unowned cell between
-  peers that are all at their residency cap, so the cell is never served.
+- **A capacity livelock.** When every node is at its residency cap, a new
+  cell is refused with `CapacityExhausted` indefinitely: no full node evicts
+  an idle resident to make room, so the cell is never served (seed 1227).
 
 In 100,000 swarm seeds, 10,223 failed in a debug build: 9,558 on the
 invariants (5,167 of them on live transports), 625 on stale reads and 40 on

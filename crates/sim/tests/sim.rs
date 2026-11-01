@@ -140,7 +140,9 @@ fn a_swarm_seed_replays_its_configuration_and_its_run() {
 }
 
 /// The crashing fleet, whose processes also pause past their leases: an
-/// owner that wakes up not knowing it lost its cells. No seed of it fails.
+/// owner that wakes up not knowing it lost its cells. Its seeds can fail
+/// only on stale reads after a suspend (seeds 192 and 236), which are not
+/// among the ones the suite runs.
 /// It opens no WebSockets: a pause can reset a cell, and a reset of a cell
 /// holding one trips a known core invariant.
 fn crashing_and_pausing() -> SimConfig {
