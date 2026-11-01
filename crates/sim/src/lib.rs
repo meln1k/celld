@@ -155,6 +155,9 @@ pub struct Operator {
     pub preserves: f64,
     /// The balancer asks a node to give a few idle cells to emptier peers.
     pub rebalances: f64,
+    /// A node adopts a new application generation, and moves its resident
+    /// cells onto it.
+    pub deploys: f64,
 }
 
 /// What goes wrong, and how often. Rates are per simulated minute across
@@ -215,6 +218,8 @@ impl SimConfig {
                 drains: 0.0,
                 preserves: 0.0,
                 rebalances: 6.0,
+                // A forced swap cancels the requests it cuts off.
+                deploys: 0.0,
             },
             max_resident: 4,
             max_activations: 4,
@@ -269,6 +274,7 @@ impl SimConfig {
             operator: Operator {
                 drains: 2.0,
                 preserves: 2.0,
+                deploys: 2.0,
                 ..Self::calm().operator
             },
             ..Self::crashing(3.0)
@@ -364,6 +370,7 @@ impl Operator {
             drains: maybe(1, 4),
             rebalances: maybe(1, 30),
             preserves: maybe(1, 4),
+            deploys: maybe(1, 6),
         }
     }
 }
@@ -405,6 +412,8 @@ pub struct Stats {
     pub resumed: u64,
     /// WebSockets handlers opened.
     pub sockets: u64,
+    /// New application generations nodes adopted.
+    pub deploys: u64,
     /// Handlers' calls to third parties the gate let out.
     pub effects: u64,
     /// Worker requests, and those that ran in a resident cell's isolate.

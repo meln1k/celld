@@ -160,6 +160,12 @@ impl World {
             self.settle_proofs(node, &key.0, epoch);
             return self.upload(node, &key.0, epoch);
         }
+        if cause == StopCause::Swap {
+            // The runtime leaves its isolate; its database stays open, and
+            // the core starts it again at the same epoch.
+            let delay = self.net_rng.range(1, 5);
+            return self.deliver(node, delay, Event::RuntimeStopped { op });
+        }
         if let Some(replica) = self.machines[node].proc_mut().replicas.remove(&key) {
             // Its proofs can no longer be given here.
             for waiter in &replica.waiters {
@@ -179,8 +185,7 @@ impl World {
                 // writes the bucket never got and the client was told
                 // failed. Keep nothing; the next activation restores.
                 StopCause::Reset => {}
-                StopCause::Swap => unimplemented!("generations are not modeled"),
-                StopCause::Evict { .. } | StopCause::Cleanup => unreachable!(),
+                StopCause::Evict { .. } | StopCause::Cleanup | StopCause::Swap => unreachable!(),
             }
         }
         let delay = self.net_rng.range(1, 5);

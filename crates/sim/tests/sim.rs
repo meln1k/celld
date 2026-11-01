@@ -229,6 +229,7 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
         faulted.handed_off += outcome.stats.handed_off;
         faulted.resumed += outcome.stats.resumed;
         faulted.sockets += outcome.stats.sockets;
+        faulted.deploys += outcome.stats.deploys;
     }
     // Most seeds run to the end and through the liveness audit.
     assert!(
@@ -241,14 +242,15 @@ fn every_fault_at_once_breaks_nothing_but_the_known_core_bugs() {
     assert!(faulted.crashes > 10, "{faulted:?}");
     // So did the operator's work: clients gave up, cells were evicted,
     // drained nodes handed cells to their peers, and preserved nodes'
-    // replacements resumed databases in place, and handlers opened
-    // WebSockets.
+    // replacements resumed databases in place, handlers opened WebSockets,
+    // and nodes moved their cells onto new application generations.
     assert!(faulted.cancelled > 500, "{faulted:?}");
     assert!(faulted.evicted > 20, "{faulted:?}");
     assert!(faulted.drains > 10, "{faulted:?}");
     assert!(faulted.handed_off > 20, "{faulted:?}");
     assert!(faulted.resumed > 10, "{faulted:?}");
     assert!(faulted.sockets > 20, "{faulted:?}");
+    assert!(faulted.deploys > 20, "{faulted:?}");
 }
 
 #[test]

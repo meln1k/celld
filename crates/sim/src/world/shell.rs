@@ -232,7 +232,8 @@ impl World {
                 } else {
                     Err(Failure::Definite)
                 };
-                let generation = self.machines[node].proc().state.current_generation();
+                // The generation the runtime was placed on.
+                let generation = self.machines[node].proc().generation;
                 let delay = self.net_rng.range(1, 10);
                 let event = Event::RuntimeStarted {
                     op,
@@ -670,7 +671,8 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
         | Event::OutputAt { now_mono_ms, .. }
         | Event::LoadSampled { now_mono_ms, .. }
         | Event::EvictRequested { now_mono_ms, .. }
-        | Event::GateRequestAt { now_mono_ms, .. } => *now_mono_ms = mono,
+        | Event::GateRequestAt { now_mono_ms, .. }
+        | Event::GenerationChanged { now_mono_ms, .. } => *now_mono_ms = mono,
         Event::OwnerRead { now_ms, .. } | Event::NodeLeaseRead { now_ms, .. } => *now_ms = wall,
         _ => {}
     }

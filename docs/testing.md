@@ -93,7 +93,9 @@ gives idle cells away, and the log tier nudges node leases. A node that shuts
 down or gives a cell away offers it to its peers until one acquires it, as
 `AdoptReleased` and the peer's handoff endpoint do in production. A node can
 also be replaced in place: its process preserves its cells and exits, and the
-replacement resumes each database at the same epoch without the bucket.
+replacement resumes each database at the same epoch without the bucket. A
+deploy moves a node's resident cells onto a new application generation, which
+restarts each runtime on its open database.
 
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
@@ -138,7 +140,7 @@ simulated shell or bucket. A test requires every check to catch its bug, so a
 check cannot go blind without a test failing.
 
 The simulator does not yet model V8, alarms, the fleet log and fleet
-proofs, runtime generations, eviction snapshots, or memory pressure.
+proofs, eviction snapshots, or memory pressure.
 
 The core on `main` fails some seeds.
 

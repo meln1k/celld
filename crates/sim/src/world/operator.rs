@@ -1,7 +1,8 @@
 //! What happens to a node besides its requests and its faults: an operator
-//! evicting a cell by hand or shutting a node down, and the parts of the
-//! node outside the core that talk to it unprompted, such as the log tier
-//! nudging its lease and the balancer giving cells away.
+//! evicting a cell by hand, deploying a new version or shutting a node
+//! down, and the parts of the node outside the core that talk to it
+//! unprompted, such as the log tier nudging its lease and the balancer
+//! giving cells away.
 //!
 //! Each act arrives at its own rate per simulated minute across the fleet,
 //! on a random node that is up, while clients are sending.
@@ -24,6 +25,9 @@ pub(super) enum Act {
     Preserve,
     /// `Message::Rebalance`: give a few idle cells to emptier peers.
     Rebalance,
+    /// A new application version: the node adopts a new generation
+    /// (`Message::GenerationChanged`).
+    Deploy,
 }
 
 impl World {
@@ -34,6 +38,7 @@ impl World {
             Act::Drain,
             Act::Preserve,
             Act::Rebalance,
+            Act::Deploy,
         ] {
             if self.act_rate(act) > 0.0 {
                 let gap = self.act_gap(act);
@@ -50,6 +55,7 @@ impl World {
             Act::Drain => operator.drains,
             Act::Preserve => operator.preserves,
             Act::Rebalance => operator.rebalances,
+            Act::Deploy => operator.deploys,
         }
     }
 
@@ -77,6 +83,9 @@ impl World {
                 Act::Rebalance => Work::Rebalance {
                     cells: self.op_rng.range(1, 3) as usize,
                 },
+                Act::Deploy => Work::Deploy {
+                    max_age_ms: *self.op_rng.pick(&[0, 1_000, 10_000]).unwrap(),
+                },
             };
             // Through the process's queue, so a pause holds it back.
             self.work(node, 0, work);
@@ -96,6 +105,21 @@ impl World {
             request,
             cell,
             now_mono_ms: 0,
+        };
+        self.drive(node, event);
+    }
+
+    /// The node adopts the next application generation. Resident cells
+    /// move to it at their next safe point, or by force after `max_age_ms`.
+    pub(super) fn deploy(&mut self, node: usize, max_age_ms: u64) {
+        self.stats.deploys += 1;
+        let p = self.machines[node].proc_mut();
+        p.generation += 1;
+        let event = celld_logic::Event::GenerationChanged {
+            generation: p.generation,
+            now_mono_ms: 0,
+            max_age_ms,
+            eager_classes: Vec::new(),
         };
         self.drive(node, event);
     }

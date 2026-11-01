@@ -169,6 +169,8 @@ enum Work {
     ShutdownPoll,
     /// The balancer asks the core to give some idle cells away.
     Rebalance { cells: usize },
+    /// The node adopts a new application generation.
+    Deploy { max_age_ms: u64 },
     /// The donor looks for peers to offer a released cell to.
     AdoptSearch { op: OpId },
     /// A peer answered the donor's offer.
@@ -274,6 +276,8 @@ struct Process {
     offers: BTreeMap<RequestId, Offer>,
     /// The WebSockets this process holds open.
     sockets: BTreeMap<WebSocketId, Socket>,
+    /// The application generation this process runs new isolates on.
+    generation: u64,
     /// Handlers' calls held at the output gate, by gate request.
     gates: BTreeMap<RequestId, Gate>,
     /// Worker requests waiting for the core to pick an isolate.
@@ -299,6 +303,7 @@ impl Process {
             adoptions: BTreeMap::new(),
             offers: BTreeMap::new(),
             sockets: BTreeMap::new(),
+            generation: 0,
             gates: BTreeMap::new(),
             workers: BTreeSet::new(),
         }
@@ -521,6 +526,7 @@ impl World {
             Work::Shutdown(mode) => self.shut_down(node, mode),
             Work::ShutdownPoll => self.shutdown_poll(node),
             Work::Rebalance { cells } => self.drive(node, Event::Rebalance { cells }),
+            Work::Deploy { max_age_ms } => self.deploy(node, max_age_ms),
             Work::AdoptSearch { op } => self.adopt_search(node, op),
             Work::OfferAnswered { op, answer } => self.offer_answered(node, op, answer),
             Work::HandlerEffect { request } => self.handler_effect(node, request),
