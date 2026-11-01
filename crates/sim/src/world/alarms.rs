@@ -474,7 +474,7 @@ impl World {
         if proven {
             self.stats.alarms_proven += 1;
             let who = self.who(node);
-            (self.checker).handler_commit_proven(&self.store, &who, &cell, epoch, write, fleet);
+            (self.checker).handler_commit_proven(&who, &cell, epoch, write, fleet);
         }
     }
 

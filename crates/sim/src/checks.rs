@@ -76,6 +76,10 @@ pub struct Checker {
     lineages: BTreeMap<(String, Epoch), Vec<Vec<WriteId>>>,
     /// The newest epoch the bucket ever recorded for each cell.
     newest_epoch: BTreeMap<String, Epoch>,
+    /// The longest database of each cell epoch the bucket ever held, in
+    /// its prefix or in a bundle a recovery can drain, deleted since or
+    /// not: what the bucket proved durable.
+    held: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// When each cell epoch's prefix first held each length: index `n` is
     /// the instant it reached `n + 1` writes.
     durable_at: BTreeMap<(String, Epoch), Vec<u64>>,
@@ -98,6 +102,21 @@ pub struct Checker {
 }
 
 impl Checker {
+    /// The longest database of the cell epoch the bucket ever held.
+    pub fn held(&self, cell: &str, epoch: Epoch) -> &[WriteId] {
+        (self.held.get(&(cell.to_string(), epoch))).map_or(&[], Vec::as_slice)
+    }
+
+    /// The cell's newest database the bucket ever held, in a prefix or a
+    /// bundle: what a fold or a recovery restores.
+    pub fn newest_held(&self, cell: &str) -> Option<(Epoch, &[WriteId])> {
+        (self.held)
+            .range((cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX))
+            .rev()
+            .find(|(_, writes)| !writes.is_empty())
+            .map(|((_, epoch), writes)| (*epoch, writes.as_slice()))
+    }
+
     fn violation(&mut self, at_ms: u64, kind: &'static str, detail: String) {
         self.violations.push(Violation {
             at_ms,
@@ -133,7 +152,6 @@ impl Checker {
     /// the fleet, or through the bucket and an ownership read.
     pub fn handler_commit_proven(
         &mut self,
-        store: &Store,
         who: &str,
         cell: &str,
         epoch: Epoch,
@@ -141,7 +159,7 @@ impl Checker {
         fleet: bool,
     ) {
         self.handler_proven.insert((cell.to_string(), epoch, write));
-        if fleet && !store.held(cell, epoch).contains(&write) {
+        if fleet && !self.held(cell, epoch).contains(&write) {
             let key = (who.to_string(), cell.to_string(), epoch, write);
             self.fleet_acked.insert(key);
         }
@@ -329,11 +347,11 @@ impl Checker {
     /// declared a bounded loss, as production may. The acknowledged writes
     /// only that log held, and the bucket still lacks, are gone; forget
     /// them, so no later check expects them. Returns how many.
-    pub fn declare_loss(&mut self, who: &str, store: &Store) -> u64 {
+    pub fn declare_loss(&mut self, who: &str) -> u64 {
         let lost: Vec<(String, Epoch, WriteId)> = self
             .fleet_acked
             .iter()
-            .filter(|(w, cell, epoch, write)| w == who && !store.held(cell, *epoch).contains(write))
+            .filter(|(w, cell, epoch, write)| w == who && !self.held(cell, *epoch).contains(write))
             .map(|(_, cell, epoch, write)| (cell.clone(), *epoch, *write))
             .collect();
         for (cell, epoch, write) in &lost {
@@ -372,7 +390,15 @@ impl Checker {
     }
 
     /// The bucket now holds `len` writes in this cell epoch's prefix.
-    pub fn prefix_grew(&mut self, t: u64, cell: &str, epoch: Epoch, len: usize) {
+    /// The bucket holds `content` of a cell epoch: an upload landed in its
+    /// prefix, or a bundle a recovery can still drain carried it.
+    pub fn bucket_holds(&mut self, t: u64, cell: &str, epoch: Epoch, content: &[WriteId]) {
+        let key = (cell.to_string(), epoch);
+        let held = self.held.entry(key).or_default();
+        if content.len() > held.len() {
+            *held = content.to_vec();
+        }
+        let len = held.len();
         let times = self
             .durable_at
             .entry((cell.to_string(), epoch))
@@ -605,7 +631,12 @@ impl Checker {
                 );
             }
         }
-        let durable = store.durable_len(cell, epoch) as u64;
+        // What the bucket held once anything was uploaded for the epoch, or
+        // else the chain it was restored from.
+        let durable = match self.held(cell, epoch).len() {
+            0 => store.base_len(cell, epoch),
+            len => len,
+        } as u64;
         // Durable in the bucket, or on every follower of the process's log.
         let fleet = self.fleet_holds(who, cell, epoch, seen);
         let Some((write, position)) = committed else {
@@ -621,7 +652,7 @@ impl Checker {
             }
             return;
         };
-        let prefix = store.held(cell, epoch);
+        let prefix = self.held(cell, epoch);
         let at = position.checked_sub(1).and_then(|i| prefix.get(i as usize));
         if (at != Some(&write) || durable < saw) && !fleet {
             self.violation(
@@ -653,7 +684,7 @@ impl Checker {
             );
         }
         self.acked.insert((cell.to_string(), epoch, write));
-        if fleet && !store.held(cell, epoch).contains(&write) {
+        if fleet && !self.held(cell, epoch).contains(&write) {
             let key = (who.to_string(), cell.to_string(), epoch, write);
             self.fleet_acked.insert(key);
         }

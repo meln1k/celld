@@ -513,8 +513,7 @@ impl World {
         self.checker.upload_applied(self.t, writer, cell, epoch);
         let at_ms = WALL_EPOCH_MS + self.t;
         self.store.put(cell, epoch, content, at_ms);
-        let held = self.store.held(cell, epoch).len();
-        self.checker.prefix_grew(self.t, cell, epoch, held);
+        self.checker.bucket_holds(self.t, cell, epoch, content);
         self.judge_discoverable(cell);
     }
 

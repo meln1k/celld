@@ -16,8 +16,8 @@
 //!   certificate, `wake/retired/<cell>.json`, and the waker role,
 //!   `wake/waker.json`.
 //!
-//! Besides the bucket's own state it keeps the oracle's view, `held`: the
-//! longest database of each cell epoch it ever held anywhere.
+//! What the bucket ever held, deleted since or not, is the oracle's
+//! (`Checker::held`), not the bucket's.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -69,11 +69,6 @@ pub struct Store {
     /// When the newest upload into each prefix landed, true wall clock ms:
     /// what epoch GC's grace reads.
     uploaded_ms: BTreeMap<(String, Epoch), u64>,
-    /// The longest database of each cell epoch the bucket ever held, in
-    /// its prefix or in a bundle a recovery can drain, deleted since or not:
-    /// the oracle's view (`held`). Epoch GC deletes a prefix whose rows
-    /// production's retired mark keeps counting as covered.
-    held: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// Epochs epoch GC deleted: production's retired mark, which makes
     /// per-cell coverage count every row of them as covered.
     retired: BTreeSet<(String, Epoch)>,
@@ -236,27 +231,14 @@ impl Store {
     pub fn put(&mut self, cell: &str, epoch: Epoch, content: &[WriteId], at_ms: u64) {
         let key = (cell.to_string(), epoch);
         self.uploaded_ms.insert(key.clone(), at_ms);
-        self.hold(cell, epoch, content);
         let prefix = self.prefixes.entry(key).or_default();
         if content.len() > prefix.len() {
             *prefix = content.to_vec();
         }
     }
 
-    fn hold(&mut self, cell: &str, epoch: Epoch, content: &[WriteId]) {
-        let held = self.held.entry((cell.to_string(), epoch)).or_default();
-        if content.len() > held.len() {
-            *held = content.to_vec();
-        }
-    }
-
-    /// `put_bundle`: one flush of `session`'s bundle loop. Its rows count
-    /// as held only if a recovery can still drain them: once recovery has
-    /// sealed the session, no one lists its bundles again.
-    pub fn put_bundle(&mut self, session: &str, rows: Vec<Row>, drainable: bool) {
-        for (cell, epoch, content) in rows.iter().filter(|_| drainable) {
-            self.hold(cell, *epoch, content);
-        }
+    /// `put_bundle`: one flush of `session`'s bundle loop.
+    pub fn put_bundle(&mut self, session: &str, rows: Vec<Row>) {
         let range = (session.to_string(), 0)..=(session.to_string(), u64::MAX);
         let seq = self
             .bundles
@@ -369,11 +351,10 @@ impl Store {
         *base = (*base).max(len);
     }
 
-    /// How much of epoch `epoch`'s database the bucket holds: what its own
-    /// prefix or a bundle held once anything was uploaded for it, or else
-    /// the chain it was restored from, as long as the restore read it.
-    pub fn durable_len(&self, cell: &str, epoch: Epoch) -> usize {
-        self.covered(self.held(cell, epoch).len(), cell, epoch)
+    /// How long a chain the epoch was restored from, as long as the restore
+    /// read it.
+    pub fn base_len(&self, cell: &str, epoch: Epoch) -> usize {
+        (self.bases.get(&(cell.to_string(), epoch)).copied()).unwrap_or(0)
     }
 
     /// How much of the epoch's database the per-cell layout holds, which is
@@ -392,7 +373,7 @@ impl Store {
 
     fn covered(&self, len: usize, cell: &str, epoch: Epoch) -> usize {
         match len {
-            0 => (self.bases.get(&(cell.to_string(), epoch)).copied()).unwrap_or(0),
+            0 => self.base_len(cell, epoch),
             len => len,
         }
     }
@@ -401,17 +382,6 @@ impl Store {
     /// that opened it.
     pub fn newest(&self, cell: &str) -> Option<(Epoch, &[WriteId])> {
         self.newest_below(cell, Epoch::MAX)
-    }
-
-    /// The cell's newest database the bucket ever held, in a prefix or a
-    /// bundle: the oracle's view of what a fold or a recovery restores.
-    pub fn newest_held(&self, cell: &str) -> Option<(Epoch, &[WriteId])> {
-        (self
-            .held
-            .range((cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX)))
-        .rev()
-        .find(|(_, writes)| !writes.is_empty())
-        .map(|((_, epoch), writes)| (*epoch, writes.as_slice()))
     }
 
     /// `WakeFlusher::publish`: write the wake entry of an armed alarm.
@@ -519,13 +489,6 @@ impl Store {
         self.owners
             .get(cell)
             .map(|(node, epoch, _)| (node.as_deref(), *epoch))
-    }
-
-    /// The longest database of the cell epoch the bucket ever held, in its
-    /// prefix or a bundle, deleted or not: the oracle's view of what the
-    /// bucket proved durable.
-    pub fn held(&self, cell: &str, epoch: Epoch) -> &[WriteId] {
-        (self.held.get(&(cell.to_string(), epoch))).map_or(&[], Vec::as_slice)
     }
 }
 
