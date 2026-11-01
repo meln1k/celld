@@ -14,7 +14,7 @@ use super::alarms::{AlarmWork, Waiter};
 use super::faults::Partition;
 use super::node_log::LogWork;
 use super::replicator::ReplicaWork;
-use super::{Item, Pending, Work, World};
+use super::{Item, Pending, Work, World, WALL_EPOCH_MS};
 use crate::store::Load;
 use crate::{Mutation, WriteId};
 
@@ -489,7 +489,8 @@ impl World {
         content: &[WriteId],
     ) {
         self.checker.upload_applied(self.t, writer, cell, epoch);
-        self.store.put(cell, epoch, content);
+        let at_ms = WALL_EPOCH_MS + self.t;
+        self.store.put(cell, epoch, content, at_ms);
         let held = self.store.prefix(cell, epoch).len();
         self.checker.prefix_grew(self.t, cell, epoch, held);
         self.judge_discoverable(cell);

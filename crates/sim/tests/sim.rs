@@ -441,6 +441,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::AcceptUnclaimed => &["unclaimed-handoff"],
             Mutation::RetireUnproven => &["alarm-undiscoverable"],
             Mutation::StaleSnapshot => &["lost-write"],
+            Mutation::GcUnlisted => &["base-deleted"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -475,6 +476,14 @@ fn every_planted_bug_is_caught_by_its_check() {
                     ..SimConfig::calm().operator
                 },
                 max_resident: 2,
+                sticky_eviction: true,
+                ..crashing_and_pausing()
+            },
+            // Only a fleet that runs epoch GC deletes prefixes, and only an
+            // epoch that has uploaded nothing yet is not its chain's base:
+            // one a snapshot or a restore opened, with no write since.
+            Mutation::GcUnlisted => SimConfig {
+                epoch_gc_grace_ms: Some(0),
                 sticky_eviction: true,
                 ..crashing_and_pausing()
             },

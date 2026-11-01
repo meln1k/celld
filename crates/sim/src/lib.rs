@@ -79,6 +79,10 @@ pub struct SimConfig {
     /// The memory each process holds, and the machine it has. `None`
     /// reports no memory, so the core never sheds on pressure.
     pub memory: Option<Memory>,
+    /// Epoch GC's grace (`CELLD_LTX_RETENTION_SECS`): owners delete the
+    /// epoch prefixes below their restore chain's base once the newest
+    /// upload into one is this old. `None` runs no epoch GC.
+    pub epoch_gc_grace_ms: Option<u64>,
     /// A bug planted in the simulated shell or bucket.
     pub mutation: Option<Mutation>,
     /// Keep a human-readable line for every event and effect.
@@ -200,10 +204,14 @@ pub enum Mutation {
     /// even after a takeover, so it misses what other owners wrote since.
     /// Caught by `lost-write`.
     StaleSnapshot,
+    /// Epoch GC plans as if the owner's own epoch were the restore chain's
+    /// base, without the listing that proves it, so it can delete the base a
+    /// restore still needs. Caught by `base-deleted`.
+    GcUnlisted,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 22] = [
+    pub const ALL: [Mutation; 23] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -226,6 +234,7 @@ impl Mutation {
         Mutation::AcceptUnclaimed,
         Mutation::RetireUnproven,
         Mutation::StaleSnapshot,
+        Mutation::GcUnlisted,
     ];
 }
 
@@ -321,6 +330,7 @@ impl SimConfig {
             idle_evict_ms: None,
             fleet: false,
             memory: None,
+            epoch_gc_grace_ms: None,
             mutation: None,
             trace: false,
         }
@@ -413,6 +423,7 @@ impl SimConfig {
             fleet: r.chance(0.5),
             memory: r.chance(0.5).then(|| Memory::with_room(r.range(1, 4))),
             error_probability: *r.pick(&[0.0, 0.05, 0.2]).unwrap(),
+            epoch_gc_grace_ms: r.chance(0.5).then(|| *r.pick(&[0, 2_000, 10_000]).unwrap()),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
         }
@@ -534,6 +545,8 @@ pub struct Stats {
     pub fleet_proofs: u64,
     pub log_recoveries: u64,
     pub fleet_losses: u64,
+    /// Epoch prefixes epoch GC deleted.
+    pub epochs_deleted: u64,
     /// Handlers' error answers that reached their clients.
     pub errors: u64,
     /// Load samples after which a node was shedding on memory pressure.

@@ -37,6 +37,7 @@ mod alarms;
 mod clients;
 mod faults;
 mod gates;
+mod gc;
 mod handoff;
 mod judges;
 mod liveness;
@@ -67,6 +68,7 @@ use alarms::{AlarmWork, ProcAlarms};
 use clients::{Bounce, ClientWork, Op, Req, Via};
 use faults::{Fault, Partition};
 use gates::Gate;
+use gc::GcWork;
 use handoff::{Adoption, Answer, HandoffWork, Offer};
 use liveness::Goal;
 use node_log::{Log, LogWork, Session};
@@ -182,6 +184,7 @@ enum Work {
     Socket(SocketWork),
     Alarm(AlarmWork),
     Log(LogWork),
+    Gc(GcWork),
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -664,6 +667,7 @@ impl World {
             Work::Socket(work) => self.socket_work(node, work),
             Work::Alarm(work) => self.alarm_work(node, work),
             Work::Log(work) => self.log_work(node, work),
+            Work::Gc(work) => self.gc_work(node, work),
         }
     }
 
@@ -720,6 +724,7 @@ impl World {
         let delay = self.net_rng.range(1, LOAD_SAMPLE_MS);
         self.work(node, delay, Work::LoadSample);
         self.start_wake_scans(node);
+        self.start_epoch_gc(node);
     }
 
     /// Production's periodic sampler.

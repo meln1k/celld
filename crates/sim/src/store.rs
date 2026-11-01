@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 
+use celld_logic::epoch_gc::ListedEpoch;
 use celld_logic::log_tier::LogState;
 use celld_logic::wake::{AlarmSnapshot, PublicationId, Retirement};
 use celld_logic::{
@@ -56,6 +57,13 @@ pub struct Store {
     /// still extend the prefix below after the restore read it, and those
     /// writes are not in this epoch's database.
     bases: BTreeMap<(String, Epoch), usize>,
+    /// When the newest upload into each prefix landed, true wall clock ms:
+    /// what epoch GC's grace reads.
+    uploaded_ms: BTreeMap<(String, Epoch), u64>,
+    /// What epoch GC deleted. Restores and listings no longer see it; the
+    /// oracle does (`prefix`), as production's retired mark keeps counting
+    /// those rows as covered.
+    gone: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// Wake entries: (cell, installation) → when it is due, wall clock ms.
     wake: BTreeMap<(String, PublicationId), i64>,
     /// Each cell's retirement certificate, `wake/retired/<cell>`: the newest
@@ -205,8 +213,11 @@ impl Store {
     }
 
     /// Upload the whole database of one epoch into its prefix.
-    pub fn put(&mut self, cell: &str, epoch: Epoch, content: &[WriteId]) {
-        let prefix = self.prefixes.entry((cell.to_string(), epoch)).or_default();
+    /// A late upload into a deleted prefix recreates it with what it carries.
+    pub fn put(&mut self, cell: &str, epoch: Epoch, content: &[WriteId], at_ms: u64) {
+        let key = (cell.to_string(), epoch);
+        self.uploaded_ms.insert(key.clone(), at_ms);
+        let prefix = self.prefixes.entry(key).or_default();
         if content.len() > prefix.len() {
             *prefix = content.to_vec();
         }
@@ -218,6 +229,35 @@ impl Store {
             .prefixes
             .range((cell.to_string(), epoch)..=(cell.to_string(), Epoch::MAX)))
         .any(|(_, writes)| !writes.is_empty())
+    }
+
+    /// `scan_epochs`: the restore chain's epochs, and every epoch that holds
+    /// objects, with its newest upload's time. Every upload carries the
+    /// whole database, so the chain is the newest prefix alone.
+    pub fn list_epochs(&self, cell: &str) -> (Vec<Epoch>, Vec<ListedEpoch>) {
+        let Some((base, _)) = self.newest(cell) else {
+            return (Vec::new(), Vec::new());
+        };
+        let cell_range = (cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX);
+        let listed = (self.prefixes.range(cell_range))
+            .filter(|(_, writes)| !writes.is_empty())
+            .map(|(key, _)| ListedEpoch {
+                epoch: key.1,
+                newest_ms: self.uploaded_ms[key],
+            })
+            .collect();
+        (vec![base], listed)
+    }
+
+    /// Delete every object of one epoch prefix.
+    pub fn delete_epoch(&mut self, cell: &str, epoch: Epoch) {
+        let key = (cell.to_string(), epoch);
+        if let Some(writes) = self.prefixes.remove(&key) {
+            let gone = self.gone.entry(key).or_default();
+            if writes.len() > gone.len() {
+                *gone = writes;
+            }
+        }
     }
 
     /// What a restore at `epoch` reads: the newest prefix below it that
@@ -344,10 +384,17 @@ impl Store {
             .map(|(node, epoch, _)| (node.as_deref(), *epoch))
     }
 
+    /// The longest database any upload put into the prefix, deleted or not:
+    /// the oracle's view of what the bucket proved durable there.
     pub fn prefix(&self, cell: &str, epoch: Epoch) -> &[WriteId] {
-        self.prefixes
-            .get(&(cell.to_string(), epoch))
-            .map_or(&[], Vec::as_slice)
+        let key = (cell.to_string(), epoch);
+        let live = self.prefixes.get(&key).map_or(&[][..], Vec::as_slice);
+        let gone = self.gone.get(&key).map_or(&[][..], Vec::as_slice);
+        if gone.len() > live.len() {
+            gone
+        } else {
+            live
+        }
     }
 }
 

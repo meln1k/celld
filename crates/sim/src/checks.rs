@@ -423,6 +423,20 @@ impl Checker {
     /// half of **one writer per epoch**. Checked when the upload lands, not
     /// when it is sent, because a node that lost the cell can still have an
     /// upload on the wire.
+    /// Watched: **epoch GC never deletes a restore's base.** Epoch GC is
+    /// about to delete `epoch` of `cell`, and `base` is the epoch a restore
+    /// of the cell would read now.
+    pub fn epoch_deleted(&mut self, t: u64, cell: &str, epoch: Epoch, base: Option<Epoch>) {
+        if base == Some(epoch) {
+            self.watch(
+                t,
+                "base-deleted",
+                format!("{cell}/{epoch}"),
+                format!("epoch GC deleted {cell} epoch {epoch}, the base a restore reads"),
+            );
+        }
+    }
+
     pub fn upload_applied(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch) {
         let writer = self.writer(who);
         if let Some(first) = first_writer(&mut self.uploaders, &writer, cell, epoch) {
