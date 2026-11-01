@@ -196,10 +196,14 @@ pub enum Mutation {
     /// below go while the bucket may still hold an older alarm. Caught by
     /// `alarm-undiscoverable`.
     RetireUnproven,
+    /// A restore opens the newest eviction snapshot of any earlier epoch,
+    /// even after a takeover, so it misses what other owners wrote since.
+    /// Caught by `lost-write`.
+    StaleSnapshot,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 21] = [
+    pub const ALL: [Mutation; 22] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -221,6 +225,7 @@ impl Mutation {
         Mutation::FollowerCorrupts,
         Mutation::AcceptUnclaimed,
         Mutation::RetireUnproven,
+        Mutation::StaleSnapshot,
     ];
 }
 
@@ -497,6 +502,8 @@ pub struct Stats {
     /// Databases restored from the bucket: each one is checked for lost
     /// writes.
     pub restored: u64,
+    /// Databases opened from an eviction snapshot instead of the bucket.
+    pub reused: u64,
     /// Evictions an operator asked for, and those that evicted.
     pub evictions: u64,
     pub evicted: u64,

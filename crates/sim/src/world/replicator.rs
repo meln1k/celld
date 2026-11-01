@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use celld_logic::durability::{proof_deadline, ProofProgress, ProofWait};
+use celld_logic::restore::previous_epoch_reusable;
 use celld_logic::{
     Epoch, Event, Failure, LocalCell, OpId, ProofSource, RestoreOutcome, RestoreSpec,
     RestoredAlarm, StopCause,
@@ -31,12 +32,17 @@ const PROOF_BUDGET_MS: u64 = 10_000;
 #[derive(Default)]
 pub(super) struct Disk {
     live: BTreeMap<(String, Epoch), Vec<WriteId>>,
+    /// Eviction snapshots (`db.evicted`): databases an idle eviction or a
+    /// cleanup closed once the bucket held all of them. The next activation
+    /// here may open one in place of a bucket read.
+    evicted: BTreeMap<(String, Epoch), Vec<WriteId>>,
     /// What this machine keeps as a follower of other nodes' logs.
     pub(super) log: FollowerDisk,
 }
 
 impl Disk {
-    /// Delete every file but these (`prune_stale_live`).
+    /// Delete every live file but these (`prune_stale_live`). Eviction
+    /// snapshots stay.
     pub(super) fn prune_except(&mut self, keep: &[(String, Epoch)]) {
         self.live.retain(|key, _| keep.contains(key));
     }
@@ -65,6 +71,8 @@ pub(super) struct Replica {
     /// An eviction stop waiting for its final upload: the operation that
     /// asked for it.
     stop: Option<OpId>,
+    /// Whether that stop keeps the closed database as an eviction snapshot.
+    snapshot: bool,
 }
 
 /// A durability proof someone is waiting on.
@@ -155,14 +163,14 @@ impl World {
 
     /// The databases on the node's disk, as the startup scan reports them.
     pub(super) fn local_cells(&self, node: usize) -> Vec<LocalCell> {
-        self.machines[node]
-            .disk
-            .live
-            .keys()
-            .map(|(cell, epoch)| LocalCell {
+        let disk = &self.machines[node].disk;
+        let live = disk.live.keys().map(|key| (key, true));
+        let evicted = disk.evicted.keys().map(|key| (key, false));
+        live.chain(evicted)
+            .map(|((cell, epoch), live)| LocalCell {
                 id: cell.clone(),
                 epoch: *epoch,
-                live: true,
+                live,
             })
             .collect()
     }
@@ -190,14 +198,14 @@ impl World {
     ) {
         let key = (cell, epoch);
         if let StopCause::Evict { .. } | StopCause::Cleanup = cause {
-            // A clean stop uploads everything first, then closes. The
-            // eviction snapshot production keeps on disk serves only sticky
-            // ownership, which is not modeled: a released cell is restored
-            // from the bucket by whoever takes it next.
+            // A clean stop uploads everything first, then closes. All but a
+            // rebalance keep the closed database as an eviction snapshot
+            // (`preserve_local: !rebalance`; a cleanup is `release`).
             let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
                 return self.deliver(node, 1, Event::RuntimeStopped { op });
             };
             replica.stop = Some(op);
+            replica.snapshot = cause != (StopCause::Evict { rebalance: true });
             if bounded {
                 // After its deadline the stop gives up; the core restarts
                 // the cell on the database it kept open.
@@ -277,9 +285,16 @@ impl World {
             let delay = self.net_rng.range(1, 5);
             let event = self.restore_completed(node, op, &cell, spec.epoch, false);
             self.deliver(node, delay, event);
+        } else if let Some(content) = self.take_snapshot(node, &cell, &spec) {
+            // The snapshot an eviction here left is the previous epoch's
+            // database: renamed into place, with no bucket read and no fold.
+            self.stats.reused += 1;
+            self.store.reused(&cell, spec.epoch, content.len());
+            self.open_replica(node, cell.clone(), spec.epoch, content, false);
+            let delay = self.net_rng.range(1, 5);
+            let event = self.restore_completed(node, op, &cell, spec.epoch, true);
+            self.deliver(node, delay, event);
         } else {
-            // No eviction snapshots yet, so nothing on disk is ever a safe
-            // source: always read the chain from the bucket.
             let epoch = spec.epoch;
             let fold = (self.machines[node].proc().tails.keys()).any(|(c, _)| *c == cell);
             let req = StoreReq::ReadChain {
@@ -290,6 +305,29 @@ impl World {
             };
             self.store_call(node, req);
         }
+    }
+
+    /// The eviction snapshot a restore may open instead of reading the
+    /// bucket, taken off the disk: the previous epoch's, unless the cell was
+    /// taken over (`previous_epoch_reusable`).
+    fn take_snapshot(
+        &mut self,
+        node: usize,
+        cell: &str,
+        spec: &RestoreSpec,
+    ) -> Option<Vec<WriteId>> {
+        let evicted = &mut self.machines[node].disk.evicted;
+        let key = if self.config.mutation == Some(Mutation::StaleSnapshot) {
+            // The planted bug takes the newest snapshot of any earlier
+            // epoch, even after a takeover.
+            let below = (cell.to_string(), 0)..(cell.to_string(), spec.epoch);
+            evicted.range(below).next_back()?.0.clone()
+        } else if previous_epoch_reusable(spec.epoch, spec.took_over) {
+            (cell.to_string(), spec.epoch - 1)
+        } else {
+            return None;
+        };
+        evicted.remove(&key)
     }
 
     /// The bucket answered a restore. Open the database it describes.
@@ -344,6 +382,7 @@ impl World {
             waiters: Vec::new(),
             deadlines: BTreeMap::new(),
             stop: None,
+            snapshot: false,
         };
         self.machines[node]
             .proc_mut()
@@ -672,6 +711,12 @@ impl World {
                 answers.push(waiter.answer(Err(Failure::Ambiguous)));
             }
             settled.extend(replica.deadlines.values());
+            if replica.snapshot {
+                self.machines[node]
+                    .disk
+                    .evicted
+                    .insert(key, replica.content);
+            }
             answers.push(Event::RuntimeStopped { op });
         }
         for deadline in settled {

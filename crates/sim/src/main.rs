@@ -194,8 +194,14 @@ fn main() {
         stats.bounced
     );
     println!(
-        "crashes {}, pauses {}, partitions {}, bucket failures {}, restores from the bucket {}",
-        stats.crashes, stats.pauses, stats.partitions, stats.store_failures, stats.restored
+        "crashes {}, pauses {}, partitions {}, bucket failures {}, restores from the bucket {}, \
+         from an eviction snapshot {}",
+        stats.crashes,
+        stats.pauses,
+        stats.partitions,
+        stats.store_failures,
+        stats.restored,
+        stats.reused
     );
     println!(
         "evictions asked {}, evicted {}, drains {}, cells handed off {}, preserves {}, \

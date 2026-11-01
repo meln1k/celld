@@ -252,6 +252,13 @@ impl Store {
             .map(|((_, epoch), writes)| (*epoch, writes.as_slice()))
     }
 
+    /// An activation opened `epoch` from an eviction snapshot of `len`
+    /// writes, all in the bucket below it: the chain it restored from.
+    pub fn reused(&mut self, cell: &str, epoch: Epoch, len: usize) {
+        let base = self.bases.entry((cell.to_string(), epoch)).or_default();
+        *base = (*base).max(len);
+    }
+
     /// How much of epoch `epoch`'s database the bucket holds: its own prefix
     /// once anything was uploaded into it, or else the chain it was
     /// restored from, as long as the restore read it.

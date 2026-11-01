@@ -440,6 +440,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::FollowerCorrupts => &["unverified-ack"],
             Mutation::AcceptUnclaimed => &["unclaimed-handoff"],
             Mutation::RetireUnproven => &["alarm-undiscoverable"],
+            Mutation::StaleSnapshot => &["lost-write"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -464,6 +465,17 @@ fn every_planted_bug_is_caught_by_its_check() {
             | Mutation::FollowerIgnoresSeal
             | Mutation::FollowerCorrupts => SimConfig {
                 fleet: true,
+                ..crashing_and_pausing()
+            },
+            // A stale snapshot loses writes only once its cell has moved
+            // away and back: rebalances move cells, and a full node evicts.
+            Mutation::StaleSnapshot => SimConfig {
+                operator: Operator {
+                    rebalances: 14.0,
+                    ..SimConfig::calm().operator
+                },
+                max_resident: 2,
+                sticky_eviction: true,
                 ..crashing_and_pausing()
             },
             // Only a handler that throws answers with an error.
