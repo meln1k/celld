@@ -79,7 +79,6 @@ impl World {
                 committed,
                 seen: egress.seen,
                 sent_at,
-                answer: false,
             },
             position: egress.position,
             observed: egress.observed,

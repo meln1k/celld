@@ -200,9 +200,7 @@ pub(super) struct Req {
     seen: Vec<WriteId>,
     /// The arm gate: the wake entry write for the alarm the handler set,
     /// which its response waits on, as `send_answer_after_arm_gates` does.
-    arm_gate: Option<ArmGate>,
-    /// A response the output gate released while the arm gate was pending.
-    held: bool,
+    arm_gate: ArmGate,
     /// The handler throws at the end of its turn instead of returning.
     error: bool,
 }
@@ -210,9 +208,13 @@ pub(super) struct Req {
 /// Where a response's arm gate has got to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ArmGate {
-    Pending,
-    Landed,
-    /// The wake entry write failed, so the response fails too.
+    /// Nothing holds the response: the handler set no alarm, or its wake
+    /// entry landed.
+    Open,
+    /// The wake entry write is in flight. `released`: the output gate has
+    /// already let the response go, so it leaves once the write settles.
+    Pending { released: bool },
+    /// The wake entry write failed, so a success fails too.
     Failed,
 }
 
@@ -410,8 +412,7 @@ impl World {
             committed: None,
             alarm: None,
             seen: Vec::new(),
-            arm_gate: None,
-            held: false,
+            arm_gate: ArmGate::Open,
             error: false,
         };
         let request = self.pend(node, Pending::Client(req));
@@ -705,12 +706,13 @@ impl World {
                     // The write sets or clears the alarm, and the runtime's
                     // alarm observer reports the change. Setting it opens
                     // the arm gate.
-                    if ahead_ms.is_some() {
+                    let gate = alarms::Waiter::Request(request);
+                    let (alarm, gated) =
+                        self.alarm_written(node, &cell, epoch, committed.0, ahead_ms, gate);
+                    if gated {
                         let req = self.machines[node].proc_mut().client_mut(request).unwrap();
-                        req.arm_gate = Some(ArmGate::Pending);
+                        req.arm_gate = ArmGate::Pending { released: false };
                     }
-                    let gate = Some(alarms::Waiter::Request(request));
-                    let alarm = self.alarm_written(node, &cell, epoch, committed.0, ahead_ms, gate);
                     let alarm = self.reported(alarm);
                     self.deliver(node, 0, alarms::observed(&cell, alarm, false));
                 }
@@ -778,31 +780,32 @@ impl World {
         assert_eq!(channel, Channel::Response, "handlers answer or fetch");
         let p = self.machines[node].proc_mut();
         if let Some(req) = p.client_mut(request) {
-            if result.is_ok() && req.arm_gate == Some(ArmGate::Pending) {
+            if result.is_ok() && matches!(req.arm_gate, ArmGate::Pending { .. }) {
                 // The arm gate still holds it: it goes once the wake entry
-                // lands.
-                req.held = true;
+                // write settles.
+                req.arm_gate = ArmGate::Pending { released: true };
                 return;
             }
         }
         let Some(req) = p.take_client(request) else {
             return;
         };
-        if req.error {
+        match (result, req.error, req.arm_gate) {
             // An error goes out after the arm gate whether it landed or not
-            // (`fail_with_arm_gates`). Refused, the client hears only that.
-            if result.is_ok() {
-                return self.error_answered(node, req);
+            // (`fail_with_arm_gates`).
+            (Ok(()), true, _) => self.error_answered(node, req),
+            (Ok(()), false, ArmGate::Open) if self.ops.contains_key(&req.op) => {
+                self.answered(node, req)
             }
-            return self.settle(req.op, false);
+            // Refused, failed by its arm gate, or released to a client that
+            // already gave up when its connection died: either way nobody
+            // was told it worked.
+            _ => self.settle(req.op, false),
         }
-        let arm_failed = req.arm_gate == Some(ArmGate::Failed);
-        if result.is_err() || arm_failed || !self.ops.contains_key(&req.op) {
-            // Refused, or released to a client that already gave up when
-            // its connection died: either way nobody was told it worked.
-            self.settle(req.op, false);
-            return;
-        }
+    }
+
+    /// The handler's answer reaches its client: the request succeeded.
+    fn answered(&mut self, node: usize, req: Req) {
         let epoch = req.epoch.expect("only a routed request answers");
         if req.committed.is_some() {
             self.stats.acked_writes += 1;
@@ -815,10 +818,13 @@ impl World {
             committed: req.committed,
             seen: req.seen,
             sent_at: req.sent_at,
-            answer: true,
         };
         self.checker
             .response_released(self.t, &self.store, &who, &reveal);
+        if let Some((write, _)) = req.committed {
+            // Only the handler's own answer waits for the arm gate.
+            self.checker.answer_acknowledged(&reveal.cell, write);
+        }
         self.settle(op, true);
     }
 
@@ -834,7 +840,6 @@ impl World {
                 committed: None,
                 seen: req.seen,
                 sent_at: req.sent_at,
-                answer: false,
             };
             let who = self.who(node);
             self.checker
@@ -849,12 +854,13 @@ impl World {
         let Some(req) = self.machines[node].proc_mut().client_mut(request) else {
             return;
         };
-        req.arm_gate = Some(if landed {
-            ArmGate::Landed
+        let released = req.arm_gate == ArmGate::Pending { released: true };
+        req.arm_gate = if landed {
+            ArmGate::Open
         } else {
             ArmGate::Failed
-        });
-        if std::mem::take(&mut req.held) {
+        };
+        if released {
             self.release(node, request, Channel::Response, Ok(()));
         }
     }

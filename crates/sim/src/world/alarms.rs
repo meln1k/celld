@@ -131,8 +131,9 @@ impl World {
     }
 
     /// Record that `write`, committed at `epoch`, sets the cell's alarm
-    /// `ahead_ms` from now (or clears it), and start its arm gate: the wake
-    /// entry write that `gate`, if any, waits on.
+    /// `ahead_ms` from now (or clears it). Setting it starts its arm gate:
+    /// the wake entry write that `gate` waits on. Returns the cell's alarm,
+    /// and whether `gate` now waits.
     pub(super) fn alarm_written(
         &mut self,
         node: usize,
@@ -140,8 +141,8 @@ impl World {
         epoch: Epoch,
         write: WriteId,
         ahead_ms: Option<u64>,
-        gate: Option<Waiter>,
-    ) -> AlarmSnapshot {
+        gate: Waiter,
+    ) -> (AlarmSnapshot, bool) {
         let at_ms = ahead_ms.map(|ahead| (self.wall(node) + ahead) as i64);
         self.alarm_writes.insert(write, at_ms);
         if at_ms.is_some() {
@@ -150,9 +151,9 @@ impl World {
         let content = self.seen(node, cell, epoch).expect("an open database");
         let alarm = self.alarm_of(content, epoch);
         if at_ms.is_some() {
-            self.publish_wake(node, cell, alarm, false, gate);
+            self.publish_wake(node, cell, alarm, false, Some(gate));
         }
-        alarm
+        (alarm, at_ms.is_some())
     }
 
     /// What the shell tells the core about an alarm: what it is, unless a
@@ -408,11 +409,11 @@ impl World {
                     let (write, position) = self
                         .commit_write(node, &cell, epoch)
                         .expect("open database");
-                    let gate = Some(Waiter::Alarm(op));
-                    let alarm = self.alarm_written(node, &cell, epoch, write, rearm, gate);
+                    let gate = Waiter::Alarm(op);
+                    let (alarm, gated) = self.alarm_written(node, &cell, epoch, write, rearm, gate);
                     let alarm = self.reported(alarm);
                     self.stats.alarms_fired += 1;
-                    if rearm.is_some() {
+                    if gated {
                         // The re-arm's arm gate holds the reply.
                         let held = (cell, epoch, alarm, position);
                         self.machines[node].proc_mut().alarms.held.insert(op, held);

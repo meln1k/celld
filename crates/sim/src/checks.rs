@@ -36,8 +36,6 @@ pub struct Reveal {
     pub committed: Option<(WriteId, u64)>,
     pub seen: Vec<WriteId>,
     pub sent_at: u64,
-    /// The handler's answer to its client, not a `fetch()` it made.
-    pub answer: bool,
 }
 
 #[derive(Default)]
@@ -110,6 +108,12 @@ impl Checker {
                 detail,
             });
         }
+    }
+
+    /// The handler of `write` of `cell` answered its client that it
+    /// succeeded: not a `fetch()` it made, and not an error.
+    pub fn answer_acknowledged(&mut self, cell: &str, write: WriteId) {
+        self.answered.insert((cell.to_string(), write));
     }
 
     /// Whether the handler of `write` of `cell` answered its client that it
@@ -479,7 +483,6 @@ impl Checker {
             committed,
             seen,
             sent_at,
-            answer,
         } = reveal;
         let (cell, epoch, committed, sent_at) = (cell.as_str(), *epoch, *committed, *sent_at);
         let saw = seen.len() as u64;
@@ -575,9 +578,6 @@ impl Checker {
         if fleet && !store.prefix(cell, epoch).contains(&write) {
             let key = (who.to_string(), cell.to_string(), epoch, write);
             self.fleet_acked.insert(key);
-        }
-        if *answer {
-            self.answered.insert((cell.to_string(), write));
         }
         self.acked_at
             .entry(cell.to_string())
