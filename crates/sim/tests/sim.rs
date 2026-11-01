@@ -325,7 +325,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::SlowMonoClock => &["stale-read"],
             Mutation::StaleRegistry => &["evicted-but-serving"],
             Mutation::PhantomSocketClose => &["evicted-pinned"],
-            Mutation::LostWakeEntry => &["uncovered-alarm"],
+            Mutation::LostWakeEntry => &["uncovered-alarm", "crash-uncovered-alarm"],
             Mutation::AlarmsUnreported => &["alarm-not-fired"],
         };
         let base = match mutation {

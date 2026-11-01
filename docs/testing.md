@@ -141,6 +141,10 @@ The checks, in `crates/sim/src/checks.rs`:
   because the woken owner reads the alarm its database really holds. A
   runtime that a newer epoch already superseded is exempt: its entries were
   rightly retired.
+- **crash-uncovered-alarm**: a process died holding an alarm that a client
+  was told was set, with no wake entry due by its time. As in production, a
+  handler that sets an alarm answers only once the alarm's wake entry lands,
+  and fails if that write fails.
 - **alarm-not-fired**: when the liveness probe ends, a cell's newest durable
   database still holds an alarm that came due more than 10 s earlier.
 - **stale-read**: a response missed a write that a client had already been
@@ -162,8 +166,6 @@ core, not to the simulator or to the property itself.
 
 - **resumed-superseded**: a clean reload resumed a database while the owner
   record named another node or a newer epoch.
-- **crash-uncovered-alarm**: a process died holding an alarm that a client
-  was told was set, with no wake entry due by its time.
 - **audit-alarm-not-fired**: when the audit ends, a cell's newest durable
   database still holds an alarm that came due more than 10 s earlier.
 - **claim-during-shutdown**: a claim sent while its node was draining or
@@ -177,7 +179,7 @@ core, not to the simulator or to the property itself.
 
 The last three judge only once the fleet is quiet, and 15 s after the faults
 end, so that a bucket call lost just before the end has timed out. A planted
-bug makes each of the seven fire. In 100,000 swarm seeds:
+bug makes each of the six fire. In 100,000 swarm seeds:
 
 - 161 seeds claimed during a preserve, never during a drain. An eviction
   already in flight finishes, or an owner read lands, and the core claims the
@@ -185,9 +187,6 @@ bug makes each of the seven fire. In 100,000 swarm seeds:
 - 64 seeds resumed a superseded epoch, 60 of them with faulty clocks. The
   rest are the slow clean reload below, or a resume after a claim during a
   preserve.
-- No seed hit crash-uncovered-alarm. As in production, a handler that sets
-  an alarm answers only once the alarm's wake entry lands, and fails if
-  that write fails. Before the simulator modelled this, 6 seeds hit it.
 
 The simulator does not yet model V8, the fleet log and fleet proofs, eviction
 snapshots, memory pressure, or the waker election (the lowest live node

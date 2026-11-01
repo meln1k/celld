@@ -118,15 +118,14 @@ impl Checker {
         );
     }
 
-    /// Watched: **an acknowledged alarm outlives its process.** The arm
-    /// gate holds a response until a wake entry covers the alarm (README),
-    /// so when a process dies, every alarm a client was told was set must
-    /// have a wake entry due by its time.
+    /// **An acknowledged alarm outlives its process.** The arm gate holds a
+    /// response until a wake entry covers the alarm (README), so when a
+    /// process dies, every alarm a client was told was set must have a wake
+    /// entry due by its time.
     pub fn died_uncovered(&mut self, t: u64, who: &str, cell: &str, write: WriteId) {
-        self.watch(
+        self.violation(
             t,
             "crash-uncovered-alarm",
-            format!("{who} {cell}"),
             format!(
                 "{who} died holding {cell}'s alarm, set by acknowledged write {write}, with no \
                  wake entry due by then"

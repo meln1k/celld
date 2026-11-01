@@ -121,7 +121,8 @@ pub enum Mutation {
     /// and every restore says there is none. Caught by `alarm-not-fired`.
     AlarmsUnreported,
     /// A wake entry write answers success but writes nothing. Caught by
-    /// `uncovered-alarm` when the cell is then evicted.
+    /// `uncovered-alarm` when the cell is then evicted, and by
+    /// `crash-uncovered-alarm` when its process dies.
     LostWakeEntry,
     /// An eviction stops the runtime but leaves it in the registry. Caught
     /// by `evicted-but-serving`.
