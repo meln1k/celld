@@ -3,9 +3,11 @@
 
 use std::collections::VecDeque;
 
+use celld_logic::log_tier::LogState;
 use celld_logic::wake::AlarmSnapshot;
 use celld_logic::{
-    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, NodeLeaseRecord, OpId, StopCause, Timer,
+    CasGuard, CasOutcome, Effect, Epoch, Event, Failure, LeaseCasOutcome, NodeLeaseRecord, OpId,
+    StopCause, Timer,
 };
 
 use super::alarms::{AlarmWork, Waiter};
@@ -170,7 +172,8 @@ impl World {
             } => {
                 // The shell stamps the body with its own log slot when it
                 // writes it, whatever the core believed (`stamped_log_state`).
-                record.log_state = self.log_slot(node);
+                let p = self.machines[node].proc();
+                record.log_state = p.log.is_some().then_some(LogState::Open);
                 // The lease body carries the node's load, sampled now.
                 let p = self.machines[node].proc();
                 let load = Load {
@@ -478,6 +481,22 @@ impl World {
         self.after(request_ms, item);
     }
 
+    /// An upload of `content` into a cell epoch's prefix lands, written by
+    /// process `writer`. Every write into a prefix goes through here, so
+    /// the oracle sees each one: who wrote it, and how far the prefix grew.
+    pub(super) fn land_upload(
+        &mut self,
+        writer: &str,
+        cell: &str,
+        epoch: Epoch,
+        content: &[WriteId],
+    ) {
+        self.checker.upload_applied(self.t, writer, cell, epoch);
+        self.store.put(cell, epoch, content);
+        let held = self.store.prefix(cell, epoch).len();
+        self.checker.prefix_grew(self.t, cell, epoch, held);
+    }
+
     /// Draw the fate of one call: its latencies, then the faults that
     /// override them. A partition overrides everything: the call never
     /// gets out.
@@ -619,12 +638,21 @@ impl World {
                 guard,
                 record,
                 load,
-            } => Work::Log(LogWork::LeaseWritten(Event::NodeLeaseCasCompleted {
-                op,
-                now_mono_ms: 0,
-                result: Ok(self.store.cas_lease(&guard, &record, load)),
-                stamped_log_state: record.log_state,
-            })),
+            } => {
+                let result = self.store.cas_lease(&guard, &record, load);
+                let opened = matches!(result, LeaseCasOutcome::Applied { .. })
+                    && record.log_state == Some(LogState::Open);
+                let event = Event::NodeLeaseCasCompleted {
+                    op,
+                    now_mono_ms: 0,
+                    result: Ok(result),
+                    stamped_log_state: record.log_state,
+                };
+                match opened {
+                    true => Work::Log(LogWork::LeaseOpened(event)),
+                    false => core(event),
+                }
+            }
             StoreReq::ReadOwner { op, cell } => core(Event::OwnerRead {
                 op,
                 now_ms: 0,
@@ -696,10 +724,7 @@ impl World {
                 epoch,
                 content,
             } => {
-                self.checker.upload_applied(self.t, &sender, &cell, epoch);
-                self.store.put(&cell, epoch, &content);
-                let held = self.store.prefix(&cell, epoch).len();
-                self.checker.prefix_grew(self.t, &cell, epoch, held);
+                self.land_upload(&sender, &cell, epoch, &content);
                 Work::Replica(ReplicaWork::Uploaded {
                     cell,
                     epoch,
@@ -713,10 +738,7 @@ impl World {
                 fold,
             } => {
                 for (ended, content) in fold {
-                    self.checker.upload_applied(self.t, &sender, &cell, ended);
-                    self.store.put(&cell, ended, &content);
-                    let held = self.store.prefix(&cell, ended).len();
-                    self.checker.prefix_grew(self.t, &cell, ended, held);
+                    self.land_upload(&sender, &cell, ended, &content);
                 }
                 Work::Replica(ReplicaWork::ChainRead {
                     op,

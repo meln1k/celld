@@ -17,7 +17,7 @@ use celld_logic::{
     RestoredAlarm, StopCause,
 };
 
-use super::node_log::FollowerDisk;
+use super::node_log::{FollowerDisk, Upload};
 use super::shell::StoreReq;
 use super::{AgendaKey, Work, World, OPERATION_DEADLINE_MS};
 use crate::{Mutation, WriteId};
@@ -376,7 +376,7 @@ impl World {
         let lineage = replica.lineage;
         self.checker.committed(cell, epoch, lineage, write);
         self.ship(node, cell, epoch);
-        if !self.paced(node) {
+        if self.upload_due(node, Upload::Commit) {
             self.upload(node, cell, epoch);
         }
         Some((write, position))
@@ -456,9 +456,8 @@ impl World {
     }
 
     fn wait_for_upload(&mut self, node: usize, cell: &str, epoch: Epoch, waiter: Waiter) {
-        // A gate in the fleet posture waits for the fleet or the next flush;
-        // an eviction kicks the flush (`handoff_wait`).
-        let kick = !self.paced(node) || matches!(waiter, Waiter::Evict { .. });
+        let evict = matches!(waiter, Waiter::Evict { .. });
+        let kick = self.upload_due(node, Upload::Wait { evict });
         let Some(replica) = self.machines[node]
             .proc_mut()
             .replicas
@@ -605,10 +604,20 @@ impl World {
             replica.uploaded = replica.uploaded.max(len);
             let stopping = replica.stop.is_some();
             self.settle_proofs(node, &cell, epoch);
-            if stopping || !self.paced(node) {
+            if self.upload_due(node, Upload::Landed { stopping }) {
                 self.upload(node, &cell, epoch);
             }
         }
+    }
+
+    /// Every cell epoch whose database the process on `node` holds open.
+    pub(super) fn open_epochs(&self, node: usize) -> Vec<(String, Epoch)> {
+        self.machines[node]
+            .proc()
+            .replicas
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// The open database of `cell` at `epoch`, which the caller knows is
@@ -651,10 +660,7 @@ impl World {
             false
         });
         if fleet_proved {
-            self.stats.fleet_proofs += 1;
-            if let Some(log) = self.machines[node].proc_mut().log.as_mut() {
-                log.proved = true;
-            }
+            self.fleet_proved(node);
         }
         let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
             return;

@@ -140,7 +140,7 @@ impl World {
                 {
                     // `prepare_clean_reload`: upload each database's final
                     // position, and keep its file.
-                    let open: Vec<_> = p.replicas.keys().cloned().collect();
+                    let open = self.open_epochs(node);
                     self.machines[node].proc_mut().shutdown = Some(Shutdown {
                         phase: Phase::Closing,
                         deadline,
@@ -172,12 +172,7 @@ impl World {
         let clean = marker.is_some();
         self.note(|| format!("exit {who} (clean reload: {clean})"));
         if clean {
-            let keep: Vec<_> = self.machines[node]
-                .proc()
-                .replicas
-                .keys()
-                .cloned()
-                .collect();
+            let keep: Vec<_> = self.open_epochs(node);
             self.machines[node].disk.prune_except(&keep);
         }
         // The graceful drain point: seal the log if the bucket has it all.

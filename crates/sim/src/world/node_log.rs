@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use celld_logic::log_tier::LogState;
-use celld_logic::{Epoch, Event, Failure, LeaseCasOutcome, OpId};
+use celld_logic::{Epoch, Event, Failure, OpId};
 
 use super::shell::StoreReq;
 use super::{shutdown, Item, Work, World};
@@ -48,16 +48,12 @@ const PEER_MS: (u64, u64) = (1, 5);
 /// The log a process leads.
 pub(super) struct Log {
     session: String,
-    ensemble: Vec<usize>,
     /// A lease write carrying `Open` landed: fleet proofs may begin.
     open: bool,
     /// The longest database of each cell epoch each follower confirmed.
     confirmed: BTreeMap<(usize, String, Epoch), usize>,
     /// The longest database of each cell epoch shipped so far.
     shipped: BTreeMap<(String, Epoch), usize>,
-    /// The fleet has proved a write for this session
-    /// (`may_have_fleet_acks`).
-    pub(super) proved: bool,
 }
 
 /// What a machine's disk holds as a follower. A wipe loses all of it.
@@ -73,11 +69,24 @@ pub(super) struct FollowerDisk {
     copies: BTreeMap<(String, String, Epoch), Vec<WriteId>>,
 }
 
-/// One session's followers, as its log record names them.
+/// One session as its log record names it: its leader, its followers, and
+/// whether the fleet has proved a write for it (`may_have_fleet_acks`).
 pub(super) struct Session {
     node: usize,
     inc: u64,
     ensemble: Vec<usize>,
+    proved: bool,
+}
+
+/// When the replicator uploads a cell epoch to the bucket.
+pub(super) enum Upload {
+    /// A handler committed a write.
+    Commit,
+    /// A proof waits on the bucket: an output gate's, or an eviction's.
+    Wait { evict: bool },
+    /// An upload landed, and the epoch may still have more to send; its
+    /// stop may be waiting for the last of it.
+    Landed { stopping: bool },
 }
 
 pub(super) enum LogWork {
@@ -100,9 +109,9 @@ pub(super) enum LogWork {
         epoch: Epoch,
         len: usize,
     },
-    /// A lease write came back. If it carried `Open` and applied, the log
-    /// is open.
-    LeaseWritten(Event),
+    /// A lease write carrying `Open` applied: the log is open, and the core
+    /// hears of the write.
+    LeaseOpened(Event),
     /// The bundle loop's tick.
     Flush,
     /// `RecoverNodeLog` for the cells of `owner`, answered `answer_ms`
@@ -118,10 +127,8 @@ impl World {
     pub(super) fn log_work(&mut self, node: usize, work: LogWork) {
         match work {
             LogWork::Join { session } => {
-                if self.machines[node].partition.is_none() {
-                    let joined = &mut self.machines[node].disk.log.joined;
-                    joined.entry(session).or_insert(true);
-                }
+                let joined = &mut self.machines[node].disk.log.joined;
+                joined.entry(session).or_insert(true);
             }
             LogWork::Append {
                 session,
@@ -137,25 +144,13 @@ impl World {
                 epoch,
                 len,
             } => self.confirmed(node, follower, cell, epoch, len),
-            LogWork::LeaseWritten(event) => {
-                if let Event::NodeLeaseCasCompleted {
-                    result: Ok(LeaseCasOutcome::Applied { .. }),
-                    stamped_log_state: Some(LogState::Open),
-                    ..
-                } = &event
-                {
-                    self.log_opened(node);
-                }
+            LogWork::LeaseOpened(event) => {
+                self.log_opened(node);
                 self.drive(node, event);
             }
             LogWork::Flush => {
                 self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
-                let open: Vec<_> = self.machines[node]
-                    .proc()
-                    .replicas
-                    .keys()
-                    .cloned()
-                    .collect();
+                let open: Vec<_> = self.open_epochs(node);
                 for (cell, epoch) in open {
                     self.upload(node, &cell, epoch);
                 }
@@ -209,40 +204,59 @@ impl World {
             let work = Work::Log(LogWork::Join {
                 session: session.clone(),
             });
-            self.peer_send(node, follower, work);
+            self.peer_send(node, follower, None, work);
         }
         let entry = Session {
             node,
             inc,
             ensemble: ensemble.clone(),
+            proved: false,
         };
         self.sessions.insert(session.clone(), entry);
         let who = self.who(node);
         self.checker.log_opened(&who, &ensemble);
         self.machines[node].proc_mut().log = Some(Log {
             session,
-            ensemble,
             open: false,
             confirmed: BTreeMap::new(),
             shipped: BTreeMap::new(),
-            proved: false,
         });
         self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
     }
 
-    /// The log state this process's next lease write must carry.
-    pub(super) fn log_slot(&self, node: usize) -> Option<LogState> {
-        self.machines[node]
-            .proc()
-            .log
-            .as_ref()
-            .map(|_| LogState::Open)
+    /// Whether the replicator uploads now. In the bucket posture every
+    /// write goes up at once. A process that leads a log flushes on the
+    /// bundle loop's tick instead; only an eviction's proof kicks the
+    /// flush (`handoff_wait`), and a stop's final upload runs to the end.
+    pub(super) fn upload_due(&self, node: usize, why: Upload) -> bool {
+        self.machines[node].proc().log.is_none()
+            || match why {
+                Upload::Commit => false,
+                Upload::Wait { evict } => evict,
+                Upload::Landed { stopping } => stopping,
+            }
     }
 
-    /// Whether this process flushes to the bucket on the bundle loop's tick
-    /// rather than after every commit.
-    pub(super) fn paced(&self, node: usize) -> bool {
-        self.machines[node].proc().log.is_some()
+    /// The fleet just proved a write for this process: its session may
+    /// have fleet acks from now on.
+    pub(super) fn fleet_proved(&mut self, node: usize) {
+        self.stats.fleet_proofs += 1;
+        if let Some(log) = self.machines[node].proc().log.as_ref() {
+            let session = log.session.clone();
+            self.session_mut(&session).proved = true;
+        }
+    }
+
+    fn session(&self, session: &str) -> &Session {
+        self.sessions
+            .get(session)
+            .expect("an open log names a session that opened")
+    }
+
+    fn session_mut(&mut self, session: &str) -> &mut Session {
+        self.sessions
+            .get_mut(session)
+            .expect("an open log names a session that opened")
     }
 
     /// The lease now says the log is open: ship everything open.
@@ -254,28 +268,24 @@ impl World {
             return;
         }
         log.open = true;
-        let open: Vec<_> = self.machines[node]
-            .proc()
-            .replicas
-            .keys()
-            .cloned()
-            .collect();
+        let open: Vec<_> = self.open_epochs(node);
         for (cell, epoch) in open {
             self.ship(node, &cell, epoch);
         }
     }
 
-    /// Send work to the process on another machine. A partition on either
-    /// side loses it.
-    fn peer_send(&mut self, from: usize, to: usize, work: Work) {
+    /// Send work to a process on another machine: the one at `inc`, or by
+    /// default whichever runs there now. A partition on either side loses
+    /// it: the sender's when it sends, the receiver's when it arrives.
+    fn peer_send(&mut self, from: usize, to: usize, inc: Option<u64>, work: Work) {
         if self.machines[from].partition.is_some() {
             return;
         }
         let delay = self.net_rng.range(PEER_MS.0, PEER_MS.1);
-        let inc = self.machines[to].inc;
+        let inc = inc.unwrap_or(self.machines[to].inc);
         self.after(
             delay,
-            Item::Proc {
+            Item::Peer {
                 node: to,
                 inc,
                 work,
@@ -297,7 +307,11 @@ impl World {
         }
         let len = log.shipped.entry((cell.to_string(), epoch)).or_default();
         *len = (*len).max(content.len());
-        let (session, ensemble, proved) = (log.session.clone(), log.ensemble.clone(), log.proved);
+        let session = log.session.clone();
+        let Session {
+            ensemble, proved, ..
+        } = self.session(&session);
+        let (ensemble, proved) = (ensemble.clone(), *proved);
         for follower in ensemble {
             let work = Work::Log(LogWork::Append {
                 session: session.clone(),
@@ -307,7 +321,7 @@ impl World {
                 epoch,
                 content: content.clone(),
             });
-            self.peer_send(node, follower, work);
+            self.peer_send(node, follower, None, work);
         }
     }
 
@@ -327,12 +341,9 @@ impl World {
     ) {
         let ignore_seal = self.config.mutation == Some(Mutation::FollowerIgnoresSeal);
         let disk = &mut self.machines[node].disk.log;
-        if (disk.sealed.contains(&session) && !ignore_seal)
-            || self.machines[node].partition.is_some()
-        {
+        if disk.sealed.contains(&session) && !ignore_seal {
             return;
         }
-        let disk = &mut self.machines[node].disk.log;
         disk.joined.entry(session.clone()).or_insert(!proved);
         let copy = disk
             .copies
@@ -355,28 +366,13 @@ impl World {
             epoch,
             len,
         });
-        let (to, inc) = leader;
-        if self.machines[node].partition.is_none() {
-            let delay = self.net_rng.range(PEER_MS.0, PEER_MS.1);
-            self.after(
-                delay,
-                Item::Proc {
-                    node: to,
-                    inc,
-                    work,
-                },
-            );
-        }
+        self.peer_send(node, leader.0, Some(leader.1), work);
     }
 
     /// A follower's confirmation reaches its leader. Once every follower
     /// holds a position, the fleet has proved it.
     fn confirmed(&mut self, node: usize, follower: usize, cell: String, epoch: Epoch, len: usize) {
-        if self.machines[node].partition.is_some() {
-            return;
-        }
-        let p = self.machines[node].proc_mut();
-        let Some(log) = p.log.as_mut() else {
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
         };
         let held = log
@@ -384,9 +380,8 @@ impl World {
             .entry((follower, cell.clone(), epoch))
             .or_default();
         *held = (*held).max(len);
-        let fleet = log
-            .ensemble
-            .iter()
+        let log = self.machines[node].proc().log.as_ref().expect("checked");
+        let fleet = (self.session(&log.session).ensemble.iter())
             .map(|f| {
                 let key = (*f, cell.clone(), epoch);
                 log.confirmed.get(&key).copied().unwrap_or(0)
@@ -423,14 +418,12 @@ impl World {
         if self.machines[by].partition.is_some() {
             return Err(Failure::Ambiguous);
         }
-        let Some(Session {
+        let Session {
             node,
             inc,
             ensemble,
-        }) = self.sessions.get(session)
-        else {
-            unreachable!("an open log names a session that opened");
-        };
+            ..
+        } = self.session(session);
         let (dead, ensemble) = (self.who_at(*node, *inc), ensemble.clone());
         // A member that answers holding the whole session is a witness; one
         // that answers without it, or whose machine is retired, is
@@ -439,10 +432,7 @@ impl World {
         let (mut answering, mut witnessed, mut undecided) = (Vec::new(), false, false);
         for member in ensemble {
             let m = &self.machines[member];
-            let answers = m.partition.is_none()
-                && ((m.booting && !m.retired)
-                    || m.proc.as_ref().is_some_and(|p| p.paused_until.is_none()));
-            if answers {
+            if m.serves_follower_disk() {
                 answering.push(member);
                 witnessed |= m.disk.log.joined.get(session) == Some(&true);
             } else if !m.retired {
@@ -472,10 +462,7 @@ impl World {
             }
         }
         for ((cell, epoch), content) in gathered {
-            self.checker.upload_applied(self.t, &dead, &cell, epoch);
-            self.store.put(&cell, epoch, &content);
-            let held = self.store.prefix(&cell, epoch).len();
-            self.checker.prefix_grew(self.t, &cell, epoch, held);
+            self.land_upload(&dead, &cell, epoch, &content);
         }
         self.store.seal_log(owner, session);
         self.stats.log_recoveries += 1;

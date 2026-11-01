@@ -92,6 +92,9 @@ const PEER_PROTOCOL: u16 = 1;
 enum Item {
     /// Work for one process. Dropped if that process has died since.
     Proc { node: usize, inc: u64, work: Work },
+    /// Work another node's process sent over the network: `Proc`, but lost
+    /// if the receiver's machine is partitioned when it arrives.
+    Peer { node: usize, inc: u64, work: Work },
     /// A bucket request arrives at the bucket and is applied. It applies
     /// even if its sender has died since: it was already on the wire. Its
     /// answer returns after `answer_ms`, or never when the response is lost.
@@ -207,6 +210,15 @@ impl Machine {
 
     fn up(&self) -> bool {
         self.proc.is_some()
+    }
+
+    /// Whether this machine answers a peer about its follower disk now: it
+    /// is reachable, and its process runs, or a boot waits on its
+    /// predecessor while it serves the disk.
+    fn serves_follower_disk(&self) -> bool {
+        self.partition.is_none()
+            && ((self.booting && !self.retired)
+                || self.proc.as_ref().is_some_and(|p| p.paused_until.is_none()))
     }
 
     fn proc(&self) -> &Process {
@@ -587,6 +599,11 @@ impl World {
                         self.after(until - self.t, Item::Proc { node, inc, work });
                     }
                     None => self.proc_work(node, work),
+                }
+            }
+            Item::Peer { node, inc, work } => {
+                if self.machines[node].partition.is_none() {
+                    self.handle(Item::Proc { node, inc, work });
                 }
             }
             Item::StoreApply {
