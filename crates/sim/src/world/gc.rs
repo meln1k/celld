@@ -6,7 +6,8 @@
 //! epochs and plan with `epoch_gc::plan`, which decides nothing unless the
 //! newest listed epoch is the owner's own; only then read the owner record;
 //! then delete each planned prefix. Each step is its own bucket call, so a
-//! fence, a takeover or a late upload can land between any two of them.
+//! fence, a takeover or a late upload can land between any two of them, and
+//! a call already sent applies even if its process dies.
 //!
 //! Every upload here carries the whole database, so each listed prefix is a
 //! base of its own and the chain is the newest one. Listings are consistent,
@@ -17,24 +18,36 @@
 use celld_logic::epoch_gc::{self, ListedEpoch};
 use celld_logic::Epoch;
 
-use super::shell::{Fate, STORE_TIMEOUT_MS};
+use super::shell::StoreReq;
 use super::{Work, World};
 use crate::Mutation;
 
 /// How often a process visits the cells it holds open.
 const GC_TICK_MS: u64 = 5_000;
 
+/// One bucket call of a cell's pass, by the owner of `epoch`.
+#[derive(Debug)]
+pub(super) struct GcReq {
+    cell: String,
+    epoch: Epoch,
+    call: GcCall,
+}
+
+#[derive(Debug)]
+enum GcCall {
+    List,
+    ReadOwner {
+        delete: Vec<Epoch>,
+    },
+    /// Delete the first prefix; the rest go one call at a time after it.
+    Delete {
+        victims: Vec<Epoch>,
+    },
+}
+
 #[derive(Debug)]
 pub(super) enum GcWork {
     Tick,
-    /// One call of a cell's pass reaches the bucket. Its answer comes back
-    /// `answer_ms` later, unless the caller already gave up on it.
-    Apply {
-        cell: String,
-        epoch: Epoch,
-        call: GcCall,
-        answer_ms: Option<u64>,
-    },
     /// The listing came back.
     Listed {
         cell: String,
@@ -42,23 +55,11 @@ pub(super) enum GcWork {
         chain: Vec<Epoch>,
         listed: Vec<ListedEpoch>,
     },
-    /// The owner record came back: whether it names this node at `epoch`.
-    Owned {
+    /// The owner record named this node at `epoch`, or a delete landed:
+    /// delete the next prefix.
+    Delete {
         cell: String,
         epoch: Epoch,
-        owns: bool,
-        delete: Vec<Epoch>,
-    },
-}
-
-#[derive(Debug)]
-pub(super) enum GcCall {
-    List,
-    ReadOwner {
-        delete: Vec<Epoch>,
-    },
-    /// Delete the first prefix, then the rest one call at a time.
-    Delete {
         victims: Vec<Epoch>,
     },
 }
@@ -81,12 +82,6 @@ impl World {
                     self.gc_call(node, cell, epoch, GcCall::List);
                 }
             }
-            GcWork::Apply {
-                cell,
-                epoch,
-                call,
-                answer_ms,
-            } => self.gc_apply(node, cell, epoch, call, answer_ms),
             GcWork::Listed {
                 cell,
                 epoch,
@@ -110,14 +105,13 @@ impl World {
                     self.gc_call(node, cell, epoch, call);
                 }
             }
-            GcWork::Owned {
+            GcWork::Delete {
                 cell,
                 epoch,
-                owns,
-                delete,
+                victims,
             } => {
-                if owns {
-                    self.gc_call(node, cell, epoch, GcCall::Delete { victims: delete });
+                if !victims.is_empty() {
+                    self.gc_call(node, cell, epoch, GcCall::Delete { victims });
                 }
             }
         }
@@ -126,33 +120,13 @@ impl World {
     /// Send one call of a pass. A pass whose call fails ends; the next tick
     /// starts a new one.
     fn gc_call(&mut self, node: usize, cell: String, epoch: Epoch, call: GcCall) {
-        let (apply_ms, answer_ms) = match self.fate(node, STORE_TIMEOUT_MS) {
-            Fate::Answered {
-                request_ms,
-                response_ms,
-            } => (Some(request_ms), Some(response_ms)),
-            Fate::Failed { applies_after, .. } => (applies_after, None),
-        };
-        if let Some(apply_ms) = apply_ms {
-            let work = GcWork::Apply {
-                cell,
-                epoch,
-                call,
-                answer_ms,
-            };
-            self.work(node, apply_ms, Work::Gc(work));
-        }
+        self.store_call(node, StoreReq::Gc(GcReq { cell, epoch, call }));
     }
 
-    fn gc_apply(
-        &mut self,
-        node: usize,
-        cell: String,
-        epoch: Epoch,
-        call: GcCall,
-        answer_ms: Option<u64>,
-    ) {
-        let answer = match call {
+    /// The call reaches the bucket. Returns the work its answer does.
+    pub(super) fn gc_apply(&mut self, node: usize, req: GcReq) -> Work {
+        let GcReq { cell, epoch, call } = req;
+        let work = match call {
             GcCall::List => {
                 let (chain, listed) = self.store.list_epochs(&cell);
                 GcWork::Listed {
@@ -164,12 +138,13 @@ impl World {
             }
             GcCall::ReadOwner { delete } => {
                 let name = &self.machines[node].name;
-                let owns = self.store.owner(&cell) == Some((Some(name.as_str()), epoch));
-                GcWork::Owned {
+                if self.store.owner(&cell) != Some((Some(name.as_str()), epoch)) {
+                    return Work::Nothing;
+                }
+                GcWork::Delete {
                     cell,
                     epoch,
-                    owns,
-                    delete,
+                    victims: delete,
                 }
             }
             GcCall::Delete { mut victims } => {
@@ -180,20 +155,13 @@ impl World {
                 self.checker.epoch_deleted(self.t, &cell, victim, base);
                 self.store.delete_epoch(&cell, victim);
                 self.judge_discoverable(&cell);
-                if victims.is_empty() {
-                    return;
-                }
-                // The next delete goes once this one is answered.
-                GcWork::Owned {
+                GcWork::Delete {
                     cell,
                     epoch,
-                    owns: true,
-                    delete: victims,
+                    victims,
                 }
             }
         };
-        if let Some(answer_ms) = answer_ms {
-            self.work(node, answer_ms, Work::Gc(answer));
-        }
+        Work::Gc(work)
     }
 }

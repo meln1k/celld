@@ -529,7 +529,6 @@
 4247 swarm validated panic: indexed cell op 48 has no owning slot in "c0"
 4282 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4292 swarm validated panic: cell "c3" is firing an alarm while not resident
-4324 swarm validated liveness
 4340 swarm validated liveness
 4349 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4350 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -1402,7 +1401,6 @@
 4134 swarm unvalidated liveness
 4184 swarm unvalidated stale-read
 4217 swarm unvalidated evicted-pinned
-4324 swarm unvalidated liveness
 4340 swarm unvalidated liveness
 4365 swarm unvalidated liveness
 4374 swarm unvalidated liveness

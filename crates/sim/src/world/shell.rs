@@ -12,6 +12,7 @@ use celld_logic::{
 
 use super::alarms::{AlarmWork, Waiter};
 use super::faults::Partition;
+use super::gc::GcReq;
 use super::node_log::LogWork;
 use super::replicator::ReplicaWork;
 use super::{Item, Pending, Work, World, WALL_EPOCH_MS};
@@ -125,6 +126,8 @@ pub(super) enum StoreReq {
         epoch: Epoch,
         fold: bool,
     },
+    /// One step of an owner's epoch GC pass.
+    Gc(GcReq),
     /// Publish the wake entry of the cell's alarm. With `retire`, then
     /// retire the entries it makes obsolete, as `maintain_wake_entry` does.
     Wake {
@@ -605,6 +608,8 @@ impl World {
             } => Work::Alarm(AlarmWork::GateFailed { waiter: *waiter }),
             // Logged and left for a later scan or reconcile.
             StoreReq::Wake { gate: None, .. } => Work::Nothing,
+            // The pass ends; the next tick starts another.
+            StoreReq::Gc(_) => Work::Nothing,
         }
     }
 
@@ -750,6 +755,7 @@ impl World {
                     epoch,
                 }),
             },
+            StoreReq::Gc(req) => self.gc_apply(node, req),
             StoreReq::Wake {
                 cell,
                 alarm,
