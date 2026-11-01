@@ -362,6 +362,11 @@ impl World {
     }
 
     /// List the due wake entries and hint the core about each.
+    ///
+    /// The listing and the lease reads behind the election read the bucket
+    /// directly, at this instant: no latency and no failed calls, only a
+    /// partition stops them. Production's scan retries on its own timer and
+    /// never reports to the core, so a failed listing only delays a hint.
     pub(super) fn wake_scan(&mut self, node: usize) {
         self.work(node, WAKE_TICK_MS, Work::Alarm(AlarmWork::Scan));
         let p = self.machines[node].proc();
@@ -384,9 +389,7 @@ impl World {
             .iter()
             .find(|m| live(self, &m.name))
             .is_some_and(|m| m.name == me);
-        let mut due = self.store.wake_due(now as i64);
-        due.dedup_by(|a, b| a.0 == b.0);
-        for (cell, entry_ms) in due {
+        for (cell, entry_ms) in self.store.wake_due(now as i64) {
             let scope = if elected {
                 let owner = self.store.owner(&cell).and_then(|(owner, _)| owner);
                 let owner_live = owner.is_some_and(|owner| live(self, owner));

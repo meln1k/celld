@@ -101,6 +101,8 @@ impl World {
         let source = self.machines[node].name.clone();
         let now = self.wall(node);
         // The lease listing is a bucket read; a partitioned node gets none.
+        // It reads the bucket at this instant, with no latency or failed
+        // call: a failed listing would only search again later.
         let peers = match self.machines[node].partition {
             Some(_) => Vec::new(),
             None => self.store.capacity_peers(),

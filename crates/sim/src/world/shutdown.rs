@@ -27,14 +27,23 @@ const SHUTDOWN_POLL_MS: u64 = 50;
 /// A shutdown under way, and when it gives up.
 #[derive(Clone, Copy)]
 pub(super) struct Shutdown {
-    pub(super) mode: Mode,
+    phase: Phase,
     deadline: Time,
 }
 
+/// The shutdown an operator asks for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
     Drain,
     Preserve,
+}
+
+/// Where a shutdown has got to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Draining,
+    /// Admitted requests and cold work finish.
+    Preserving,
     /// The preserve drained: final uploads before the marker.
     Closing,
 }
@@ -60,7 +69,7 @@ impl World {
     pub(super) fn preserving(&self, node: usize) -> bool {
         self.machines[node].proc.as_ref().is_some_and(|p| {
             p.shutdown
-                .is_some_and(|s| matches!(s.mode, Mode::Preserve | Mode::Closing))
+                .is_some_and(|s| matches!(s.phase, Phase::Preserving | Phase::Closing))
         })
     }
 
@@ -70,7 +79,11 @@ impl World {
             return;
         }
         let deadline = self.t + SHUTDOWN_DEADLINE_MS;
-        p.shutdown = Some(Shutdown { mode, deadline });
+        let phase = match mode {
+            Mode::Drain => Phase::Draining,
+            Mode::Preserve => Phase::Preserving,
+        };
+        p.shutdown = Some(Shutdown { phase, deadline });
         // Until the restart that follows it is over, the fleet is disturbed.
         self.disturbed_until(deadline + 3 * self.config.ttl_ms);
         let who = self.who(node);
@@ -80,7 +93,7 @@ impl World {
                 self.note(|| format!("drain {who}"));
                 self.drive(node, Event::ReleaseAll);
             }
-            Mode::Preserve | Mode::Closing => {
+            Mode::Preserve => {
                 self.stats.preserves += 1;
                 self.note(|| format!("preserve {who}"));
                 self.drive(node, Event::BeginPreserve);
@@ -91,14 +104,14 @@ impl World {
 
     fn shutdown_poll(&mut self, node: usize) {
         let p = self.machines[node].proc();
-        let Shutdown { mode, deadline } = p.shutdown.expect("shutting down");
+        let Shutdown { phase, deadline } = p.shutdown.expect("shutting down");
         let s = &p.state;
         if self.t >= deadline {
             return self.exit(node, None);
         }
-        match mode {
+        match phase {
             // `core_drained` for a handoff in `main.rs`.
-            Mode::Drain => {
+            Phase::Draining => {
                 let drained = s.occupied() == 0
                     && s.activating() == 0
                     && s.quiescing() == 0
@@ -110,7 +123,7 @@ impl World {
                 }
             }
             // A preserve waits for its requests and its cold work.
-            Mode::Preserve => {
+            Phase::Preserving => {
                 if !p.pending.values().any(|p| matches!(p, Pending::Client(_)))
                     && s.activating() == 0
                     && s.evicting() == 0
@@ -119,7 +132,7 @@ impl World {
                     // position, and keep its file.
                     let open: Vec<_> = p.replicas.keys().cloned().collect();
                     self.machines[node].proc_mut().shutdown = Some(Shutdown {
-                        mode: Mode::Closing,
+                        phase: Phase::Closing,
                         deadline,
                     });
                     for (cell, epoch) in open {
@@ -127,7 +140,7 @@ impl World {
                     }
                 }
             }
-            Mode::Closing => {
+            Phase::Closing => {
                 if self.all_uploaded(node) {
                     // The marker is written only while the node still holds
                     // its lease.

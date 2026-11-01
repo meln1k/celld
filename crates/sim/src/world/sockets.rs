@@ -6,8 +6,9 @@
 //!
 //! The shell also closes a socket when the core asks (`CloseWebSocket`),
 //! when a handoff cancels the cell's activity (`CancelCellActivity`), and
-//! when its process dies. Each close but the last is reported to the core
-//! (`WebSocketClosed`), as `actor.rs` does.
+//! when its process dies. Every close but one on a process's death is
+//! reported to the core (`WebSocketClosed`), as `actor.rs` does: a dead
+//! process has no core to tell.
 
 use std::collections::VecDeque;
 

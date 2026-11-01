@@ -466,7 +466,12 @@ impl World {
 
     /// The process on `node`, by name and incarnation: `n0#2`.
     fn who(&self, node: usize) -> String {
-        format!("{}#{}", self.machines[node].name, self.machines[node].inc)
+        self.who_at(node, self.machines[node].inc)
+    }
+
+    /// Incarnation `inc` of the process on `node`.
+    fn who_at(&self, node: usize, inc: u64) -> String {
+        format!("{}#{inc}", self.machines[node].name)
     }
 
     /// The machine's wall clock: true time, plus its skew and steps.
@@ -595,7 +600,7 @@ impl World {
         if resume_generation.is_some() {
             // The predecessor handed its epochs over: they are this
             // process's to run and to upload into now.
-            let (old, new) = (format!("n{node}#{}", inc - 1), self.who(node));
+            let (old, new) = (self.who_at(node, inc - 1), self.who(node));
             self.checker.reloaded(&old, &new);
         }
         let spec = NodeLeaseSpec {

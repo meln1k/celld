@@ -556,7 +556,7 @@ impl World {
         answer_ms: Option<u64>,
     ) {
         let name = self.machines[node].name.clone();
-        let sender = format!("{name}#{inc}");
+        let sender = self.who_at(node, inc);
         let core = Work::Deliver;
         let reply = match req {
             StoreReq::ReadSelfLease { op } => core(Event::SelfNodeLeaseRead {

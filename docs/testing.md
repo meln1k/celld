@@ -86,10 +86,9 @@ simulated bucket. A simulated shell carries out each effect the way
 write and answers through the output gate. A handler can also call a third
 party mid-request, which waits at the gate too, and can upgrade its request to
 a WebSocket, whose messages are requests of their own. Top-level Worker
-requests borrow idle resident isolates. Some clients give up
-before they
-hear back, an operator evicts cells by hand and shuts nodes down, a balancer
-gives idle cells away, and the log tier nudges node leases. A node that shuts
+requests borrow idle resident isolates. Some clients give up before they hear
+back, an operator evicts cells by hand and shuts nodes down, a balancer gives
+idle cells away, and the log tier nudges node leases. A node that shuts
 down or gives a cell away offers it to its peers until one acquires it, as
 `AdoptReleased` and the peer's handoff endpoint do in production. A node can
 also be replaced in place: its process preserves its cells and exits, and the
@@ -174,7 +173,14 @@ The core on `main` fails some seeds.
   suspend, which `CLOCK_MONOTONIC` does not count, does the same. Writes
   stay safe. The test suite excuses a stale read only in a run with skewed,
   stepped or suspended clocks, and runs chaos with true clocks too.
-- **Ten `State::validate` invariants:**
+- **Stale reads after a slow clean reload.** A replacement process decides
+  to resume its databases in place when it reads its predecessor's lease
+  unexpired, not when its own lease write lands. If that write lands
+  after the old lease expired, a peer may already have taken a cell over
+  at a newer epoch, and the replacement serves reads from the old one.
+  One seed in 100,000 (swarm 30084) needs no clock fault for this; the
+  suite's seeds do not hit it, so one that did would fail.
+- **Eleven `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.
   - The same in `Inactive`: a client gives up on the only request for a cell
@@ -198,15 +204,18 @@ The core on `main` fails some seeds.
   - `occupied counter N disagrees with the walk N`: the startup scan finds
     two live epochs of one cell on disk, which production leaves until
     `prune_stale_live`.
+  - `activation waiter … is queued twice`: the same scan, for a cell that
+    a request is also waiting on.
 - **A capacity livelock.** A full fleet can pass an unowned cell between
   peers that are all at their residency cap, so the cell is never served.
 
-In 100,000 swarm seeds, 10,114 failed in a debug build: 9,455 on the
-invariants (5,131 of them on live transports), 620 on stale reads, 38 on
-liveness and one on an alarm that a livelocked cell never fired. With validation compiled out, 954 failed: 734 on stale reads,
-176 on `evicted-pinned` (the core goes on to evict a cell whose live
-transport the invariant would have caught), 43 on liveness and the same
-unfired alarm. The test suite allows only the known failures, by name.
+In 100,000 swarm seeds, 10,223 failed in a debug build: 9,558 on the
+invariants (5,167 of them on live transports), 625 on stale reads and 40 on
+liveness. With validation compiled out, 960 failed: 735 on stale reads, 180
+on `evicted-pinned` (the core goes on to evict a cell whose live transport
+the invariant would have caught), 44 on liveness and one on an alarm that a
+livelocked cell never fired. The test suite allows only the known failures,
+by name.
 
 ```
 cargo test -p celld-sim                                    # the suite

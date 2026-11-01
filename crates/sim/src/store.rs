@@ -268,12 +268,19 @@ impl Store {
     }
 
     /// `due_scan`: every wake entry due by `now_ms`, as (cell, due).
+    /// Entries are filed by the minute they fall due in, so one is listed
+    /// from the start of that minute, under it. Each cell is listed once, at
+    /// its earliest minute.
     pub fn wake_due(&self, now_ms: i64) -> Vec<(String, i64)> {
-        self.wake
+        let mut due: Vec<(String, i64)> = self
+            .wake
             .iter()
-            .filter(|(_, at_ms)| **at_ms <= now_ms)
-            .map(|((cell, _), at_ms)| (cell.clone(), *at_ms))
-            .collect()
+            .map(|((cell, _), at_ms)| (cell.clone(), at_ms.div_euclid(60_000) * 60_000))
+            .filter(|(_, minute_ms)| *minute_ms <= now_ms)
+            .collect();
+        due.sort();
+        due.dedup_by(|a, b| a.0 == b.0);
+        due
     }
 
     /// Who the bucket's owner record names for `cell`, and at which epoch.
