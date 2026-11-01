@@ -47,6 +47,11 @@ pub struct SimConfig {
     pub cancel_probability: f64,
     /// Share of requests whose handler upgrades them to a WebSocket.
     pub websocket_probability: f64,
+    /// Share of handlers that call out to a third party mid-request.
+    pub effect_probability: f64,
+    /// Share of client sends that are top-level Worker requests, for no
+    /// cell.
+    pub worker_probability: f64,
     /// What the operator and the rest of each node do unprompted.
     pub operator: Operator,
     /// The core's residency cap: residents plus cells being activated.
@@ -200,6 +205,8 @@ impl SimConfig {
             write_probability: 0.6,
             cancel_probability: 0.0,
             websocket_probability: 0.02,
+            effect_probability: 0.1,
+            worker_probability: 0.1,
             operator: Operator {
                 evictions: 30.0,
                 nudges: 6.0,
@@ -294,7 +301,10 @@ impl SimConfig {
             idle_evict_ms: r.chance(0.3).then(|| r.range(500, 5_000)),
             // Drawn last, so the draws above keep the shapes they had.
             cancel_probability: *r.pick(&[0.0, 0.02, 0.1]).unwrap(),
-            websocket_probability: *r.pick(&[0.0, 0.002, 0.01]).unwrap(),
+            // A quarter of the seeds: see `chaos`.
+            websocket_probability: *r.pick(&[0.0, 0.0, 0.0, 0.005]).unwrap(),
+            effect_probability: *r.pick(&[0.0, 0.1, 0.5]).unwrap(),
+            worker_probability: *r.pick(&[0.0, 0.1, 0.3]).unwrap(),
             operator: Operator::draw(r),
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
@@ -395,6 +405,11 @@ pub struct Stats {
     pub resumed: u64,
     /// WebSockets handlers opened.
     pub sockets: u64,
+    /// Handlers' calls to third parties the gate let out.
+    pub effects: u64,
+    /// Worker requests, and those that ran in a resident cell's isolate.
+    pub workers: u64,
+    pub workers_resident: u64,
 }
 
 /// What a run produced.

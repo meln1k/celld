@@ -28,6 +28,18 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
             "seed {seed}: {:?}",
             outcome.stats
         );
+        // Handlers' calls left through the gate, and Worker requests
+        // borrowed resident isolates.
+        assert!(
+            outcome.stats.effects > 20,
+            "seed {seed}: {:?}",
+            outcome.stats
+        );
+        assert!(
+            outcome.stats.workers_resident > 20,
+            "seed {seed}: {:?}",
+            outcome.stats
+        );
     }
 }
 

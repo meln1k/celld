@@ -19,6 +19,7 @@
 //! - `shutdown`: graceful shutdowns, which drain or preserve a node.
 //! - `handoff`: draining and rebalancing, which hand cells to peers.
 //! - `sockets`: WebSockets the workload opens, and the messages on them.
+//! - `workers`: top-level Worker requests, which can borrow a resident.
 //! - `liveness`: the probe and the audit that end every run.
 //!
 //! A node is a [`Machine`] with a disk. The [`Process`] on it can die and
@@ -36,8 +37,9 @@ mod replicator;
 mod shell;
 mod shutdown;
 mod sockets;
+mod workers;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -50,7 +52,7 @@ use crate::checks::Checker;
 use crate::store::Store;
 use crate::{Mutation, Outcome, Rng, SimConfig, Stats, WriteId};
 
-use clients::{Bounce, Op, Req, Via};
+use clients::{Bounce, Gate, Op, Req, Via};
 use faults::{Fault, Partition};
 use handoff::{Adoption, Answer, Offer};
 use liveness::Goal;
@@ -171,6 +173,10 @@ enum Work {
     AdoptSearch { op: OpId },
     /// A peer answered the donor's offer.
     OfferAnswered { op: OpId, answer: Answer },
+    /// A handler calls out to a third party.
+    HandlerEffect { request: RequestId },
+    /// A top-level Worker request reaches the node.
+    WorkerRequest,
     /// A client sends on its WebSocket.
     SocketMessage { websocket: WebSocketId },
     /// A client closes its WebSocket.
@@ -268,6 +274,10 @@ struct Process {
     offers: BTreeMap<RequestId, Offer>,
     /// The WebSockets this process holds open.
     sockets: BTreeMap<WebSocketId, Socket>,
+    /// Handlers' calls held at the output gate, by gate request.
+    gates: BTreeMap<RequestId, Gate>,
+    /// Worker requests waiting for the core to pick an isolate.
+    workers: BTreeSet<RequestId>,
 }
 
 impl Process {
@@ -289,6 +299,8 @@ impl Process {
             adoptions: BTreeMap::new(),
             offers: BTreeMap::new(),
             sockets: BTreeMap::new(),
+            gates: BTreeMap::new(),
+            workers: BTreeSet::new(),
         }
     }
 }
@@ -511,6 +523,8 @@ impl World {
             Work::Rebalance { cells } => self.drive(node, Event::Rebalance { cells }),
             Work::AdoptSearch { op } => self.adopt_search(node, op),
             Work::OfferAnswered { op, answer } => self.offer_answered(node, op, answer),
+            Work::HandlerEffect { request } => self.handler_effect(node, request),
+            Work::WorkerRequest => self.worker_request(node),
             Work::SocketMessage { websocket } => self.socket_message(node, websocket),
             Work::SocketClosed { websocket } => self.socket_closed(node, websocket),
             Work::Nudge => self.drive(

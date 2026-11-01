@@ -173,6 +173,18 @@ impl RouteRetry {
     }
 }
 
+/// An effect a handler raised (a `fetch()` to a third party), held at the
+/// output gate: what it can reveal, sampled when the handler raised it.
+pub(super) struct Gate {
+    cell: String,
+    epoch: Epoch,
+    committed: Option<(WriteId, u64)>,
+    seen: Vec<WriteId>,
+    sent_at: Time,
+    position: Option<u64>,
+    observed: Option<u64>,
+}
+
 /// One delivery of a client request to one node's core.
 pub(super) struct Req {
     op: u64,
@@ -205,8 +217,16 @@ impl World {
     pub(super) fn client_new(&mut self) {
         let cell = format!("c{}", self.work_rng.below(self.config.cells as u64));
         let ingress = self.pick_ingress();
-        let write = self.work_rng.chance(self.config.write_probability);
-        self.send(cell, write, ingress, None);
+        if self.work_rng.chance(self.config.worker_probability) {
+            // A top-level Worker request, for no cell.
+            if let Some(node) = ingress {
+                let delay = self.net_rng.range(1, 3);
+                self.work(node, delay, Work::WorkerRequest);
+            }
+        } else {
+            let write = self.work_rng.chance(self.config.write_probability);
+            self.send(cell, write, ingress, None);
+        }
 
         let (lo, hi) = self.config.request_gap_ms;
         let gap = self.work_rng.range(lo, hi);
@@ -612,7 +632,91 @@ impl World {
         if write {
             self.work(node, commit, Work::HandlerCommit { request });
         }
+        if self.work_rng.chance(self.config.effect_probability) {
+            let at = self.work_rng.range(commit, end);
+            self.work(node, at, Work::HandlerEffect { request });
+        }
         self.work(node, end, Work::HandlerEnd { request });
+    }
+
+    /// The handler calls out to a third party. The call can reveal what it
+    /// has seen, so it waits at the output gate: the shell routes a gate
+    /// request for the cell (`GateRequestAt`), then holds the call as an
+    /// output until the core releases it.
+    pub(super) fn handler_effect(&mut self, node: usize, request: RequestId) {
+        let Some(req) = self.machines[node].proc().requests.get(&request) else {
+            return;
+        };
+        let (cell, epoch, committed, sent_at) = (
+            req.cell.clone(),
+            req.epoch.unwrap(),
+            req.committed,
+            req.sent_at,
+        );
+        let Some((opened, saw)) = self.positions(node, &cell, epoch) else {
+            return;
+        };
+        let (position, observed) = match committed {
+            Some(_) => (Some(saw), None),
+            None => (None, (saw > opened).then_some(saw)),
+        };
+        let observed = observed.filter(|_| self.config.mutation != Some(Mutation::ReadsBypassGate));
+        let seen = self.seen(node, &cell, epoch).unwrap().to_vec();
+        let gate = self.next_request;
+        self.next_request += 1;
+        let held = Gate {
+            cell: cell.clone(),
+            epoch,
+            committed,
+            seen,
+            sent_at,
+            position,
+            observed,
+        };
+        self.machines[node].proc_mut().gates.insert(gate, held);
+        let event = Event::GateRequestAt {
+            request: gate,
+            cell,
+            now_mono_ms: 0,
+        };
+        self.drive(node, event);
+    }
+
+    /// The core routed a gate request. Returns false when the request is
+    /// not a gate. Routed here, the held call becomes an output; routed
+    /// anywhere else, the cell left mid-call and the call fails closed.
+    pub(super) fn gate_routed(
+        &mut self,
+        node: usize,
+        request: RequestId,
+        result: &Result<Route, RequestError>,
+    ) -> bool {
+        let p = self.machines[node].proc_mut();
+        let Some(gate) = p.gates.get(&request) else {
+            return false;
+        };
+        let delay = self.net_rng.range(0, 2);
+        match result {
+            Ok(Route::Local) => {
+                let event = Event::OutputAt {
+                    request,
+                    channel: Channel::Fetch,
+                    position: gate.position,
+                    observed: gate.observed,
+                    epoch: Some(gate.epoch),
+                    now_mono_ms: 0,
+                };
+                self.deliver(node, delay, event);
+            }
+            Ok(Route::Remote { .. }) => {
+                p.gates.remove(&request);
+                self.deliver(node, delay, Event::ActivityFinished { request });
+            }
+            Err(_) => {
+                p.gates.remove(&request);
+            }
+        }
+        true
     }
 
     /// The handler's write goes into the open database, and the replicator
@@ -703,7 +807,10 @@ impl World {
         channel: Channel,
         result: Result<(), RequestError>,
     ) {
-        assert_eq!(channel, Channel::Response, "handlers only answer");
+        if channel == Channel::Fetch {
+            return self.gate_released(node, request, result);
+        }
+        assert_eq!(channel, Channel::Response, "handlers answer or fetch");
         let Some(req) = self.machines[node].proc_mut().requests.remove(&request) else {
             return;
         };
@@ -729,6 +836,31 @@ impl World {
             req.sent_at,
         );
         self.settle(req.op, true);
+    }
+
+    /// The gate let a handler's call leave, or refused it. One that left
+    /// revealed what its handler had seen, so the oracle judges it as it
+    /// judges a response. Either way the gate's pin on the cell ends.
+    fn gate_released(&mut self, node: usize, request: RequestId, result: Result<(), RequestError>) {
+        let Some(gate) = self.machines[node].proc_mut().gates.remove(&request) else {
+            return;
+        };
+        if result.is_ok() {
+            self.stats.effects += 1;
+            let who = self.who(node);
+            self.checker.response_released(
+                self.t,
+                &self.store,
+                &who,
+                &gate.cell,
+                gate.epoch,
+                gate.committed,
+                &gate.seen,
+                gate.sent_at,
+            );
+        }
+        let delay = self.net_rng.range(0, 2);
+        self.deliver(node, delay, Event::ActivityFinished { request });
     }
 
     /// The client hears its answer. Only the first one counts: a request

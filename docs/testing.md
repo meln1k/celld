@@ -83,8 +83,10 @@ protocol variants verify that the checkers detect the faults.
 `celld-logic` cores in one thread, on one simulated clock, against one
 simulated bucket. A simulated shell carries out each effect the way
 `crates/celld/actor.rs` does. A cell is a scripted handler that can commit one
-write and answers through the output gate. A handler can upgrade its request
-to a WebSocket, whose messages are requests of their own. Some clients give up
+write and answers through the output gate. A handler can also call a third
+party mid-request, which waits at the gate too, and can upgrade its request to
+a WebSocket, whose messages are requests of their own. Top-level Worker
+requests borrow idle resident isolates. Some clients give up
 before they
 hear back, an operator evicts cells by hand and shuts nodes down, a balancer
 gives idle cells away, and the log tier nudges node leases. A node that shuts

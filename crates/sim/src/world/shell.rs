@@ -250,9 +250,14 @@ impl World {
                 immediate.push_back(Event::Published { op, result: Ok(()) });
             }
             Effect::Complete { request, result } => {
-                if !self.offer_routed(node, request, &result, immediate) {
+                if !self.offer_routed(node, request, &result, immediate)
+                    && !self.gate_routed(node, request, &result)
+                {
                     self.complete(node, request, result, immediate)
                 }
+            }
+            Effect::CompleteWorker { request, route } => {
+                self.worker_routed(node, request, route, immediate)
             }
             Effect::AwaitDurable {
                 op,
@@ -664,7 +669,8 @@ pub(super) fn stamp(event: &mut Event, wall: u64, mono: u64) {
         | Event::CapacityRequestAt { now_mono_ms, .. }
         | Event::OutputAt { now_mono_ms, .. }
         | Event::LoadSampled { now_mono_ms, .. }
-        | Event::EvictRequested { now_mono_ms, .. } => *now_mono_ms = mono,
+        | Event::EvictRequested { now_mono_ms, .. }
+        | Event::GateRequestAt { now_mono_ms, .. } => *now_mono_ms = mono,
         Event::OwnerRead { now_ms, .. } | Event::NodeLeaseRead { now_ms, .. } => *now_ms = wall,
         _ => {}
     }
