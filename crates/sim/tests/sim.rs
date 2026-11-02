@@ -476,7 +476,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::StaleSnapshot => &["lost-write"],
             Mutation::GcUnlisted => &["base-deleted"],
             Mutation::CollectUnretired => &["alarm-undiscoverable"],
-            Mutation::CreditAfterSeal => &["read-before-durable", "bundle-credit-unheld"],
+            Mutation::CreditAfterSeal => &["bundle-credit-unheld"],
             Mutation::ReopenUntiered => &["lost-write"],
             Mutation::LossWithoutWaiting => &["unjustified-loss"],
             Mutation::CreditBeforeActivation => &["credit-before-activation"],

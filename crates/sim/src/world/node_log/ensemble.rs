@@ -3,10 +3,15 @@
 //!
 //! - A member that has not confirmed a frame within the backstop degrades
 //!   the shipper: nothing ships, and the gate rides the bundle loop.
+//! - `maintain` runs from the posture watch while the shipper is degraded,
+//!   about once a second, and from the 30 s maintenance tick in any
+//!   posture. It reads the peers' leases, a bucket call that can fail, and
+//!   recruits the first two live by this node's clock. A healthy log
+//!   reconfigures only to grow wider (denoland/celld#245).
 //! - Once the bucket holds everything the log shipped, of open databases
 //!   and tails (`may_reconfigure`), the degraded leader reopens the log at
-//!   the next log epoch with up to two live peers, by a lease write that
-//!   applies only while the lease is still its own and open.
+//!   the next log epoch with them, by a lease write that applies only while
+//!   the lease is still its own and open.
 //! - The new epoch has no fleet acks yet, and its fragments start where the
 //!   old epoch's shipping stopped.
 
@@ -18,9 +23,14 @@ use crate::Mutation;
 use celld_logic::log_tier::LogState;
 use celld_logic::Epoch;
 
-/// How often a degraded shipper tries to re-recruit its ensemble
-/// (`maintain`, from the posture watch).
-const MAINTAIN_MS: u64 = 1_000;
+/// The posture watch's poll.
+pub(super) const WATCH_MS: u64 = 250;
+/// How often the maintenance loop runs `maintain`, healthy or not
+/// (`LOG_MAINTENANCE_TICK_MS`).
+pub(super) const TICK_MS: u64 = 30_000;
+/// The repair cadence while degraded, and its cap.
+pub(super) const REPAIR_MS: u64 = 1_000;
+const REPAIR_MAX_MS: u64 = 10_000;
 
 impl World {
     /// A frame's backstop ran out. A member that has not confirmed it
@@ -55,42 +65,81 @@ impl World {
         log.posture = Posture::Degraded;
         let (session, epoch) = (log.session.clone(), log.epoch);
         self.note(|| format!("n{node} degrades {session} epoch {epoch}: {why}"));
-        self.work(node, MAINTAIN_MS, Work::Log(LogWork::Maintain));
     }
 
-    /// The degraded shipper's tick (`maintain`): once no frame is still
-    /// waiting on its members and every database's shipped rows are in the
-    /// bucket, its own and its tails' (`may_reconfigure`), reopen the log
-    /// at the next epoch with up to two live peers. Until then, and while a
-    /// reopen is in flight, try again.
+    /// The posture watch's poll (`node_log_posture_watch`): while the
+    /// shipper is degraded, try a repair about once a second, backing off
+    /// to the swap cadence after passes that stepped the epoch and still
+    /// left it degraded.
+    pub(super) fn watch(&mut self, node: usize) {
+        self.work(node, WATCH_MS, Work::Log(LogWork::Watch));
+        let t = self.t;
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return;
+        };
+        if log.posture == Posture::Shipping {
+            log.repair_ms = REPAIR_MS;
+            return;
+        }
+        if t.saturating_sub(log.repair_tried) >= log.repair_ms {
+            log.repair_tried = t;
+            self.maintain(node);
+        }
+    }
+
+    /// `maintain`, from the posture watch or the maintenance tick. A
+    /// healthy log at full width has nothing to do. Otherwise read the
+    /// peers' leases, a bucket call that can fail; the pass goes on in
+    /// `peers_read`.
     pub(super) fn maintain(&mut self, node: usize) {
         let Some(log) = self.machines[node].proc().log.as_ref() else {
             return;
         };
-        if log.posture == Posture::Shipping {
+        let width = self.session(&log.session).ensemble.len();
+        if log.pass.is_some() || (log.posture == Posture::Shipping && width >= FOLLOWERS) {
             return;
         }
-        let waiting = log.posture == Posture::Reopening || !log.pending.is_empty();
-        self.work(node, MAINTAIN_MS, Work::Log(LogWork::Maintain));
-        let untiered = self.config.mutation == Some(Mutation::ReopenUntiered);
-        if waiting || !(untiered || self.all_shipped_tiered(node)) {
+        let log = self.machines[node]
+            .proc_mut()
+            .log
+            .as_mut()
+            .expect("checked");
+        log.pass = Some(log.epoch);
+        self.store_call(node, StoreReq::ReadPeers);
+    }
+
+    /// The pass's peer read answered, with every lease's node and expiry,
+    /// in the bucket's listing order. Recruit the first two peers live by
+    /// this node's own clock. A healthy shipper with as many members has
+    /// nothing to gain. Otherwise degrade it, and once no frame waits on
+    /// its members and every database's shipped rows are in the bucket,
+    /// its own and its tails' (`may_reconfigure`), reopen the log at the
+    /// next epoch with them.
+    pub(super) fn peers_read(&mut self, node: usize, peers: Option<Vec<(usize, u64)>>) {
+        let Some(log) = self.machines[node].proc().log.as_ref() else {
             return;
-        }
+        };
+        let Some(peers) = peers.filter(|_| log.pass.is_some()) else {
+            return self.pass_ended(node);
+        };
         let now = self.wall(node);
-        let mut peers: Vec<usize> = (0..self.machines.len())
-            .filter(|&m| m != node && !self.machines[m].retired)
-            .filter(|&m| {
-                let lease = self.store.read_lease(&self.machines[m].name);
-                lease.is_some_and(|lease| lease.expires_ms > now)
-            })
+        let members: Vec<usize> = (peers.into_iter())
+            .filter(|&(peer, expires_ms)| peer != node && expires_ms > now)
+            .map(|(peer, _)| peer)
+            .take(FOLLOWERS)
             .collect();
-        let mut ensemble = Vec::new();
-        while ensemble.len() < FOLLOWERS && !peers.is_empty() {
-            let i = self.net_rng.below(peers.len() as u64) as usize;
-            ensemble.push(peers.remove(i));
+        let width = self.session(&log.session).ensemble.len();
+        if log.posture == Posture::Shipping {
+            if members.len() <= width {
+                return self.pass_ended(node);
+            }
+            self.degrade(node, "a wider ensemble is available");
         }
-        if ensemble.is_empty() {
-            return;
+        let log = self.machines[node].proc().log.as_ref().expect("checked");
+        let untiered = self.config.mutation == Some(Mutation::ReopenUntiered);
+        let barrier = log.pending.is_empty() && (untiered || self.all_shipped_tiered(node));
+        if !barrier || members.is_empty() {
+            return self.pass_ended(node);
         }
         let log = self.machines[node]
             .proc_mut()
@@ -102,9 +151,26 @@ impl World {
         let req = StoreReq::Reopen {
             session: log.session.clone(),
             from: log.epoch,
-            ensemble,
+            ensemble: members,
         };
         self.store_call(node, req);
+    }
+
+    /// A maintain pass ended. The repair cadence resets while healthy, and
+    /// doubles, up to the swap cadence, after a pass that stepped the epoch
+    /// but left the shipper degraded.
+    fn pass_ended(&mut self, node: usize) {
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return;
+        };
+        let Some(before) = log.pass.take() else {
+            return;
+        };
+        log.repair_ms = if log.posture != Posture::Shipping && log.epoch != before {
+            (2 * log.repair_ms).min(REPAIR_MAX_MS)
+        } else {
+            REPAIR_MS
+        };
     }
 
     /// `may_reconfigure`'s barrier: every row the log shipped of an open
@@ -162,7 +228,7 @@ impl World {
         };
         log.posture = Posture::Degraded;
         let Some((epoch, ensemble)) = record.filter(|(epoch, _)| *epoch > log.epoch) else {
-            return;
+            return self.pass_ended(node);
         };
         log.epoch = epoch;
         log.published = log.published.max(epoch);
@@ -173,6 +239,7 @@ impl World {
         let session = log.session.clone();
         self.note(|| format!("n{node} reopens {session} at epoch {epoch} with {ensemble:?}"));
         self.checker.log_opened(&who, &ensemble);
+        self.pass_ended(node);
         for (cell, epoch) in self.open_epochs(node) {
             self.ship(node, &cell, epoch);
         }

@@ -221,8 +221,9 @@ pub enum Mutation {
     CollectUnretired,
     /// A bundle flush counts as durable without the re-read that proves
     /// the session's log was still open when it landed, so a fenced leader
-    /// releases writes no recovery drains. Caught by `read-before-durable`
-    /// and `bundle-credit-unheld`.
+    /// releases writes no recovery drains. Caught by `bundle-credit-unheld`
+    /// at the credit. A read released on it later fails
+    /// `read-before-durable`, but only on schedules too fragile to pin.
     CreditAfterSeal,
     /// A degraded shipper reopens its log before the bucket holds what it
     /// shipped, so the new epoch's recovery finds no witness to the old

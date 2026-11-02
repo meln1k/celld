@@ -48,10 +48,10 @@
 //!   one. Fold and recovery read the current epoch's members only.
 //!
 //! Not modelled: gray-failure eviction (`log_evict`'s latency verdicts and
-//! quarantine), the swap rate cap, recruiting a healthy log that runs below
-//! its width, reading peers' leases through a call that can fail (the
-//! reopen reads the bucket directly), compaction of bundle rows into
-//! per-cell objects, and bundle GC (bundles are never deleted).
+//! quarantine), the swap rate cap, recruitment at startup (a process opens
+//! its log with the machines it finds, and a process that starts alone
+//! never opens one), compaction of bundle rows into per-cell objects, and
+//! bundle GC (bundles are never deleted).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -101,6 +101,12 @@ pub(super) struct Log {
     bundling: bool,
     /// Whether this log epoch's record says it may have fleet acks.
     activation: Activation,
+    /// A maintain pass is in flight, begun at this log epoch.
+    pass: Option<u64>,
+    /// When the posture watch last tried a repair, and how long it waits
+    /// before the next.
+    repair_tried: super::Time,
+    repair_ms: u64,
     /// The newest log epoch whose record this process published: a reopen
     /// publishes the next one before its lease write, and from then on
     /// no activation of an earlier one applies (`activate` compares the
@@ -250,8 +256,13 @@ pub(super) enum LogWork {
     Bundled(Flushed),
     /// A frame's backstop ran out: every member must have confirmed it.
     Backstop { log_epoch: u64, frame: u64 },
-    /// The degraded shipper's maintenance tick.
-    Maintain,
+    /// The posture watch's poll.
+    Watch,
+    /// The maintenance loop's tick.
+    Tick,
+    /// A maintain pass's read of the peers' leases answered: each lease's
+    /// machine and expiry, or nothing if the read failed.
+    PeersRead(Option<Vec<(usize, u64)>>),
     /// A reopen's lease write answered: the record's epoch and ensemble
     /// if it moved past the shipper's, or nothing.
     Reopened(Option<(u64, Vec<usize>)>),
@@ -293,7 +304,12 @@ impl World {
                 len,
             } => self.confirmed(node, follower, (log_epoch, frame), cell, epoch, len),
             LogWork::Backstop { log_epoch, frame } => self.backstop(node, log_epoch, frame),
-            LogWork::Maintain => self.maintain(node),
+            LogWork::Watch => self.watch(node),
+            LogWork::Tick => {
+                self.work(node, ensemble::TICK_MS, Work::Log(LogWork::Tick));
+                self.maintain(node);
+            }
+            LogWork::PeersRead(peers) => self.peers_read(node, peers),
             LogWork::Reopened(record) => self.reopened(node, record),
             LogWork::LeaseApplied { event, acks } => {
                 self.log_opened(node);
@@ -410,8 +426,13 @@ impl World {
             bundling: false,
             activation: Activation::Idle,
             published: 1,
+            pass: None,
+            repair_tried: 0,
+            repair_ms: ensemble::REPAIR_MS,
         });
         self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
+        self.work(node, ensemble::WATCH_MS, Work::Log(LogWork::Watch));
+        self.work(node, ensemble::TICK_MS, Work::Log(LogWork::Tick));
     }
 
     /// Whether the replicator uploads now. In the bucket posture every

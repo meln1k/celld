@@ -136,6 +136,8 @@ pub(super) enum StoreReq {
         log_epoch: u64,
         rows: Vec<Row>,
     },
+    /// A maintain pass reads the peers' leases (`read_capacity_peers`).
+    ReadPeers,
     /// A degraded shipper's lease write that reopens its log at the epoch
     /// after `from` with `ensemble`.
     Reopen {
@@ -635,6 +637,7 @@ impl World {
             StoreReq::Gc(_) => Work::Nothing,
             StoreReq::Bundle { .. } => Work::Log(LogWork::Bundled(Flushed::Failed)),
             StoreReq::Reopen { .. } => Work::Log(LogWork::Reopened(None)),
+            StoreReq::ReadPeers => Work::Log(LogWork::PeersRead(None)),
             StoreReq::Waker(req) => World::waker_failed(req),
         }
     }
@@ -793,6 +796,15 @@ impl World {
             } => Work::Log(LogWork::Bundled(
                 self.apply_bundle(&name, &session, log_epoch, rows),
             )),
+            StoreReq::ReadPeers => {
+                let peers = (self.store.capacity_peers().into_iter())
+                    .filter_map(|peer| {
+                        let machine = self.machines.iter().position(|m| m.name == peer.node)?;
+                        Some((machine, peer.expires_ms))
+                    })
+                    .collect();
+                Work::Log(LogWork::PeersRead(Some(peers)))
+            }
             StoreReq::Reopen {
                 session,
                 from,
