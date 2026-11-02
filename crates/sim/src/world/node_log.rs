@@ -70,7 +70,11 @@ use super::{shutdown, Item, Work, World, OPERATION_DEADLINE_MS};
 use crate::store::Row;
 use crate::{Mutation, WriteId};
 
+mod activation;
 mod ensemble;
+mod evict;
+
+use activation::Activation;
 
 /// How often the bundle loop flushes to the bucket (`CELLD_LOG_FLUSH_MS`).
 const FLUSH_MS: u64 = 2_000;
@@ -78,9 +82,6 @@ const FLUSH_MS: u64 = 2_000;
 const FOLLOWERS: usize = 2;
 /// One-way latency between two nodes.
 const PEER_MS: (u64, u64) = (1, 5);
-/// How long an activation waits for a lease write to carry it before the
-/// session counts as fenced (`OwnLog::write`).
-const ACTIVATION_MS: u64 = 10_000;
 /// How long an append may stay unconfirmed before it fails and the
 /// shipper degrades ("member append failed"): the lane's deadline,
 /// `log_evict`'s backstop plus 100 ms.
@@ -129,21 +130,6 @@ pub(super) struct Log {
     /// no activation of an earlier one applies (`activate` compares the
     /// published record with its own).
     published: u64,
-}
-
-/// The activation fence (`LiveLogTransitions::activate`): before the first
-/// fleet credit of a log epoch, a lease write must carry its record with
-/// `may_have_fleet_acks` set, so that a recovery that reads the record
-/// knows the fleet may hold acknowledged writes.
-enum Activation {
-    /// No fleet proof yet at this log epoch.
-    Idle,
-    /// The record is published in memory and the core nudged to renew; the
-    /// proofs made meanwhile wait for an applied lease write to carry it:
-    /// each a cell epoch and how many of its writes the fleet holds.
-    Waiting(Vec<(String, Epoch, usize)>),
-    /// A lease write carrying it applied, and its answer came back.
-    Done,
 }
 
 /// Whether a log ships to its ensemble.
@@ -319,10 +305,7 @@ pub(super) enum LogWork {
 impl World {
     pub(super) fn log_work(&mut self, node: usize, work: LogWork) {
         match work {
-            LogWork::Join { session } => {
-                let joined = &mut self.machines[node].disk.log.joined;
-                joined.entry(session).or_default();
-            }
+            LogWork::Join { session } => self.join(node, session),
             LogWork::Append {
                 session,
                 leader,
@@ -346,87 +329,87 @@ impl World {
             } => self.confirmed(node, follower, (log_epoch, frame), cell, epoch, len),
             LogWork::Backstop { log_epoch, frame } => self.backstop(node, log_epoch, frame),
             LogWork::Watch => self.watch(node),
-            LogWork::Probe { leader, started } => {
-                let work = Work::Log(LogWork::ProbeAnswered {
-                    follower: node,
-                    started,
-                });
-                let fsync = self.gray_delay(node);
-                self.peer_send_after(node, leader.0, Some(leader.1), work, fsync);
-            }
+            LogWork::Probe { leader, started } => self.answer_probe(node, leader, started),
             LogWork::ProbeAnswered { follower, started } => self.probed(node, follower, started),
             LogWork::ProbeDeadline { follower, started } => {
                 self.probe_settled(node, follower, started);
             }
-            LogWork::Tick => {
-                self.work(node, ensemble::TICK_MS, Work::Log(LogWork::Tick));
-                self.maintain(node);
-            }
+            LogWork::Tick => self.tick(node),
             LogWork::PeersRead(peers) => self.peers_read(node, peers),
             LogWork::Reopened(record) => self.reopened(node, record),
-            LogWork::LeaseApplied { event, acks } => {
-                self.log_opened(node);
-                if let Some(log_epoch) = acks {
-                    self.activated(node, log_epoch);
-                }
-                self.drive(node, event);
-            }
-            LogWork::ActivationTimeout { log_epoch } => {
-                let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
-                    return;
-                };
-                if log.epoch == log_epoch && matches!(log.activation, Activation::Waiting(_)) {
-                    // The proofs waiting on it never credit; the next one
-                    // tries again (`activated` stays false).
-                    log.activation = Activation::Idle;
-                    self.degrade(node, "activation transition not applied");
-                }
-            }
-            LogWork::Flush => {
-                self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
-                let rows = self.flush_rows(node);
-                let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
-                    return;
-                };
-                if log.bundling || rows.is_empty() {
-                    return;
-                }
-                log.bundling = true;
-                let req = StoreReq::Bundle {
-                    session: log.session.clone(),
-                    log_epoch: log.epoch,
-                    rows,
-                };
-                self.store_call(node, req);
-            }
-            LogWork::Bundled(flushed) => {
-                let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
-                    return;
-                };
-                log.bundling = false;
-                match flushed {
-                    Flushed::Failed => {}
-                    Flushed::Credited(rows) => self.bundled(node, rows),
-                    // Only the shipper that owned the flush's epoch.
-                    Flushed::Refused { log_epoch } if log_epoch == log.epoch => {
-                        self.degrade(node, "the record moved under a bundle flush");
-                    }
-                    Flushed::Refused { .. } => {}
-                }
-            }
+            LogWork::LeaseApplied { event, acks } => self.lease_applied(node, event, acks),
+            LogWork::ActivationTimeout { log_epoch } => self.activation_timeout(node, log_epoch),
+            LogWork::Flush => self.flush(node),
+            LogWork::Bundled(flushed) => self.flush_ended(node, flushed),
             LogWork::Recover {
                 op,
                 owner,
                 answer_ms,
-            } => {
-                let result = match self.config.mutation {
-                    Some(Mutation::SkipLogRecovery) => Ok(()),
-                    _ => self.recover(node, &owner),
-                };
-                if let Some(delay) = answer_ms {
-                    self.deliver(node, delay, Event::NodeLogRecovered { op, result });
-                }
+            } => self.recover_op(node, op, &owner, answer_ms),
+        }
+    }
+
+    /// A leader asks this machine's disk to follow its session.
+    fn join(&mut self, node: usize, session: String) {
+        let joined = &mut self.machines[node].disk.log.joined;
+        joined.entry(session).or_default();
+    }
+
+    /// A lease write carrying `Open` applied: the log is open, an
+    /// activation it carried applies, and the core hears of the write.
+    fn lease_applied(&mut self, node: usize, event: Event, acks: Option<u64>) {
+        self.log_opened(node);
+        if let Some(log_epoch) = acks {
+            self.activated(node, log_epoch);
+        }
+        self.drive(node, event);
+    }
+
+    /// The bundle loop's tick: flush every open database with writes past
+    /// what the bucket covers, unless the last flush is still in flight.
+    fn flush(&mut self, node: usize) {
+        self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
+        let rows = self.flush_rows(node);
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return;
+        };
+        if log.bundling || rows.is_empty() {
+            return;
+        }
+        log.bundling = true;
+        let req = StoreReq::Bundle {
+            session: log.session.clone(),
+            log_epoch: log.epoch,
+            rows,
+        };
+        self.store_call(node, req);
+    }
+
+    /// A bundle flush ended.
+    fn flush_ended(&mut self, node: usize, flushed: Flushed) {
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return;
+        };
+        log.bundling = false;
+        match flushed {
+            Flushed::Failed => {}
+            Flushed::Credited(rows) => self.bundled(node, rows),
+            // Only the shipper that owned the flush's epoch.
+            Flushed::Refused { log_epoch } if log_epoch == log.epoch => {
+                self.degrade(node, "the record moved under a bundle flush");
             }
+            Flushed::Refused { .. } => {}
+        }
+    }
+
+    /// `RecoverNodeLog` for the cells of `owner`.
+    fn recover_op(&mut self, node: usize, op: OpId, owner: &str, answer_ms: Option<u64>) {
+        let result = match self.config.mutation {
+            Some(Mutation::SkipLogRecovery) => Ok(()),
+            _ => self.recover(node, owner),
+        };
+        if let Some(delay) = answer_ms {
+            self.deliver(node, delay, Event::NodeLogRecovered { op, result });
         }
     }
 
@@ -517,68 +500,6 @@ impl World {
         self.stats.fleet_proofs += 1;
     }
 
-    /// The log epoch a lease write's body marks as maybe having fleet acks:
-    /// the current one, once its activation began.
-    pub(super) fn activation_stamp(&self, node: usize) -> Option<u64> {
-        let log = self.machines[node].proc().log.as_ref()?;
-        let current = log.published == log.epoch;
-        (current && !matches!(log.activation, Activation::Idle)).then_some(log.epoch)
-    }
-
-    /// A lease write carrying `log_epoch`'s record with
-    /// `may_have_fleet_acks` applies: a recovery reads it from now on, if
-    /// the record is still at that epoch.
-    pub(super) fn apply_activation(&mut self, session: &str, log_epoch: u64) {
-        if let Some(entry) = self.sessions.get_mut(session) {
-            if entry.epoch == log_epoch {
-                entry.proved = true;
-            }
-        }
-    }
-
-    /// The answer to a lease write that carried the activation came back:
-    /// credit every proof that waited on it.
-    fn activated(&mut self, node: usize, log_epoch: u64) {
-        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
-            return;
-        };
-        if log.epoch != log_epoch || !matches!(log.activation, Activation::Waiting(_)) {
-            return;
-        }
-        if log.published != log_epoch {
-            log.activation = Activation::Idle;
-            return self.degrade(node, "activation transition not applied");
-        }
-        let Activation::Waiting(held) = std::mem::replace(&mut log.activation, Activation::Done)
-        else {
-            unreachable!("checked");
-        };
-        for (cell, epoch, fleet) in held {
-            self.fleet_credit(node, &cell, epoch, fleet);
-        }
-    }
-
-    /// The fleet holds `fleet` writes of a cell epoch, and the record says
-    /// it may have fleet acks: credit them to the gate.
-    fn fleet_credit(&mut self, node: usize, cell: &str, epoch: Epoch, fleet: usize) {
-        let who = self.who(node);
-        if let Some(content) = self.seen(node, cell, epoch) {
-            let proved = content[..fleet.min(content.len())].to_vec();
-            self.checker.fleet_proof(self.t, &who, cell, epoch, &proved);
-        }
-        let log = self.machines[node]
-            .proc()
-            .log
-            .as_ref()
-            .expect("a log credits");
-        let (session, log_epoch) = (log.session.clone(), log.epoch);
-        if !self.session(&session).proved {
-            self.checker
-                .credit_unactivated(self.t, &who, cell, epoch, log_epoch);
-        }
-        self.fleet_reached(node, cell, epoch, fleet);
-    }
-
     fn session(&self, session: &str) -> &Session {
         self.sessions
             .get(session)
@@ -659,22 +580,21 @@ impl World {
         let (frame, ensemble) = (entry.frames, entry.ensemble.clone());
         let backstop = Work::Log(LogWork::Backstop { log_epoch, frame });
         self.work(node, APPEND_DEADLINE_MS, backstop);
+        let mono = self.mono(node);
+        let names: Vec<String> = (ensemble.iter())
+            .map(|&f| self.machines[f].name.clone())
+            .collect();
         let log = self.machines[node]
             .proc_mut()
             .log
             .as_mut()
             .expect("checked");
         log.pending.insert(frame, BTreeSet::new());
-        let mono = self.mono(node);
-        for follower in ensemble {
-            let name = self.machines[follower].name.clone();
-            let log = self.machines[node]
-                .proc_mut()
-                .log
-                .as_mut()
-                .expect("checked");
-            log.health.append_started(&name, mono);
+        for (&follower, name) in ensemble.iter().zip(&names) {
+            log.health.append_started(name, mono);
             log.sent.insert((frame, follower), mono);
+        }
+        for follower in ensemble {
             let work = Work::Log(LogWork::Append {
                 session: session.clone(),
                 leader,
@@ -803,32 +723,7 @@ impl World {
         if fleet == 0 {
             return;
         }
-        let early = self.config.mutation == Some(Mutation::CreditBeforeActivation);
-        let log = self.machines[node]
-            .proc_mut()
-            .log
-            .as_mut()
-            .expect("checked");
-        let log_epoch = log.epoch;
-        match &mut log.activation {
-            Activation::Done => return self.fleet_credit(node, &cell, epoch, fleet),
-            Activation::Waiting(held) => held.push((cell.clone(), epoch, fleet)),
-            Activation::Idle => {
-                // Publish the record with the flag and nudge the core into
-                // renewing now; the next applied lease write carries it.
-                log.activation = Activation::Waiting(vec![(cell.clone(), epoch, fleet)]);
-                let timeout = Work::Log(LogWork::ActivationTimeout { log_epoch });
-                self.work(node, ACTIVATION_MS, timeout);
-                let nudge = Event::NudgeNodeLease {
-                    now_ms: 0,
-                    now_mono_ms: 0,
-                };
-                self.deliver(node, 1, nudge);
-            }
-        }
-        if early {
-            self.fleet_credit(node, &cell, epoch, fleet);
-        }
+        self.fleet_proof(node, &cell, epoch, fleet);
     }
 
     /// A bundle's PUT applies, and its rows are in the bucket whatever
