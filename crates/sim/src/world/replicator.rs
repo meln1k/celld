@@ -28,6 +28,10 @@ use crate::{Mutation, WriteId};
 /// in `ltx_repl.rs`). The gate's proof spends it as
 /// `celld_logic::durability` says; an eviction's waits it out once.
 const PROOF_BUDGET_MS: u64 = 10_000;
+/// How many credited bundle rows past the per-cell coverage queue a
+/// compaction round (`CELLD_LTX_COMPACTION_MIN_TXIDS`, 256 in production,
+/// scaled to the simulator's short histories).
+const COMPACTION_MIN_WRITES: usize = 4;
 
 /// A node's disk: the database files no process has open.
 #[derive(Default)]
@@ -81,6 +85,12 @@ pub(super) struct Replica {
     /// Length a credited bundle flush covers (`durable_txid`): durable for
     /// the output gate, but not in the per-cell layout a restore reads.
     bundled: usize,
+    /// Length a compaction folded into the per-cell prefix
+    /// (`compacted_txid`): with `uploaded`, the per-cell coverage
+    /// (`percell_coverage`).
+    compacted: usize,
+    /// A compaction round is in flight (`queued`): one at a time.
+    compacting: bool,
     /// Length every follower of the process's log confirmed holding.
     fleet: usize,
     uploading: bool,
@@ -158,6 +168,13 @@ pub(super) enum ReplicaWork {
         epoch: Epoch,
         op: OpId,
     },
+    /// A compaction round ended: the per-cell prefix holds `len` writes of
+    /// the epoch, or nobody knows.
+    Compacted {
+        cell: String,
+        epoch: Epoch,
+        len: Option<usize>,
+    },
     /// The bucket answered a restore's chain read, after any fold: with
     /// the chain, or refusing the restore.
     ChainRead {
@@ -183,6 +200,7 @@ impl World {
                 epoch,
                 chain,
             } => self.chain_read(node, op, cell, epoch, chain),
+            ReplicaWork::Compacted { cell, epoch, len } => self.compacted(node, cell, epoch, len),
         }
     }
 
@@ -263,7 +281,7 @@ impl World {
             // and is not in the per-cell layout yet: keep it as a tail
             // (`note_undrained_tail`).
             let acked = self.shipped_len(node, &key.0, epoch).max(replica.bundled);
-            if acked > replica.uploaded {
+            if acked > replica.uploaded.max(replica.compacted) {
                 let durable = replica.uploaded.max(replica.bundled);
                 let tail = Tail { acked, durable };
                 self.machines[node]
@@ -409,6 +427,8 @@ impl World {
             // What it opened with is already in the bucket, below this epoch.
             uploaded: len,
             bundled: 0,
+            compacted: 0,
+            compacting: false,
             fleet: 0,
             uploading: false,
             capture_len: 0,
@@ -652,8 +672,52 @@ impl World {
             if let Some(replica) = p.replicas.get_mut(&key) {
                 replica.bundled = replica.bundled.max(len);
                 self.settle_proofs(node, &cell, epoch);
+                self.compact_due(node, &cell, epoch);
             }
         }
+    }
+
+    /// Queue a compaction round if credited bundles cover enough rows past
+    /// the per-cell coverage (`maybe_queue_compaction`): it folds this
+    /// session's bundle rows of the epoch into its per-cell prefix.
+    fn compact_due(&mut self, node: usize, cell: &str, epoch: Epoch) {
+        let Some(session) = self.log_session(node) else {
+            return;
+        };
+        let p = self.machines[node].proc_mut();
+        let Some(replica) = p.replicas.get_mut(&(cell.to_string(), epoch)) else {
+            return;
+        };
+        let covered = replica.uploaded.max(replica.compacted);
+        if replica.compacting || replica.bundled < covered + COMPACTION_MIN_WRITES {
+            return;
+        }
+        replica.compacting = true;
+        let req = StoreReq::Compact {
+            session,
+            cell: cell.to_string(),
+            epoch,
+        };
+        self.store_call(node, req);
+    }
+
+    /// A compaction round ended.
+    fn compacted(&mut self, node: usize, cell: String, epoch: Epoch, len: Option<usize>) {
+        let p = self.machines[node].proc_mut();
+        let Some(replica) = p.replicas.get_mut(&(cell, epoch)) else {
+            return;
+        };
+        replica.compacting = false;
+        if let Some(len) = len {
+            replica.compacted = replica.compacted.max(len);
+        }
+    }
+
+    /// What the per-cell layout holds of the cell epoch, as far as this
+    /// process knows (`percell_coverage`), if it holds the epoch open.
+    pub(super) fn percell_here(&self, node: usize, cell: &str, epoch: Epoch) -> Option<usize> {
+        let replicas = &self.machines[node].proc().replicas;
+        (replicas.get(&(cell.to_string(), epoch))).map(|r| r.uploaded.max(r.compacted))
     }
 
     /// How much of the cell epoch the bucket covers for this process: its

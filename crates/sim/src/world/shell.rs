@@ -136,6 +136,19 @@ pub(super) enum StoreReq {
         log_epoch: u64,
         rows: Vec<Row>,
     },
+    /// A compaction round: fold `session`'s bundle rows of a cell epoch
+    /// into its per-cell prefix (`compact_cell`, `BundleOverlayClient`).
+    Compact {
+        session: String,
+        cell: String,
+        epoch: Epoch,
+    },
+    /// Bundle GC deletes bundles of `session` it found covered
+    /// (`delete_many`).
+    DeleteBundles {
+        session: String,
+        seqs: Vec<u64>,
+    },
     /// A maintain pass reads the peers' leases (`read_capacity_peers`).
     ReadPeers,
     /// A degraded shipper's lease write that reopens its log at the epoch
@@ -637,6 +650,13 @@ impl World {
             StoreReq::Gc(_) => Work::Nothing,
             StoreReq::Bundle { .. } => Work::Log(LogWork::Bundled(Flushed::Failed)),
             StoreReq::Reopen { .. } => Work::Log(LogWork::Reopened(None)),
+            StoreReq::Compact { cell, epoch, .. } => Work::Replica(ReplicaWork::Compacted {
+                cell: cell.clone(),
+                epoch: *epoch,
+                len: None,
+            }),
+            // The next tick lists them again.
+            StoreReq::DeleteBundles { .. } => Work::Nothing,
             StoreReq::ReadPeers => Work::Log(LogWork::PeersRead(None)),
             StoreReq::Waker(req) => World::waker_failed(req),
         }
@@ -796,6 +816,22 @@ impl World {
             } => Work::Log(LogWork::Bundled(
                 self.apply_bundle(&name, &session, log_epoch, rows),
             )),
+            StoreReq::Compact {
+                session,
+                cell,
+                epoch,
+            } => {
+                let len = self.apply_compaction(&sender, &session, &cell, epoch);
+                Work::Replica(ReplicaWork::Compacted {
+                    cell,
+                    epoch,
+                    len: Some(len),
+                })
+            }
+            StoreReq::DeleteBundles { session, seqs } => {
+                self.delete_bundles(&session, &seqs);
+                Work::Nothing
+            }
             StoreReq::ReadPeers => {
                 let peers = (self.store.capacity_peers().into_iter())
                     .filter_map(|peer| {

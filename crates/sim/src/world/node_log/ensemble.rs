@@ -204,6 +204,7 @@ impl World {
     pub(super) fn tick(&mut self, node: usize) {
         self.work(node, TICK_MS, Work::Log(LogWork::Tick));
         self.maintain(node, false);
+        self.gc_bundles(node);
     }
 
     /// Whether a round is outstanding (`outstanding`): a frame some lane

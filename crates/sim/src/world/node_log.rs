@@ -59,8 +59,8 @@
 //! incapable-peer quarantine (every simulated peer can follow), hedged
 //! retransmission of a slow append (`run_hedged`), recruitment at startup
 //! (a process opens its log with the machines it finds, and a process
-//! that starts alone never opens one), compaction of bundle rows into
-//! per-cell objects, and bundle GC (bundles are never deleted).
+//! that starts alone never opens one), and the epoch opener's forced
+//! compaction (`queue_epoch_opener`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -74,6 +74,7 @@ use crate::store::Row;
 use crate::{Mutation, WriteId};
 
 mod activation;
+mod bundle_gc;
 mod ensemble;
 mod evict;
 
@@ -508,6 +509,11 @@ impl World {
             }
     }
 
+    /// The session of the log this process leads, if it leads one.
+    pub(super) fn log_session(&self, node: usize) -> Option<String> {
+        (self.machines[node].proc().log.as_ref()).map(|log| log.session.clone())
+    }
+
     /// The longest database of the cell epoch the process's log shipped.
     pub(super) fn shipped_len(&self, node: usize, cell: &str, epoch: Epoch) -> usize {
         let log = self.machines[node].proc().log.as_ref();
@@ -840,6 +846,7 @@ impl World {
             return;
         }
         if recovered {
+            self.gc_stale_generations(node);
             self.start(node);
         } else {
             self.note(|| format!("boot n{node} waits for its predecessor's log"));

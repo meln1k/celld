@@ -209,7 +209,7 @@ fn main() {
          handler calls released {}, worker requests {} ({} on a resident), deploys {}\n\
          alarms set {}, alarms fired {} ({} proven), wake hints {}\n\
          fleet proofs {}, logs recovered {}, writes lost to a declared loss {}, \
-         epochs deleted {}\n\
+         epochs deleted {}, compactions {}, bundles deleted {}\n\
          load samples shedding on memory {}",
         stats.evictions,
         stats.evicted,
@@ -230,6 +230,8 @@ fn main() {
         stats.log_recoveries,
         stats.fleet_losses,
         stats.epochs_deleted,
+        stats.compactions,
+        stats.bundles_deleted,
         stats.shedding_samples
     );
     for w in &outcome.watched {

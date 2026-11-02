@@ -34,6 +34,9 @@ use crate::{Mutation, WriteId};
 /// One row of a bundle: a cell epoch's database as the flush carried it.
 pub type Row = (String, Epoch, Vec<WriteId>);
 
+/// A bundle row without its writes: its cell epoch and how many it holds.
+pub type RowLen = (String, Epoch, usize);
+
 /// The load a node reports in its lease body, sampled when it writes it.
 /// Peers read it to choose where an unowned cell should land.
 #[derive(Clone, Debug)]
@@ -74,8 +77,12 @@ pub struct Store {
     retired: BTreeSet<(String, Epoch)>,
     /// Node bundles, `log/<session>/bundle/<seq>`: the rows one flush of a
     /// session's bundle loop carried, each a cell epoch's database. No
-    /// restore reads them; a fold or a recovery copies them into prefixes.
+    /// restore reads them; a fold, a recovery or a compaction copies them
+    /// into prefixes, and bundle GC deletes them.
     bundles: BTreeMap<(String, u64), Vec<Row>>,
+    /// Each session's last bundle sequence number: the flusher's counter,
+    /// so a deleted bundle's key is never used again.
+    bundle_seq: BTreeMap<String, u64>,
     /// Wake entries: (cell, installation) → when it is due, wall clock ms.
     wake: BTreeMap<(String, PublicationId), i64>,
     /// Each cell's retirement certificate, `wake/retired/<cell>`: the newest
@@ -239,14 +246,48 @@ impl Store {
 
     /// `put_bundle`: one flush of `session`'s bundle loop.
     pub fn put_bundle(&mut self, session: &str, rows: Vec<Row>) {
+        let seq = self.bundle_seq.entry(session.to_string()).or_default();
+        *seq += 1;
+        self.bundles.insert((session.to_string(), *seq), rows);
+    }
+
+    /// Every bundle of `session` still in the bucket: its sequence number,
+    /// and each row's cell epoch and length.
+    pub fn bundles_of(&self, session: &str) -> Vec<(u64, Vec<RowLen>)> {
         let range = (session.to_string(), 0)..=(session.to_string(), u64::MAX);
-        let seq = self
-            .bundles
-            .range(range)
-            .next_back()
-            .map_or(0, |(k, _)| k.1)
-            + 1;
-        self.bundles.insert((session.to_string(), seq), rows);
+        (self.bundles.range(range))
+            .map(|((_, seq), rows)| {
+                let rows = (rows.iter())
+                    .map(|(cell, epoch, content)| (cell.clone(), *epoch, content.len()))
+                    .collect();
+                (*seq, rows)
+            })
+            .collect()
+    }
+
+    /// Delete bundles of `session` (`delete_many`), returning the rows the
+    /// deleted ones carried. A bundle already gone is skipped.
+    pub fn delete_bundles(&mut self, session: &str, seqs: &[u64]) -> Vec<Row> {
+        (seqs.iter())
+            .filter_map(|seq| self.bundles.remove(&(session.to_string(), *seq)))
+            .flatten()
+            .collect()
+    }
+
+    /// Every session with bundles whose name starts with `prefix`.
+    pub fn bundle_sessions(&self, prefix: &str) -> Vec<String> {
+        let mut sessions: Vec<String> = (self.bundles.keys())
+            .filter(|(session, _)| session.starts_with(prefix))
+            .map(|(session, _)| session.clone())
+            .collect();
+        sessions.dedup();
+        sessions
+    }
+
+    /// How long the live prefix of a cell epoch is: what its objects hold,
+    /// not counting the base below it or a retired mark.
+    pub fn prefix_len(&self, cell: &str, epoch: Epoch) -> usize {
+        (self.prefixes.get(&(cell.to_string(), epoch))).map_or(0, Vec::len)
     }
 
     /// The longest row of each cell epoch in `session`'s bundles: of `cell`

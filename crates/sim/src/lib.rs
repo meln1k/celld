@@ -237,10 +237,13 @@ pub enum Mutation {
     /// without waiting for the lease write that marks the record as maybe
     /// having fleet acks. Caught by `credit-before-activation`.
     CreditBeforeActivation,
+    /// Bundle GC deletes every bundle of its session, covered or not.
+    /// Caught by `bundle-deleted-uncovered`.
+    GcUncovered,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 28] = [
+    pub const ALL: [Mutation; 29] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -269,6 +272,7 @@ impl Mutation {
         Mutation::ReopenUntiered,
         Mutation::LossWithoutWaiting,
         Mutation::CreditBeforeActivation,
+        Mutation::GcUncovered,
     ];
 }
 
@@ -603,6 +607,10 @@ pub struct Stats {
     pub fleet_losses: u64,
     /// Epoch prefixes epoch GC deleted.
     pub epochs_deleted: u64,
+    /// Compaction rounds that folded bundle rows into a prefix, and
+    /// bundles bundle GC deleted.
+    pub compactions: u64,
+    pub bundles_deleted: u64,
     /// Handlers' error answers that reached their clients.
     pub errors: u64,
     /// Load samples after which a node was shedding on memory pressure.

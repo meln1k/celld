@@ -189,3 +189,8 @@ impl World {
 pub(super) fn generation(node: usize, inc: u64) -> String {
     format!("g{node}.{inc}")
 }
+
+/// What every generation of `node` starts with.
+pub(super) fn generations_of(node: usize) -> String {
+    format!("g{node}.")
+}

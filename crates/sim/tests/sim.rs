@@ -480,6 +480,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::ReopenUntiered => &["lost-write"],
             Mutation::LossWithoutWaiting => &["unjustified-loss"],
             Mutation::CreditBeforeActivation => &["credit-before-activation"],
+            Mutation::GcUncovered => &["bundle-deleted-uncovered"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -504,7 +505,8 @@ fn every_planted_bug_is_caught_by_its_check() {
             | Mutation::FollowerIgnoresSeal
             | Mutation::FollowerCorrupts
             | Mutation::LossWithoutWaiting
-            | Mutation::CreditBeforeActivation => SimConfig {
+            | Mutation::CreditBeforeActivation
+            | Mutation::GcUncovered => SimConfig {
                 fleet: true,
                 ..crashing_and_pausing()
             },

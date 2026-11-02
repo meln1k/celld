@@ -127,7 +127,13 @@ Half of the swarm seeds run the fleet posture (`CELLD_DURABILITY=fleet`,
   database with writes past what the bucket covers. A bundle counts for the
   gate only if the record is still open at its log epoch when it lands;
   otherwise its shipper degrades. It counts for no restore: a stop's final
-  upload, a fold or a recovery copies its rows into the cell's prefix.
+  upload, a fold or a recovery copies its rows into the cell's prefix, and
+  so does compaction: once credited bundles cover a few rows of an open
+  cell epoch past its prefix, its owner folds them in. On the 30 s tick,
+  bundle GC deletes every bundle of its own session whose rows the per-cell
+  layout covers, judging an epoch it holds open by its own coverage; a boot
+  that recovered its predecessor deletes every earlier generation's
+  bundles.
 - The first fleet proof of each log epoch waits for the activation fence:
   a lease write must carry the record with `may_have_fleet_acks` set before
   any proof of that epoch credits. Without one within 10 s, the shipper
@@ -302,50 +308,54 @@ core, not to the simulator or to the property itself.
   the log's newest ensemble never fsynced.
 - **credit-before-activation**: a recovery or a fold read a log record as
   having no fleet acks at a log epoch at which the fleet proved writes.
+- **bundle-deleted-uncovered**: bundle GC deleted a bundle holding an
+  acknowledged write that no per-cell prefix holds.
 
 **deploy-stuck**, **idle-not-evicted**, **memory-not-relieved** and
 **reopen-stuck** judge only
 once the fleet is quiet, 15 s after the faults end, so that a bucket call lost
 just before the end has timed out. The others judge at the moment their fact
 arrives. **unclaimed-handoff**, **base-deleted**, **unjustified-loss**,
-**bundle-credit-unheld**, **fleet-proof-unbacked** and
-**credit-before-activation** have never fired on the
+**bundle-credit-unheld**, **fleet-proof-unbacked**,
+**credit-before-activation** and **bundle-deleted-uncovered** have never
+fired on the
 current simulator, and **alarm-undiscoverable** fires only after a known
 bug lost the write behind it, so each has a planted bug that the test suite
 requires it to catch, as it does for an enforced check. The sweep below is the evidence that the others can
 fire, except **deploy-stuck**, which has never fired, so nothing yet shows
 that it can. In 100,000 swarm seeds:
 
-- 383 seeds kept an idle cell resident, 343 of them in a run where a
+- 406 seeds kept an idle cell resident, 364 of them in a run where a
   walk-down had wedged: the core evicts idle cells only while it is not
   shedding.
-- 320 seeds claimed during a preserve or the close that follows it, never
+- 293 seeds claimed during a preserve or the close that follows it, never
   during a drain. An eviction already in flight finishes, or an owner read
   lands, and the core claims the cell, though `begin_preserve` retires cold
   work.
-- 54 seeds (60 with validation compiled out) resumed a superseded epoch:
+- 49 seeds (54 with validation compiled out) resumed a superseded epoch:
   after faulty clocks, the slow clean reload below, or a claim during a
   preserve. Fewer seeds reload cleanly than before: a node that has evicted a
   cell to a snapshot never does (the shell bug below).
-- 13 seeds (14 with validation compiled out) left an acknowledged alarm with
-  no wake entry due by its time: all but one after a failed activation
-  handed its cell away (below) and lost the write that set it, and one
-  after the slow clean reload below (swarm 16143).
-- 5 seeds (8 with validation compiled out) left a durable alarm unfired
+- 2 seeds (2 with validation compiled out) left an acknowledged alarm with
+  no wake entry due by its time, both after a failed activation handed its
+  cell away (below) and lost the write that set it.
+- 9 seeds (13 with validation compiled out) left a durable alarm unfired
   when the audit ended, every one in a run where a memory walk-down wedged.
-- 145 seeds lost a proven alarm handler commit (183 with validation
+- 61 seeds lost a proven alarm handler commit (79 with validation
   compiled out), all after a failed activation handed the cell away, the
   slow clean reload below, a clock fault, or a drain that released a
   swapped cell: the same failures that lose acknowledged writes, seen
   through an alarm.
-- 129 seeds (169 with validation compiled out) left a degraded log
-  unreopened. In 122 (160), `maintain` found no peer live by its own wall
+- 126 seeds (158 with validation compiled out) left a degraded log
+  unreopened. In 117 (148), `maintain` found no peer live by its own wall
   clock while a peer kept renewing, the clock-skew shell bug below; in 6
   (8), self-suspicion parked recruitment while every member was down,
   the third shell bug below. In one (swarm 71053), the leader had no lease
   of its own: its first lease write was lost and a bucket hang held its
-  retries, so no reopen could apply.
-- With validation compiled out, 1,859 seeds kept an outbound socket open
+  retries, so no reopen could apply. In one (swarm 62319), a peer read sent
+  just before a partition healed hung for the bucket's 15 s timeout, and
+  the posture watch waited on it, as production's does.
+- With validation compiled out, 1,833 seeds kept an outbound socket open
   after its runtime stopped: the live transport that a failed proof or
   ownership read leaves on a reset cell, which the live-transport invariant
   below catches. Of 45 such seeds traced in an earlier sweep, the same run
@@ -355,7 +365,7 @@ that it can. In 100,000 swarm seeds:
 
 The simulator does not yet model V8, or, in the fleet log, the recovery
 claim, the incapable-peer quarantine, hedged retransmission of a slow
-append, recruitment at startup, compaction of bundle rows, and bundle GC
+append, recruitment at startup, and the epoch opener's forced compaction
 (`crates/sim/src/world/node_log.rs` says how each is approximated). Its memory has no allocator slack, cgroup or
 containers, no noise between samples, and returns a cell's whole share when
 the cell goes, and its heap's the moment the heap is empty.
@@ -411,7 +421,8 @@ The core on `main` fails some seeds.
   halves, `runtime_stopped` parks the cell `Dormant`, and the drain releases
   its owner record like any other dormant cell's. Nothing uploaded the
   writes that only the log or a bundle proved, so the peer that takes the
-  cell restores from the bucket without them (swarm 9331, 105 writes).
+  cell restores from the bucket without them (swarm 90585). Compaction
+  narrows this to the rows a bundle covered since the last round.
 - **A degraded log waits forever on a tail** (**liveness**,
   **alarm-not-fired**). A leader whose follower missed a frame degrades,
   and reopens its log only once the bucket holds every row it shipped
@@ -482,7 +493,7 @@ on every tick. Its log stays degraded for as long as the skew lasts. Nothing
 is lost and no check fails: the output gate rides the bundle loop, so writes
 are acknowledged at the bucket's latency instead of the fleet's, and the
 node's acknowledged writes have only the bucket as their witness. In 100,000
-swarm seeds this held 122 logs degraded (160 with validation compiled out):
+swarm seeds this held 117 logs degraded (148 with validation compiled out):
 in each, `maintain` found no peer live by its own clock while a peer went
 on renewing its lease. A fix would
 judge a peer's liveness without comparing two machines' wall clocks, for
@@ -495,35 +506,38 @@ the backstop at once, `evict_gray_followers` in `crates/celld/node_log.rs`
 takes it for the leader's own partition: it degrades and sets
 `suspect_self`, and `maintain` recruits no one until a member answers a
 probe. Members that are paused or down answer nothing until they come
-back, so the log stays degraded while live peers could follow it: 42 s in
-swarm 36729, where both members paused and then crashed. As with the skew above, writes
+back, so the log stays degraded while live peers could follow it: 29 s in
+swarm 4564, where its members paused and then crashed. As with the skew above, writes
 go on at the bucket's latency and nothing is lost. In 100,000 swarm seeds
-this held 6 logs degraded (8 with validation compiled out). A fix would
+this held 7 logs degraded (8 with validation compiled out). A fix would
 let an answer from any peer, such as a lease read that shows peers
 renewing, lift the suspicion.
 
-In 100,000 swarm seeds, 12,048 failed in a debug build: 10,343 on the
-invariants (3,199 of them on live transports, 2,630 on alarms firing while
-not resident), 1,017 on liveness or `alarm-not-fired`, 361 on stale reads,
-321 on lost writes and 6 on late acknowledgements in the fleet posture. Of
-the liveness and alarm failures, 802 are seeds where a node's memory
-walk-down wedged (the node stayed latched, **memory-not-relieved**), 183 a
-degraded log waiting on a tail, and 32 the capacity livelock; 1,254 seeds
-kept a node latched on memory pressure in all. Of the lost writes, 320
-followed a failed activation (306 a failed fold, 14 a failed bucket read)
-and 1 a drain that released a swapped cell; every late acknowledgement
-followed a clock step or a superseded resume. With validation compiled
-out, 2,169 failed: 1,201 on liveness or `alarm-not-fired` (945 wedged, 217
-waiting on a tail, 39 the capacity livelock), 436 on stale reads, 126 on
-`evicted-pinned` (the core goes on to evict a cell whose live transport
-the invariant would have caught), 400 on lost writes in the fleet posture
-(399 after a failed activation, 1 after a drain released a swapped cell),
-and 6 on late acknowledgements. Between them, the seeds entered every
-phase.
+In 100,000 swarm seeds, 11,798 failed in a debug build: 10,233 on the
+invariants (3,170 of them on live transports, 2,626 on alarms firing while
+not resident), 1,000 on liveness or `alarm-not-fired`, 374 on stale reads,
+189 on lost writes and 2 on late acknowledgements in the fleet posture. Of
+the liveness and alarm failures, 781 are seeds where a node's memory
+walk-down wedged (the node stayed latched, **memory-not-relieved**), 187 a
+degraded log waiting on a tail, and 32 the capacity livelock; 1,236 seeds
+kept a node latched on memory pressure in all. Of the lost writes, 187
+followed a failed activation (179 a failed fold, 8 a failed bucket read),
+1 a drain that released a swapped cell and 1 the slow clean reload; every
+late acknowledgement followed a clock step or a superseded resume. With
+validation compiled out, 2,008 failed: 1,188 on liveness or
+`alarm-not-fired` (942 wedged, 206 waiting on a tail, 40 the capacity
+livelock), 452 on stale reads, 132 on `evicted-pinned` (the core goes on
+to evict a cell whose live transport the invariant would have caught), 233
+on lost writes in the fleet posture (231 after a failed activation, 1
+after a drain released a swapped cell, 1 after the slow clean reload), and
+3 on late acknowledgements. Between them, the seeds entered every phase.
 
 Lost writes in the fleet posture rise and fall with how long logs stay
 degraded, since a failed activation needs a tail that only followers and
-bundles hold. Gray followers degrade logs more often.
+bundles hold. Gray followers degrade logs more often. Compaction makes
+them rarer: it moves bundle rows into the per-cell layout while the cell
+is still open, so the peer that adopts a cell handed away restores them
+from the bucket (lost writes fell from 321 to 189 when it was modelled).
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

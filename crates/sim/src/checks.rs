@@ -353,6 +353,32 @@ impl Checker {
         );
     }
 
+    /// Watched: **bundle GC deletes only covered rows.** A deleted bundle
+    /// of `session` carried acknowledged writes of a cell epoch that the
+    /// per-cell layout does not hold (`bundle_deletable`): no fold or
+    /// recovery can restore them from the bucket any more.
+    pub fn bundle_deleted(
+        &mut self,
+        t: u64,
+        session: &str,
+        cell: &str,
+        epoch: Epoch,
+        lost: &[WriteId],
+    ) {
+        if let Some(first) = lost.first() {
+            self.watch(
+                t,
+                "bundle-deleted-uncovered",
+                format!("{session} {cell} {epoch}"),
+                format!(
+                    "a bundle of {session} was deleted holding {} acknowledged write(s) of \
+                     {cell} epoch {epoch} that no per-cell prefix holds, first {first}",
+                    lost.len()
+                ),
+            );
+        }
+    }
+
     /// Watched: **a bundle credits only what the bucket holds.** `who`
     /// credited `len` writes of a cell epoch to a bundle: the bucket must
     /// hold them, in a prefix or a bundle a recovery can still drain. One
