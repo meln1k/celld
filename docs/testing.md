@@ -616,6 +616,15 @@ for liveness. Of the drains, nine in ten claim the token, and a few in a
 hundred wait out their bound behind a crashed holder's claim and hand off
 unserialized. **donors-overlap** and **ready-stuck** never fired.
 
+A clean stop's attempt now fails as soon as its upload fails, and its 10 s
+budget starts before the capture, as in production's `evict`. That moved
+timing in every seed that evicts. No failure kind is new: 11,192 failing
+seeds in a debug build and 2,046 with validation compiled out. Lost writes
+went from 202 to 208 and from 243 to 247, and liveness from 954 to 970 and
+from 1,095 to 1,109. Every seed that newly lost writes followed a failed
+fold (8) or a failed bucket read (2). Every seed that newly failed on
+liveness had a wedged walk-down (61) or a late fold (1).
+
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
 failing seed of the suite's configurations and of swarm seeds 0..10000, in

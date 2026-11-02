@@ -6,8 +6,9 @@
 //! (`LtxRepl::evict`), and an abandonment (`EvictionAbandon`) takes effect
 //! only before that capture ends; past it the attempt publishes, and
 //! nothing takes it back. An attempt fails when its final upload does not
-//! land in time. Only then does a bounded stop read its deadline; any
-//! other stop tries again after a pause.
+//! land in time, or as soon as an upload of it fails (`sync_wait` answers
+//! `Failed`, and `evict` returns the error). Only then does a bounded stop
+//! read its deadline; any other stop tries again after a pause.
 
 use celld_logic::{Epoch, Event, OpId, StopCause};
 
@@ -38,6 +39,10 @@ pub(super) struct Stop {
     /// A request reached the cell (`AbandonEvictionStop`).
     abandon: bool,
     phase: Phase,
+    /// When the attempt under way runs out of time, on the agenda: its
+    /// budget covers the capture and the publish (`evict` starts its
+    /// deadline before `prepare_handoff_snapshot`).
+    attempt_until: u64,
     /// The step the stop waits for next, cancelled when it moves on.
     pub(super) step: Option<AgendaKey>,
 }
@@ -91,6 +96,7 @@ impl World {
             deadline_mono,
             abandon: false,
             phase: Phase::Retrying,
+            attempt_until: 0,
             step: None,
         });
         self.attempt_stop(node, cell, epoch);
@@ -144,15 +150,17 @@ impl World {
 
     /// One attempt of `report_stopped_when_released`'s loop.
     fn attempt_stop(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        let capture_ms = self.stop_rng.range(1, MAX_CAPTURE_MS);
+        let attempt_until = self.t + self.agenda_ms(STOP_ATTEMPT_MS);
         let stop = self.stop_mut(node, cell, epoch).expect("a stop");
         if stop.abandon {
             return self.abandoned(node, cell, epoch);
         }
         stop.phase = Phase::Capturing;
+        stop.attempt_until = attempt_until;
         if !stop.evict {
             return self.publish_stop(node, cell, epoch);
         }
+        let capture_ms = self.stop_rng.range(1, MAX_CAPTURE_MS);
         let (cell, epoch) = (cell.to_string(), epoch);
         let work = StopWork::Captured {
             cell: cell.clone(),
@@ -164,8 +172,9 @@ impl World {
     /// Publish: upload what the bucket lacks, and give the attempt its
     /// time.
     fn publish_stop(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        self.stop_mut(node, cell, epoch).expect("a stop").phase = Phase::Publishing;
-        let delay = self.agenda_ms(STOP_ATTEMPT_MS);
+        let stop = self.stop_mut(node, cell, epoch).expect("a stop");
+        stop.phase = Phase::Publishing;
+        let delay = stop.attempt_until.saturating_sub(self.t);
         let work = StopWork::TimedOut {
             cell: cell.to_string(),
             epoch,
@@ -173,6 +182,18 @@ impl World {
         self.stop_step(node, cell, epoch, delay, work);
         self.settle_proofs(node, cell, epoch);
         self.upload(node, cell, epoch);
+    }
+
+    /// An upload failed while the stop publishes: the attempt fails at
+    /// once. Returns whether a stop took the failure.
+    pub(super) fn stop_upload_failed(&mut self, node: usize, cell: &str, epoch: Epoch) -> bool {
+        let publishing = self
+            .stop_mut(node, cell, epoch)
+            .is_some_and(|stop| stop.publishing());
+        if publishing {
+            self.stop_attempt_failed(node, cell, epoch);
+        }
+        publishing
     }
 
     /// The attempt did not let the cell go. A bounded stop past its

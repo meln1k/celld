@@ -771,7 +771,8 @@ impl World {
     }
 
     /// An upload failed, or nobody knows whether it applied. Upload again
-    /// after a backoff: an upload is idempotent.
+    /// after a backoff: an upload is idempotent. A stop that publishes
+    /// fails its attempt instead.
     pub(super) fn upload_failed(&mut self, node: usize, cell: String, epoch: Epoch) {
         if let Some(replica) = self.machines[node]
             .proc_mut()
@@ -779,6 +780,10 @@ impl World {
             .get_mut(&(cell.clone(), epoch))
         {
             replica.uploading = false;
+            // A stop's attempt fails with it, and its next attempt uploads.
+            if self.stop_upload_failed(node, &cell, epoch) {
+                return;
+            }
             let delay = self.net_rng.range(50, 300);
             self.work(
                 node,
