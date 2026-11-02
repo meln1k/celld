@@ -5,17 +5,18 @@
 //! not stopping, in production's order, because the order is the fence:
 //! list the cell's epochs and plan with `epoch_gc::plan`, which decides
 //! nothing unless the newest listed epoch is the owner's own; only then
-//! read the owner record; then delete each planned prefix. Each step is its own bucket call, so a
-//! fence, a takeover or a late upload can land between any two of them, and
-//! a call already sent applies even if its process dies.
+//! read the owner record; then delete each planned prefix. Each step is its
+//! own bucket call, so a fence, a takeover or a late upload can land between
+//! any two of them, and a call already sent applies even if its process
+//! dies.
 //!
 //! The chain is `EpochChain::build`'s (`Store::spans`): a paged epoch
 //! continues the one below it, and a cell still filling in the background
 //! pins it (`pinned_reads`), so its pass decides nothing. Listings are
-//! consistent, so the retired mark's guard against a lagging one is not modelled. Its
-//! effect on coverage is: a deleted epoch counts as covered whole
-//! (`Store::percell_len`), and the oracle goes on counting its writes as
-//! durable. Not modelled either: production runs one pass at a time, and
+//! consistent, so the retired mark's guard against a lagging one is not
+//! modelled. Its effect on coverage is: a deleted epoch counts as covered
+//! whole (`Store::percell_len`), and the oracle goes on counting its writes
+//! as durable. Not modelled either: production runs one pass at a time, and
 //! here a tick starts the next pass while the last one's calls may still be
 //! in flight.
 

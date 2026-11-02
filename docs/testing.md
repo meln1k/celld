@@ -408,8 +408,9 @@ The simulator does not yet model V8, or, in the fleet log, the recovery
 claim, the incapable-peer quarantine, hedged retransmission of a slow
 append, recruitment at startup, and the epoch opener's forced compaction
 (`crates/sim/src/world/node_log.rs` says how each is approximated). Its
-memory has no allocator slack, cgroup or containers, no noise between samples, and returns a cell's whole share when
-the cell goes, and its heap's the moment the heap is empty.
+memory has no allocator slack, cgroup or containers, no noise between
+samples, and returns a cell's whole share when the cell goes, and its
+heap's the moment the heap is empty.
 
 The core on `main` fails some seeds.
 
@@ -453,7 +454,10 @@ The core on `main` fails some seeds.
   gives the cell away, by rebalance or release, and the peer that adopts
   it restores from the bucket alone: nothing folds the first node's tail
   for it, so the acknowledged writes are gone (swarm 92204, 32015).
-  Production's healing pass, which may repair this later, is not modelled.
+  Nothing in production repairs them later. Only recovery and the
+  reactivation fold upload a tail, and either writes it into the old
+  epoch's prefix, below the epoch the peer opened, where no restore reads
+  it.
 - **A drain releases a cell it stopped for a generation swap**
   (**lost-write**). A swap stop is the first half of moving a cell to a new
   isolate: it runs no durability barrier and leaves the database open
