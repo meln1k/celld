@@ -24,6 +24,10 @@ pub(super) enum Activation {
     /// proofs made meanwhile wait for an applied lease write to carry it:
     /// each a cell epoch and how many of its writes the fleet holds.
     Waiting(Vec<(String, Epoch, usize)>),
+    /// The wait ran out: the record in memory keeps the flag, so every
+    /// later lease write carries it, but no proof credited. The next proof
+    /// writes it again and waits (`activate` finds the record unchanged).
+    Stamped,
     /// A lease write carrying it applied, and its answer came back.
     Done,
 }
@@ -43,7 +47,7 @@ impl World {
         match &mut log.activation {
             Activation::Done => return self.fleet_credit(node, cell, epoch, fleet),
             Activation::Waiting(held) => held.push((cell.to_string(), epoch, fleet)),
-            Activation::Idle => {
+            Activation::Idle | Activation::Stamped => {
                 // Publish the record with the flag and nudge the core into
                 // renewing now; the next applied lease write carries it.
                 log.activation = Activation::Waiting(vec![(cell.to_string(), epoch, fleet)]);
@@ -69,7 +73,7 @@ impl World {
         if log.epoch == log_epoch && matches!(log.activation, Activation::Waiting(_)) {
             // The proofs waiting on it never credit; the next one
             // tries again (`activated` stays false).
-            log.activation = Activation::Idle;
+            log.activation = Activation::Stamped;
             self.degrade(node, "activation transition not applied");
         }
     }
@@ -78,8 +82,7 @@ impl World {
     /// the current one, once its activation began.
     pub(in crate::world) fn activation_stamp(&self, node: usize) -> Option<u64> {
         let log = self.machines[node].proc().log.as_ref()?;
-        let current = log.published == log.epoch;
-        (current && !matches!(log.activation, Activation::Idle)).then_some(log.epoch)
+        (!matches!(log.activation, Activation::Idle)).then_some(log.epoch)
     }
 
     /// A lease write carrying `log_epoch`'s record with
@@ -102,10 +105,6 @@ impl World {
         if log.epoch != log_epoch || !matches!(log.activation, Activation::Waiting(_)) {
             return;
         }
-        if log.published != log_epoch {
-            log.activation = Activation::Idle;
-            return self.degrade(node, "activation transition not applied");
-        }
         let Activation::Waiting(held) = std::mem::replace(&mut log.activation, Activation::Done)
         else {
             unreachable!("checked");
@@ -124,10 +123,12 @@ impl World {
             self.checker.fleet_proof(self.t, &who, cell, epoch, &proved);
         }
         let log = self.machines[node]
-            .proc()
+            .proc_mut()
             .log
-            .as_ref()
+            .as_mut()
             .expect("a log credits");
+        // A completed round proves this node is not cut off.
+        log.suspect_self = false;
         let (session, log_epoch) = (log.session.clone(), log.epoch);
         if !self.session(&session).proved {
             self.checker

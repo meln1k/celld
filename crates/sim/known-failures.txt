@@ -30,9 +30,10 @@
 10 swarm validated panic: cell "c8" is firing an alarm while not resident
 11 swarm validated panic: indexed cell op 117 has no owning slot in "c6"
 26 swarm validated panic: cell "c1" has a live transport while not resident
+39 swarm validated liveness
 49 swarm validated panic: indexed cell op 182 has no owning slot in "c7"
 69 swarm validated panic: handoffs 3 exceeds release ceiling 2
-72 swarm validated panic: cell "c6" is firing an alarm while not resident
+82 swarm validated lost-write stale-read
 128 swarm validated panic: handoffs 3 exceeds release ceiling 2
 133 swarm validated panic: indexed cell op 186 has no owning slot in "c9"
 141 swarm validated panic: cell "c4" is firing an alarm while not resident
@@ -43,11 +44,11 @@
 174 swarm validated panic: indexed cell op 196 has no owning slot in "c3"
 175 swarm validated panic: cell "c3" is firing an alarm while not resident
 179 swarm validated panic: cell "c4" has a live transport while not resident
-181 swarm validated liveness
 189 swarm validated panic: indexed cell op 71 has no owning slot in "c4"
+190 swarm validated panic: cell "c2" is firing an alarm while not resident
+194 swarm validated panic: indexed cell op 74 has no owning slot in "c6"
 215 swarm validated panic: cell "c2" has a live transport while not resident
 216 swarm validated panic: cell "c3" has a live transport while not resident
-222 swarm validated panic: confirming cell "c9" left the owner read in Inactive
 223 swarm validated panic: handoffs 3 exceeds release ceiling 2
 231 swarm validated panic: cell "c2" has a live transport while not resident
 232 swarm validated panic: indexed cell op 44 has no owning slot in "c5"
@@ -63,15 +64,12 @@
 303 swarm validated panic: cell "c8" is firing an alarm while not resident
 314 swarm validated panic: indexed cell op 156 has no owning slot in "c4"
 317 swarm validated panic: handoffs 3 exceeds release ceiling 2
-331 swarm validated panic: cell "c0" is firing an alarm while not resident
+331 swarm validated lost-write stale-read
 347 swarm validated panic: handoffs 3 exceeds release ceiling 2
 349 swarm validated panic: handoffs 3 exceeds release ceiling 2
-353 swarm validated panic: cell "c0" has a live transport while not resident
 363 swarm validated panic: cell "c8" is firing an alarm while not resident
-373 swarm validated panic: confirming cell "c5" left the owner read in Inactive
+373 swarm validated panic: confirming cell "c0" left the owner read in Fenced
 374 swarm validated panic: cell "c2" is firing an alarm while not resident
-377 swarm validated panic: cell "c4" has a live transport while not resident
-382 swarm validated panic: cell "c6" is firing an alarm while not resident
 391 swarm validated panic: cell "c1" has a live transport while not resident
 410 swarm validated liveness
 412 swarm validated panic: handoff cell "c2" is outside the pipeline in Fenced
@@ -83,8 +81,8 @@
 460 swarm validated panic: handoffs 3 exceeds release ceiling 2
 484 swarm validated panic: cell "c4" is firing an alarm while not resident
 511 swarm validated panic: cell "c1" is firing an alarm while not resident
-514 swarm validated panic: cell "c3" is firing an alarm while not resident
 515 swarm validated lost-write stale-read panic: handoffs 3 exceeds release ceiling 2
+517 swarm validated panic: cell "c5" is firing an alarm while not resident
 520 swarm validated panic: cell "c6" has a live transport while not resident
 525 swarm validated liveness
 528 swarm validated panic: cell "c0" is firing an alarm while not resident
@@ -96,20 +94,16 @@
 579 swarm validated panic: cell "c0" is firing an alarm while not resident
 583 swarm validated panic: cell "c2" is firing an alarm while not resident
 585 swarm validated panic: cell "c1" is firing an alarm while not resident
-626 swarm validated lost-write stale-read
 636 swarm validated panic: cell "c1" has a live transport while not resident
 646 swarm validated panic: confirming cell "c6" left the owner read in Fenced
 657 swarm validated lost-write stale-read
 663 swarm validated panic: confirming cell "c0" left the owner read in Fenced
 665 swarm validated panic: cell "c4" is firing an alarm while not resident
-667 swarm validated panic: handoffs 3 exceeds release ceiling 2
+666 swarm validated liveness
 675 swarm validated stale-read
 687 swarm validated panic: cell "c4" is firing an alarm while not resident
-689 swarm validated panic: confirming cell "c6" left the owner read in Fenced
 692 swarm validated panic: cell "c8" is firing an alarm while not resident
-694 swarm validated panic: cell "c1" is firing an alarm while not resident
 705 swarm validated liveness
-713 swarm validated lost-write stale-read
 718 swarm validated panic: cell "c0" has a live transport while not resident
 719 swarm validated panic: cell "c7" has a live transport while not resident
 721 swarm validated stale-read
@@ -119,9 +113,9 @@
 748 swarm validated panic: cell "c3" has a live transport while not resident
 752 swarm validated panic: cell "c2" is firing an alarm while not resident
 753 swarm validated liveness
+757 swarm validated panic: handoffs 3 exceeds release ceiling 2
 760 swarm validated panic: cell "c0" has a live transport while not resident
 763 swarm validated panic: cell "c0" has a live transport while not resident
-775 swarm validated liveness
 788 swarm validated panic: cell "c3" has a live transport while not resident
 789 swarm validated panic: cell "c3" is firing an alarm while not resident
 791 swarm validated panic: cell "c3" has a live transport while not resident
@@ -132,18 +126,17 @@
 819 swarm validated panic: cell "c2" is firing an alarm while not resident
 830 swarm validated panic: indexed cell op 77 has no owning slot in "c3"
 832 swarm validated panic: cell "c1" has a live transport while not resident
-860 swarm validated panic: handoff cell "c0" is outside the pipeline in Fenced
 868 swarm validated panic: cell "c7" is firing an alarm while not resident
 874 swarm validated panic: handoffs 4 exceeds release ceiling 2
 878 swarm validated panic: cell "c4" is firing an alarm while not resident
 894 swarm validated panic: indexed cell op 162 has no owning slot in "c1"
 923 swarm validated panic: handoffs 3 exceeds release ceiling 2
 932 swarm validated panic: cell "c0" has a live transport while not resident
+937 swarm validated liveness
 940 swarm validated panic: handoffs 3 exceeds release ceiling 2
 942 swarm validated panic: cell "c1" has a live transport while not resident
 944 swarm validated panic: indexed cell op 598 has no owning slot in "c6"
 947 swarm validated panic: cell "c8" is firing an alarm while not resident
-950 swarm validated lost-write stale-read
 953 swarm validated panic: handoffs 3 exceeds release ceiling 2
 954 swarm validated panic: indexed cell op 242 has no owning slot in "c8"
 958 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -163,15 +156,14 @@
 1061 swarm validated panic: cell "c2" has a live transport while not resident
 1070 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1079 swarm validated panic: cell "c1" is firing an alarm while not resident
+1080 swarm validated panic: cell "c1" is firing an alarm while not resident
 1083 swarm validated panic: handoffs 3 exceeds release ceiling 2
-1087 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1096 swarm validated panic: handoffs 4 exceeds release ceiling 2
 1098 swarm validated panic: cell "c4" has a live transport while not resident
 1133 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1147 swarm validated panic: cell "c0" has a live transport while not resident
 1157 swarm validated panic: cell "c1" has a live transport while not resident
 1159 swarm validated panic: handoffs 3 exceeds release ceiling 2
-1170 swarm validated panic: cell "c1" is firing an alarm while not resident
 1174 swarm validated panic: cell "c1" has a live transport while not resident
 1181 swarm validated panic: cell "c0" is firing an alarm while not resident
 1190 swarm validated panic: indexed cell op 256 has no owning slot in "c6"
@@ -179,12 +171,12 @@
 1205 swarm validated liveness
 1209 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1213 swarm validated panic: handoffs 3 exceeds release ceiling 2
+1216 swarm validated panic: cell "c4" is firing an alarm while not resident
 1227 swarm validated panic: confirming cell "c4" left the owner read in Fenced
 1239 swarm validated panic: cell "c0" has a live transport while not resident
 1240 swarm validated panic: confirming cell "c2" left the owner read in Inactive
 1249 swarm validated panic: cell "c1" is firing an alarm while not resident
 1252 swarm validated panic: cell "c2" has a live transport while not resident
-1274 swarm validated liveness
 1282 swarm validated panic: confirming cell "c4" left the owner read in Fenced
 1293 swarm validated lost-write stale-read
 1322 swarm validated liveness
@@ -193,24 +185,21 @@
 1357 swarm validated panic: cell "c3" has a live transport while not resident
 1359 swarm validated panic: cell "c1" has a live transport while not resident
 1374 swarm validated panic: handoffs 3 exceeds release ceiling 2
-1390 swarm validated panic: confirming cell "c2" left the owner read in Fenced
 1396 swarm validated panic: cell "c2" has a live transport while not resident
 1406 swarm validated panic: cell "c3" is firing an alarm while not resident
-1410 swarm validated panic: cell "c3" is firing an alarm while not resident
+1410 swarm validated lost-write stale-read
 1424 swarm validated panic: cell "c8" is firing an alarm while not resident
 1428 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1439 swarm validated panic: cell "c5" has a live transport while not resident
 1463 swarm validated panic: cell "c3" has a live transport while not resident
-1476 swarm validated panic: cell "c0" is firing an alarm while not resident
 1500 swarm validated panic: cell "c9" is firing an alarm while not resident
-1506 swarm validated panic: cell "c1" is firing an alarm while not resident
 1511 swarm validated panic: cell "c6" is firing an alarm while not resident
 1523 swarm validated panic: indexed cell op 212 has no owning slot in "c2"
 1544 swarm validated stale-read
+1551 swarm validated lost-write stale-read
 1584 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1588 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1593 swarm validated panic: handoffs 4 exceeds release ceiling 2
-1596 swarm validated panic: indexed cell op 69 has no owning slot in "c5"
 1597 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1601 swarm validated panic: cell "c0" is firing an alarm while not resident
 1602 swarm validated panic: cell "c6" has a live transport while not resident
@@ -218,18 +207,20 @@
 1618 swarm validated panic: cell "c1" has a live transport while not resident
 1622 swarm validated liveness
 1625 swarm validated panic: cell "c0" has a live transport while not resident
+1631 swarm validated panic: cell "c1" has a live transport while not resident
 1634 swarm validated liveness
 1635 swarm validated panic: indexed cell op 36 has no owning slot in "c5"
+1637 swarm validated liveness
 1650 swarm validated panic: indexed cell op 68 has no owning slot in "c8"
 1655 swarm validated late-ack lost-write stale-read
 1664 swarm validated lost-write stale-read
 1668 swarm validated panic: cell "c4" has a live transport while not resident
 1678 swarm validated panic: cell "c1" has a live transport while not resident
-1687 swarm validated panic: cell "c5" is firing an alarm while not resident
 1688 swarm validated panic: cell "c4" has a live transport while not resident
 1701 swarm validated panic: cell "c4" is firing an alarm while not resident
 1704 swarm validated liveness
 1705 swarm validated panic: cell "c1" has a live transport while not resident
+1706 swarm validated liveness
 1718 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1732 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1733 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -241,19 +232,17 @@
 1786 swarm validated panic: confirming cell "c2" left the owner read in Fenced
 1787 swarm validated panic: confirming cell "c9" left the owner read in Inactive
 1791 swarm validated panic: cell "c4" has a live transport while not resident
-1802 swarm validated panic: cell "c2" is firing an alarm while not resident
 1803 swarm validated panic: cell "c3" is firing an alarm while not resident
 1810 swarm validated panic: cell "c0" has a live transport while not resident
+1812 swarm validated liveness
 1826 swarm validated panic: confirming cell "c0" left the owner read in Fenced
 1830 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1833 swarm validated panic: cell "c2" has a live transport while not resident
 1873 swarm validated panic: cell "c0" is firing an alarm while not resident
 1878 swarm validated panic: cell "c6" is firing an alarm while not resident
+1884 swarm validated panic: indexed cell op 81 has no owning slot in "c4"
 1888 swarm validated liveness
-1895 swarm validated liveness
-1898 swarm validated panic: cell "c2" is firing an alarm while not resident
 1908 swarm validated panic: cell "c2" has a live transport while not resident
-1913 swarm validated panic: handoffs 3 exceeds release ceiling 2
 1920 swarm validated panic: cell "c2" has a live transport while not resident
 1930 swarm validated panic: cell "c4" is firing an alarm while not resident
 1938 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -270,6 +259,7 @@
 2052 swarm validated liveness
 2062 swarm validated liveness
 2070 swarm validated panic: handoffs 4 exceeds release ceiling 2
+2076 swarm validated liveness
 2079 swarm validated panic: cell "c6" is firing an alarm while not resident
 2084 swarm validated panic: cell "c5" has a live transport while not resident
 2085 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -280,27 +270,26 @@
 2118 swarm validated panic: indexed cell op 109 has no owning slot in "c1"
 2134 swarm validated panic: confirming cell "c4" left the owner read in Inactive
 2141 swarm validated panic: handoffs 3 exceeds release ceiling 2
+2163 swarm validated lost-write stale-read
 2172 swarm validated panic: cell "c0" is firing an alarm while not resident
 2180 swarm validated panic: cell "c5" has a live transport while not resident
 2187 swarm validated panic: cell "c4" is firing an alarm while not resident
-2194 swarm validated liveness lost-write stale-read
 2203 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2214 swarm validated lost-write stale-read
 2216 swarm validated panic: cell "c0" has a live transport while not resident
+2219 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2226 swarm validated panic: cell "c3" is firing an alarm while not resident
 2248 swarm validated panic: cell "c4" has a live transport while not resident
 2252 swarm validated panic: cell "c1" has a live transport while not resident
-2254 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2264 swarm validated panic: cell "c7" has a live transport while not resident
 2269 swarm validated panic: indexed cell op 89 has no owning slot in "c6"
 2272 swarm validated panic: cell "c2" has a live transport while not resident
 2273 swarm validated panic: cell "c7" is firing an alarm while not resident
 2275 swarm validated panic: cell "c0" has a live transport while not resident
 2293 swarm validated liveness
-2301 swarm validated panic: indexed cell op 66 has no owning slot in "c4"
+2327 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2329 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2338 swarm validated panic: cell "c5" is firing an alarm while not resident
-2342 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2352 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2363 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2367 swarm validated panic: cell "c3" is firing an alarm while not resident
@@ -313,6 +302,8 @@
 2408 swarm validated panic: cell "c8" is firing an alarm while not resident
 2417 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2422 swarm validated panic: handoffs 3 exceeds release ceiling 2
+2427 swarm validated panic: cell "c0" is firing an alarm while not resident
+2429 swarm validated lost-write stale-read
 2430 swarm validated panic: cell "c3" is firing an alarm while not resident
 2437 swarm validated panic: cell "c1" is firing an alarm while not resident
 2449 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -332,7 +323,6 @@
 2528 swarm validated panic: handoffs 4 exceeds release ceiling 2
 2536 swarm validated panic: cell "c2" is firing an alarm while not resident
 2542 swarm validated panic: cell "c2" has a live transport while not resident
-2554 swarm validated stale-read
 2556 swarm validated panic: cell "c6" has a live transport while not resident
 2559 swarm validated panic: cell "c1" has a live transport while not resident
 2570 swarm validated panic: cell "c0" is firing an alarm while not resident
@@ -343,21 +333,21 @@
 2613 swarm validated panic: cell "c7" has a live transport while not resident
 2615 swarm validated panic: cell "c0" has a live transport while not resident
 2617 swarm validated panic: cell "c4" has a live transport while not resident
-2630 swarm validated panic: cell "c2" is firing an alarm while not resident
-2633 swarm validated panic: cell "c2" is firing an alarm while not resident
+2634 swarm validated panic: cell "c3" has a live transport while not resident
 2654 swarm validated panic: cell "c3" has a live transport while not resident
+2656 swarm validated liveness
 2674 swarm validated stale-read
 2675 swarm validated panic: cell "c0" is firing an alarm while not resident
 2679 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2684 swarm validated panic: cell "c7" has a live transport while not resident
 2697 swarm validated panic: cell "c0" has a live transport while not resident
 2698 swarm validated liveness
+2716 swarm validated panic: cell "c1" is firing an alarm while not resident
 2734 swarm validated panic: cell "c2" is firing an alarm while not resident
 2740 swarm validated panic: handoffs 4 exceeds release ceiling 2
 2746 swarm validated panic: cell "c0" is firing an alarm while not resident
 2764 swarm validated panic: cell "c0" has a live transport while not resident
 2768 swarm validated liveness
-2773 swarm validated panic: cell "c2" has a live transport while not resident
 2777 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2785 swarm validated panic: handoff cell "c0" is outside the pipeline in Fenced
 2795 swarm validated lost-write stale-read
@@ -365,19 +355,19 @@
 2830 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2837 swarm validated panic: cell "c2" is firing an alarm while not resident
 2845 swarm validated panic: cell "c0" has a live transport while not resident
-2864 swarm validated liveness
-2876 swarm validated panic: cell "c3" has a live transport while not resident
 2882 swarm validated panic: handoffs 3 exceeds release ceiling 2
-2889 swarm validated panic: handoffs 4 exceeds release ceiling 2
+2889 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2892 swarm validated panic: cell "c0" has a live transport while not resident
 2893 swarm validated panic: cell "c1" has a live transport while not resident
-2913 swarm validated panic: cell "c0" has a live transport while not resident
 2914 swarm validated liveness
 2929 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2937 swarm validated panic: cell "c1" is firing an alarm while not resident
 2941 swarm validated panic: handoffs 3 exceeds release ceiling 2
+2956 swarm validated lost-write stale-read
 2961 swarm validated panic: handoffs 3 exceeds release ceiling 2
 2968 swarm validated panic: indexed cell op 197 has no owning slot in "c5"
+2983 swarm validated panic: handoffs 4 exceeds release ceiling 2
+3017 swarm validated liveness
 3033 swarm validated panic: cell "c1" is firing an alarm while not resident
 3043 swarm validated panic: cell "c6" has a live transport while not resident
 3044 swarm validated panic: cell "c3" has a live transport while not resident
@@ -386,8 +376,11 @@
 3078 swarm validated panic: cell "c0" has a live transport while not resident
 3087 swarm validated stale-read
 3088 swarm validated panic: cell "c4" is firing an alarm while not resident
+3092 swarm validated panic: handoffs 3 exceeds release ceiling 2
 3101 swarm validated panic: indexed cell op 216 has no owning slot in "c1"
+3137 swarm validated panic: cell "c0" is firing an alarm while not resident
 3161 swarm validated panic: cell "c2" has a live transport while not resident
+3172 swarm validated panic: cell "c0" is firing an alarm while not resident
 3206 swarm validated panic: cell "c6" is firing an alarm while not resident
 3215 swarm validated panic: cell "c1" has a live transport while not resident
 3224 swarm validated stale-read
@@ -412,25 +405,23 @@
 3458 swarm validated panic: cell "c4" is firing an alarm while not resident
 3466 swarm validated panic: handoffs 3 exceeds release ceiling 2
 3470 swarm validated panic: cell "c8" has a live transport while not resident
+3477 swarm validated panic: handoff cell "c7" is outside the pipeline in Fenced
 3479 swarm validated panic: handoffs 3 exceeds release ceiling 2
 3502 swarm validated panic: indexed cell op 183 has no owning slot in "c9"
 3509 swarm validated panic: cell "c2" is firing an alarm while not resident
 3521 swarm validated panic: indexed cell op 233 has no owning slot in "c0"
-3547 swarm validated liveness
+3529 swarm validated panic: handoffs 3 exceeds release ceiling 2
 3550 swarm validated panic: handoffs 3 exceeds release ceiling 2
 3552 swarm validated liveness
 3558 swarm validated panic: handoffs 4 exceeds release ceiling 2
 3560 swarm validated panic: indexed cell op 22 has no owning slot in "c4"
 3568 swarm validated panic: indexed cell op 59 has no owning slot in "c6"
 3577 swarm validated panic: cell "c1" has a live transport while not resident
-3579 swarm validated panic: handoffs 3 exceeds release ceiling 2
 3616 swarm validated panic: cell "c1" is firing an alarm while not resident
 3626 swarm validated panic: cell "c6" has a live transport while not resident
-3627 swarm validated liveness
 3633 swarm validated panic: cell "c1" is firing an alarm while not resident
 3635 swarm validated panic: cell "c9" is firing an alarm while not resident
 3637 swarm validated panic: handoffs 3 exceeds release ceiling 2
-3638 swarm validated panic: indexed cell op 118 has no owning slot in "c5"
 3648 swarm validated lost-write stale-read
 3661 swarm validated panic: cell "c5" is firing an alarm while not resident
 3673 swarm validated panic: indexed cell op 185 has no owning slot in "c5"
@@ -441,17 +432,17 @@
 3706 swarm validated panic: cell "c7" has a live transport while not resident
 3719 swarm validated panic: handoffs 4 exceeds release ceiling 2
 3736 swarm validated panic: cell "c3" is firing an alarm while not resident
-3737 swarm validated panic: cell "c0" is firing an alarm while not resident
 3745 swarm validated panic: cell "c2" has a live transport while not resident
 3750 swarm validated panic: indexed cell op 54 has no owning slot in "c1"
 3758 swarm validated panic: cell "c3" is firing an alarm while not resident
 3759 swarm validated panic: cell "c6" is firing an alarm while not resident
 3760 swarm validated panic: handoffs 3 exceeds release ceiling 2
-3765 swarm validated panic: cell "c2" has a live transport while not resident
+3765 swarm validated panic: cell "c1" has a live transport while not resident
 3794 swarm validated panic: cell "c6" is firing an alarm while not resident
 3795 swarm validated panic: cell "c2" has a live transport while not resident
 3798 swarm validated panic: cell "c4" is firing an alarm while not resident
 3808 swarm validated alarm-not-fired
+3818 swarm validated panic: cell "c2" is firing an alarm while not resident
 3821 swarm validated panic: cell "c0" is firing an alarm while not resident
 3842 swarm validated panic: handoffs 3 exceeds release ceiling 2
 3877 swarm validated alarm-not-fired liveness
@@ -460,15 +451,16 @@
 3915 swarm validated panic: handoffs 3 exceeds release ceiling 2
 3949 swarm validated panic: indexed cell op 157 has no owning slot in "c5"
 3953 swarm validated panic: cell "c0" is firing an alarm while not resident
+3955 swarm validated panic: cell "c5" has a live transport while not resident
 3965 swarm validated panic: cell "c0" has a live transport while not resident
 3979 swarm validated panic: confirming cell "c5" left the owner read in Inactive
 3981 swarm validated panic: cell "c0" has a live transport while not resident
-3982 swarm validated panic: confirming cell "c3" left the owner read in Inactive
 3984 swarm validated stale-read
 4000 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4001 swarm validated panic: cell "c2" has a live transport while not resident
 4002 swarm validated panic: cell "c8" has a live transport while not resident
 4015 swarm validated panic: cell "c0" is firing an alarm while not resident
+4022 swarm validated panic: cell "c2" is firing an alarm while not resident
 4027 swarm validated panic: indexed cell op 123 has no owning slot in "c0"
 4050 swarm validated panic: cell "c0" has a live transport while not resident
 4067 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -483,6 +475,7 @@
 4143 swarm validated panic: cell "c1" has a live transport while not resident
 4148 swarm validated panic: indexed cell op 51 has no owning slot in "c3"
 4151 swarm validated panic: cell "c2" has a live transport while not resident
+4154 swarm validated liveness
 4161 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4163 swarm validated panic: confirming cell "c1" left the owner read in Fenced
 4183 swarm validated panic: cell "c8" has a live transport while not resident
@@ -491,22 +484,19 @@
 4200 swarm validated panic: cell "c3" is firing an alarm while not resident
 4203 swarm validated panic: cell "c2" is firing an alarm while not resident
 4205 swarm validated panic: handoffs 3 exceeds release ceiling 2
-4214 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4215 swarm validated panic: cell "c3" has a live transport while not resident
 4220 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4229 swarm validated panic: handoffs 3 exceeds release ceiling 2
+4232 swarm validated panic: confirming cell "c5" left the owner read in Fenced
 4244 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4257 swarm validated panic: cell "c0" is firing an alarm while not resident
 4264 swarm validated panic: cell "c1" is firing an alarm while not resident
 4282 swarm validated panic: handoffs 3 exceeds release ceiling 2
-4293 swarm validated liveness
 4298 swarm validated panic: cell "c2" is firing an alarm while not resident
 4299 swarm validated panic: indexed cell op 68 has no owning slot in "c0"
-4308 swarm validated panic: cell "c6" has a live transport while not resident
 4327 swarm validated liveness
 4328 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4333 swarm validated panic: indexed cell op 152 has no owning slot in "c2"
-4340 swarm validated panic: indexed cell op 140 has no owning slot in "c3"
 4349 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4350 swarm validated panic: indexed cell op 98 has no owning slot in "c5"
 4352 swarm validated panic: cell "c6" has a live transport while not resident
@@ -524,11 +514,8 @@
 4456 swarm validated liveness
 4469 swarm validated panic: cell "c4" is firing an alarm while not resident
 4480 swarm validated liveness
-4497 swarm validated alarm-not-fired liveness
 4499 swarm validated panic: cell "c1" has a live transport while not resident
-4502 swarm validated panic: handoffs 4 exceeds release ceiling 2
-4523 swarm validated panic: cell "c4" is firing an alarm while not resident
-4524 swarm validated panic: cell "c3" has a live transport while not resident
+4502 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4535 swarm validated panic: handoff cell "c2" is outside the pipeline in Fenced
 4546 swarm validated panic: cell "c1" has a live transport while not resident
 4549 swarm validated stale-read
@@ -540,7 +527,6 @@
 4591 swarm validated liveness
 4603 swarm validated liveness
 4604 swarm validated panic: indexed cell op 37 has no owning slot in "c1"
-4613 swarm validated panic: indexed cell op 102 has no owning slot in "c2"
 4618 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4620 swarm validated panic: cell "c2" has a live transport while not resident
 4633 swarm validated panic: cell "c4" has a live transport while not resident
@@ -553,10 +539,12 @@
 4701 swarm validated panic: handoff cell "c5" is outside the pipeline in Fenced
 4702 swarm validated panic: cell "c6" is firing an alarm while not resident
 4705 swarm validated panic: handoffs 3 exceeds release ceiling 2
+4706 swarm validated panic: cell "c0" has a live transport while not resident
 4710 swarm validated panic: indexed cell op 101 has no owning slot in "c1"
 4712 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4720 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4734 swarm validated panic: handoffs 3 exceeds release ceiling 2
+4739 swarm validated liveness
 4752 swarm validated panic: cell "c3" has a live transport while not resident
 4799 swarm validated panic: handoffs 3 exceeds release ceiling 2
 4804 swarm validated alarm-not-fired liveness
@@ -589,13 +577,11 @@
 5029 swarm validated liveness
 5042 swarm validated panic: cell "c6" is firing an alarm while not resident
 5046 swarm validated panic: cell "c5" is firing an alarm while not resident
-5056 swarm validated panic: cell "c0" has a live transport while not resident
 5057 swarm validated panic: cell "c1" is firing an alarm while not resident
 5064 swarm validated panic: cell "c1" has a live transport while not resident
 5087 swarm validated panic: cell "c4" is firing an alarm while not resident
 5099 swarm validated liveness
 5109 swarm validated panic: cell "c7" is firing an alarm while not resident
-5112 swarm validated panic: cell "c1" is firing an alarm while not resident
 5117 swarm validated panic: cell "c2" has a live transport while not resident
 5119 swarm validated panic: cell "c0" is firing an alarm while not resident
 5126 swarm validated panic: confirming cell "c3" left the owner read in Fenced
@@ -603,15 +589,16 @@
 5178 swarm validated panic: handoffs 3 exceeds release ceiling 2
 5199 swarm validated liveness
 5206 swarm validated panic: indexed cell op 252 has no owning slot in "c0"
-5216 swarm validated panic: cell "c2" has a live transport while not resident
 5218 swarm validated panic: indexed cell op 85 has no owning slot in "c0"
 5228 swarm validated panic: cell "c2" has a live transport while not resident
 5230 swarm validated panic: handoffs 3 exceeds release ceiling 2
 5232 swarm validated panic: cell "c0" has a live transport while not resident
+5243 swarm validated liveness
 5259 swarm validated panic: cell "c2" has a live transport while not resident
 5263 swarm validated panic: indexed cell op 88 has no owning slot in "c7"
 5277 swarm validated panic: handoffs 4 exceeds release ceiling 2
 5286 swarm validated panic: handoffs 3 exceeds release ceiling 2
+5290 swarm validated panic: handoff cell "c1" is outside the pipeline in ReadingOwner { op: 60 }
 5293 swarm validated panic: cell "c2" is firing an alarm while not resident
 5316 swarm validated panic: cell "c1" has a live transport while not resident
 5330 swarm validated panic: handoff cell "c5" is outside the pipeline in WaitingActivation
@@ -619,7 +606,6 @@
 5342 swarm validated liveness
 5343 swarm validated panic: indexed cell op 29 has no owning slot in "c5"
 5353 swarm validated panic: indexed cell op 63 has no owning slot in "c1"
-5365 swarm validated panic: cell "c2" has a live transport while not resident
 5392 swarm validated liveness
 5413 swarm validated panic: cell "c1" has a live transport while not resident
 5414 swarm validated panic: cell "c8" has a live transport while not resident
@@ -627,12 +613,12 @@
 5435 swarm validated panic: cell "c0" has a live transport while not resident
 5453 swarm validated panic: handoffs 3 exceeds release ceiling 2
 5457 swarm validated panic: handoffs 3 exceeds release ceiling 2
-5459 swarm validated panic: handoffs 4 exceeds release ceiling 2
+5459 swarm validated panic: handoffs 3 exceeds release ceiling 2
 5461 swarm validated panic: handoffs 4 exceeds release ceiling 2
 5479 swarm validated panic: cell "c3" has a live transport while not resident
 5481 swarm validated panic: indexed cell op 120 has no owning slot in "c2"
 5495 swarm validated panic: indexed cell op 576 has no owning slot in "c5"
-5498 swarm validated lost-write stale-read
+5499 swarm validated panic: handoffs 3 exceeds release ceiling 2
 5504 swarm validated stale-read
 5523 swarm validated panic: indexed cell op 61 has no owning slot in "c2"
 5526 swarm validated panic: indexed cell op 186 has no owning slot in "c6"
@@ -643,8 +629,8 @@
 5572 swarm validated panic: cell "c2" has a live transport while not resident
 5598 swarm validated liveness
 5601 swarm validated panic: handoff cell "c2" is outside the pipeline in Fenced
-5617 swarm validated panic: confirming cell "c9" left the owner read in Fenced
-5618 swarm validated panic: cell "c4" has a live transport while not resident
+5617 swarm validated panic: handoffs 3 exceeds release ceiling 2
+5618 swarm validated panic: handoffs 4 exceeds release ceiling 2
 5621 swarm validated panic: handoff cell "c2" is outside the pipeline in Fenced
 5626 swarm validated panic: handoffs 3 exceeds release ceiling 2
 5662 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -657,27 +643,29 @@
 5749 swarm validated panic: cell "c0" is firing an alarm while not resident
 5772 swarm validated liveness
 5775 swarm validated panic: cell "c1" is firing an alarm while not resident
-5778 swarm validated panic: confirming cell "c3" left the owner read in Inactive
+5778 swarm validated panic: confirming cell "c0" left the owner read in Inactive
 5787 swarm validated panic: cell "c1" is firing an alarm while not resident
 5800 swarm validated panic: cell "c9" is firing an alarm while not resident
 5801 swarm validated panic: cell "c0" has a live transport while not resident
 5827 swarm validated panic: handoffs 3 exceeds release ceiling 2
+5837 swarm validated lost-write stale-read
 5839 swarm validated panic: cell "c2" is firing an alarm while not resident
 5847 swarm validated panic: confirming cell "c1" left the owner read in Inactive
 5856 swarm validated panic: cell "c8" has a live transport while not resident
 5861 swarm validated panic: cell "c6" is firing an alarm while not resident
 5866 swarm validated panic: handoffs 3 exceeds release ceiling 2
+5867 swarm validated panic: handoffs 3 exceeds release ceiling 2
 5880 swarm validated panic: cell "c3" has a live transport while not resident
-5881 swarm validated panic: cell "c6" is firing an alarm while not resident
+5881 swarm validated panic: cell "c5" is firing an alarm while not resident
 5884 swarm validated panic: cell "c0" has a live transport while not resident
 5895 swarm validated panic: cell "c1" has a live transport while not resident
 5896 swarm validated panic: cell "c8" has a live transport while not resident
-5906 swarm validated panic: cell "c6" has a live transport while not resident
 5907 swarm validated liveness
 5918 swarm validated panic: cell "c7" is firing an alarm while not resident
 5942 swarm validated panic: indexed cell op 60 has no owning slot in "c2"
 5957 swarm validated panic: indexed cell op 432 has no owning slot in "c0"
 5971 swarm validated panic: cell "c1" is firing an alarm while not resident
+5973 swarm validated panic: cell "c0" is firing an alarm while not resident
 5975 swarm validated panic: cell "c1" has a live transport while not resident
 5979 swarm validated panic: indexed cell op 164 has no owning slot in "c4"
 5983 swarm validated panic: indexed cell op 60 has no owning slot in "c0"
@@ -685,6 +673,7 @@
 5998 swarm validated liveness
 6000 swarm validated panic: cell "c0" has a live transport while not resident
 6012 swarm validated panic: cell "c7" is firing an alarm while not resident
+6015 swarm validated stale-read
 6028 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6032 swarm validated panic: indexed cell op 192 has no owning slot in "c2"
 6033 swarm validated panic: confirming cell "c4" left the owner read in Inactive
@@ -692,6 +681,7 @@
 6051 swarm validated panic: cell "c0" has a live transport while not resident
 6053 swarm validated panic: cell "c1" has a live transport while not resident
 6054 swarm validated panic: cell "c3" has a live transport while not resident
+6055 swarm validated panic: cell "c4" is firing an alarm while not resident
 6084 swarm validated panic: cell "c4" is firing an alarm while not resident
 6094 swarm validated panic: cell "c1" has a live transport while not resident
 6096 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -702,10 +692,12 @@
 6108 swarm validated panic: cell "c3" has a live transport while not resident
 6118 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6124 swarm validated panic: cell "c3" has a live transport while not resident
+6138 swarm validated liveness
 6139 swarm validated panic: indexed cell op 109 has no owning slot in "c2"
 6140 swarm validated panic: cell "c0" has a live transport while not resident
 6145 swarm validated panic: cell "c1" has a live transport while not resident
 6148 swarm validated panic: cell "c0" is firing an alarm while not resident
+6154 swarm validated panic: cell "c0" is firing an alarm while not resident
 6157 swarm validated panic: indexed cell op 33 has no owning slot in "c9"
 6158 swarm validated panic: cell "c5" has a live transport while not resident
 6174 swarm validated panic: cell "c3" is firing an alarm while not resident
@@ -716,22 +708,19 @@
 6221 swarm validated panic: cell "c0" has a live transport while not resident
 6227 swarm validated panic: cell "c1" has a live transport while not resident
 6232 swarm validated late-ack lost-write stale-read
-6245 swarm validated alarm-not-fired liveness
+6245 swarm validated panic: cell "c0" is firing an alarm while not resident
 6247 swarm validated panic: cell "c8" is firing an alarm while not resident
 6251 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6254 swarm validated stale-read
-6255 swarm validated lost-write stale-read
 6286 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6296 swarm validated liveness
 6308 swarm validated panic: handoff cell "c5" is outside the pipeline in Fenced
 6317 swarm validated panic: handoffs 3 exceeds release ceiling 2
-6322 swarm validated panic: cell "c2" has a live transport while not resident
 6325 swarm validated liveness
 6326 swarm validated panic: indexed cell op 23 has no owning slot in "c7"
 6329 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6335 swarm validated panic: cell "c1" has a live transport while not resident
 6336 swarm validated panic: cell "c6" has a live transport while not resident
-6340 swarm validated panic: cell "c7" has a live transport while not resident
 6346 swarm validated stale-read
 6365 swarm validated panic: cell "c0" is firing an alarm while not resident
 6377 swarm validated panic: cell "c1" has a live transport while not resident
@@ -741,22 +730,22 @@
 6385 swarm validated panic: cell "c1" is firing an alarm while not resident
 6386 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6390 swarm validated panic: cell "c0" has a live transport while not resident
+6411 swarm validated panic: cell "c1" has a live transport while not resident
 6412 swarm validated panic: cell "c1" has a live transport while not resident
 6428 swarm validated panic: cell "c0" is firing an alarm while not resident
 6431 swarm validated panic: indexed cell op 46 has no owning slot in "c8"
 6439 swarm validated liveness
 6453 swarm validated panic: indexed cell op 219 has no owning slot in "c4"
 6462 swarm validated panic: handoffs 3 exceeds release ceiling 2
-6465 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6477 swarm validated panic: cell "c1" is firing an alarm while not resident
 6480 swarm validated panic: indexed cell op 106 has no owning slot in "c1"
+6485 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6486 swarm validated panic: handoff cell "c5" is outside the pipeline in Fenced
 6495 swarm validated panic: handoffs 4 exceeds release ceiling 2
 6512 swarm validated panic: cell "c6" has a live transport while not resident
 6526 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6548 swarm validated panic: confirming cell "c0" left the owner read in Fenced
 6557 swarm validated stale-read
-6558 swarm validated panic: indexed cell op 262 has no owning slot in "c1"
 6563 swarm validated panic: cell "c1" has a live transport while not resident
 6566 swarm validated panic: cell "c2" has a live transport while not resident
 6573 swarm validated panic: cell "c3" is firing an alarm while not resident
@@ -765,19 +754,17 @@
 6609 swarm validated liveness
 6611 swarm validated panic: cell "c0" has a live transport while not resident
 6618 swarm validated panic: cell "c3" has a live transport while not resident
-6625 swarm validated panic: cell "c3" is firing an alarm while not resident
 6628 swarm validated panic: cell "c1" is firing an alarm while not resident
+6632 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6638 swarm validated panic: cell "c2" has a live transport while not resident
 6649 swarm validated panic: indexed cell op 204 has no owning slot in "c4"
 6650 swarm validated panic: cell "c7" has a live transport while not resident
 6663 swarm validated panic: cell "c0" has a live transport while not resident
-6668 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6673 swarm validated panic: indexed cell op 193 has no owning slot in "c1"
 6680 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6687 swarm validated panic: cell "c0" is firing an alarm while not resident
 6701 swarm validated panic: cell "c2" has a live transport while not resident
 6703 swarm validated liveness
-6710 swarm validated panic: handoffs 4 exceeds release ceiling 2
 6729 swarm validated panic: cell "c6" has a live transport while not resident
 6735 swarm validated panic: indexed cell op 248 has no owning slot in "c3"
 6736 swarm validated panic: cell "c4" is firing an alarm while not resident
@@ -790,9 +777,10 @@
 6768 swarm validated alarm-not-fired liveness
 6772 swarm validated panic: cell "c1" is firing an alarm while not resident
 6783 swarm validated panic: handoffs 3 exceeds release ceiling 2
+6791 swarm validated panic: cell "c1" is firing an alarm while not resident
 6805 swarm validated panic: cell "c2" is firing an alarm while not resident
-6813 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6818 swarm validated panic: cell "c3" has a live transport while not resident
+6821 swarm validated panic: handoff cell "c5" is outside the pipeline in Fenced
 6828 swarm validated panic: cell "c1" is firing an alarm while not resident
 6854 swarm validated panic: cell "c6" has a live transport while not resident
 6859 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -800,7 +788,6 @@
 6880 swarm validated panic: cell "c1" has a live transport while not resident
 6891 swarm validated panic: indexed cell op 42 has no owning slot in "c8"
 6901 swarm validated panic: cell "c2" is firing an alarm while not resident
-6903 swarm validated panic: cell "c0" is firing an alarm while not resident
 6921 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6925 swarm validated panic: indexed cell op 254 has no owning slot in "c4"
 6928 swarm validated panic: cell "c5" has a live transport while not resident
@@ -809,6 +796,7 @@
 6958 swarm validated panic: cell "c5" is firing an alarm while not resident
 6960 swarm validated panic: handoffs 3 exceeds release ceiling 2
 6965 swarm validated panic: handoffs 3 exceeds release ceiling 2
+6986 swarm validated panic: cell "c7" is firing an alarm while not resident
 6990 swarm validated panic: cell "c5" has a live transport while not resident
 7007 swarm validated panic: cell "c1" is firing an alarm while not resident
 7013 swarm validated panic: cell "c4" has a live transport while not resident
@@ -816,23 +804,22 @@
 7025 swarm validated panic: cell "c6" has a live transport while not resident
 7026 swarm validated panic: cell "c2" is firing an alarm while not resident
 7028 swarm validated panic: cell "c0" has a live transport while not resident
+7031 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7034 swarm validated panic: cell "c3" has a live transport while not resident
 7038 swarm validated panic: cell "c0" has a live transport while not resident
 7051 swarm validated panic: confirming cell "c1" left the owner read in Fenced
-7053 swarm validated panic: cell "c0" is firing an alarm while not resident
+7053 swarm validated liveness
 7062 swarm validated panic: cell "c0" has a live transport while not resident
 7067 swarm validated panic: indexed cell op 55 has no owning slot in "c4"
 7069 swarm validated panic: cell "c1" has a live transport while not resident
 7082 swarm validated panic: cell "c5" has a live transport while not resident
 7086 swarm validated panic: cell "c3" has a live transport while not resident
 7097 swarm validated panic: indexed cell op 86 has no owning slot in "c0"
-7099 swarm validated panic: cell "c7" is firing an alarm while not resident
 7104 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7135 swarm validated panic: cell "c1" has a live transport while not resident
 7136 swarm validated panic: cell "c0" has a live transport while not resident
 7146 swarm validated panic: cell "c5" has a live transport while not resident
 7151 swarm validated panic: cell "c5" is firing an alarm while not resident
-7171 swarm validated panic: confirming cell "c1" left the owner read in Inactive
 7176 swarm validated panic: handoffs 4 exceeds release ceiling 2
 7178 swarm validated panic: cell "c3" is firing an alarm while not resident
 7182 swarm validated panic: cell "c1" has a live transport while not resident
@@ -840,6 +827,7 @@
 7195 swarm validated panic: cell "c2" is firing an alarm while not resident
 7198 swarm validated stale-read
 7200 swarm validated panic: cell "c6" is firing an alarm while not resident
+7205 swarm validated panic: handoff cell "c2" is outside the pipeline in Fenced
 7222 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7241 swarm validated panic: cell "c1" is firing an alarm while not resident
 7243 swarm validated panic: indexed cell op 132 has no owning slot in "c6"
@@ -852,17 +840,16 @@
 7280 swarm validated panic: cell "c2" has a live transport while not resident
 7281 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7299 swarm validated panic: handoffs 3 exceeds release ceiling 2
-7313 swarm validated panic: indexed cell op 95 has no owning slot in "c2"
 7323 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7325 swarm validated panic: cell "c0" has a live transport while not resident
 7327 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7333 swarm validated panic: cell "c0" is firing an alarm while not resident
-7341 swarm validated panic: cell "c3" is firing an alarm while not resident
 7354 swarm validated panic: cell "c2" has a live transport while not resident
 7356 swarm validated panic: cell "c2" is firing an alarm while not resident
 7357 swarm validated liveness
 7359 swarm validated panic: cell "c0" has a live transport while not resident
 7364 swarm validated panic: cell "c1" has a live transport while not resident
+7379 swarm validated panic: confirming cell "c3" left the owner read in Inactive
 7388 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7390 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7391 swarm validated panic: cell "c4" has a live transport while not resident
@@ -877,11 +864,12 @@
 7430 swarm validated panic: cell "c3" has a live transport while not resident
 7434 swarm validated liveness
 7444 swarm validated panic: cell "c2" is firing an alarm while not resident
-7454 swarm validated liveness
 7456 swarm validated panic: indexed cell op 63 has no owning slot in "c0"
+7457 swarm validated liveness
 7464 swarm validated panic: confirming cell "c0" left the owner read in Fenced
 7465 swarm validated panic: cell "c2" has a live transport while not resident
 7467 swarm validated panic: handoffs 3 exceeds release ceiling 2
+7468 swarm validated panic: cell "c2" has a live transport while not resident
 7492 swarm validated panic: cell "c2" has a live transport while not resident
 7503 swarm validated liveness
 7510 swarm validated panic: cell "c3" is firing an alarm while not resident
@@ -901,17 +889,17 @@
 7615 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7616 swarm validated panic: indexed cell op 33 has no owning slot in "c4"
 7621 swarm validated panic: cell "c0" has a live transport while not resident
-7630 swarm validated panic: cell "c0" has a live transport while not resident
 7660 swarm validated panic: confirming cell "c4" left the owner read in Inactive
 7661 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7663 swarm validated panic: cell "c0" has a live transport while not resident
 7664 swarm validated panic: cell "c3" has a live transport while not resident
 7672 swarm validated panic: cell "c5" is firing an alarm while not resident
 7686 swarm validated panic: cell "c0" is firing an alarm while not resident
-7697 swarm validated panic: confirming cell "c1" left the owner read in Inactive
-7715 swarm validated panic: cell "c1" is firing an alarm while not resident
+7697 swarm validated panic: cell "c7" has a live transport while not resident
+7701 swarm validated panic: confirming cell "c6" left the owner read in Inactive
 7718 swarm validated panic: cell "c6" is firing an alarm while not resident
 7724 swarm validated panic: handoffs 3 exceeds release ceiling 2
+7733 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7736 swarm validated panic: cell "c4" is firing an alarm while not resident
 7745 swarm validated panic: cell "c1" is firing an alarm while not resident
 7747 swarm validated panic: cell "c4" has a live transport while not resident
@@ -925,15 +913,15 @@
 7820 swarm validated liveness lost-write stale-read
 7832 swarm validated panic: cell "c3" is firing an alarm while not resident
 7836 swarm validated panic: cell "c1" is firing an alarm while not resident
-7872 swarm validated panic: handoffs 3 exceeds release ceiling 2
+7840 swarm validated panic: handoffs 3 exceeds release ceiling 2
+7859 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7882 swarm validated panic: cell "c5" is firing an alarm while not resident
+7888 swarm validated panic: cell "c0" has a live transport while not resident
 7889 swarm validated panic: cell "c5" has a live transport while not resident
 7890 swarm validated panic: indexed cell op 117 has no owning slot in "c7"
 7893 swarm validated panic: cell "c1" has a live transport while not resident
 7896 swarm validated panic: handoffs 3 exceeds release ceiling 2
-7910 swarm validated panic: handoffs 3 exceeds release ceiling 2
 7911 swarm validated panic: cell "c4" is firing an alarm while not resident
-7914 swarm validated lost-write stale-read
 7933 swarm validated panic: cell "c4" has a live transport while not resident
 7939 swarm validated panic: cell "c2" is firing an alarm while not resident
 7953 swarm validated panic: cell "c0" has a live transport while not resident
@@ -955,7 +943,6 @@
 8100 swarm validated panic: confirming cell "c2" left the owner read in Fenced
 8102 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8108 swarm validated panic: cell "c1" is firing an alarm while not resident
-8110 swarm validated panic: indexed cell op 65 has no owning slot in "c0"
 8115 swarm validated panic: cell "c3" has a live transport while not resident
 8116 swarm validated panic: cell "c8" is firing an alarm while not resident
 8143 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -965,14 +952,14 @@
 8151 swarm validated panic: handoffs 4 exceeds release ceiling 2
 8156 swarm validated panic: handoff cell "c5" is outside the pipeline in ReadingOwner { op: 406 }
 8157 swarm validated panic: cell "c0" is firing an alarm while not resident
-8168 swarm validated panic: indexed cell op 24 has no owning slot in "c0"
 8171 swarm validated liveness lost-write stale-read
 8186 swarm validated panic: handoffs 3 exceeds release ceiling 2
-8192 swarm validated panic: handoff cell "c7" is outside the pipeline in ReadingOwner { op: 827 }
-8193 swarm validated liveness
+8192 swarm validated panic: handoff cell "c4" is outside the pipeline in ReadingOwner { op: 827 }
+8193 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8198 swarm validated panic: cell "c9" has a live transport while not resident
 8199 swarm validated panic: cell "c3" is firing an alarm while not resident
 8223 swarm validated panic: cell "c0" has a live transport while not resident
+8233 swarm validated panic: cell "c1" has a live transport while not resident
 8241 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8268 swarm validated panic: cell "c0" is firing an alarm while not resident
 8269 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -981,19 +968,19 @@
 8293 swarm validated panic: indexed cell op 49 has no owning slot in "c4"
 8294 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8296 swarm validated panic: indexed cell op 27 has no owning slot in "c5"
+8297 swarm validated panic: confirming cell "c2" left the owner read in Inactive
 8306 swarm validated panic: cell "c3" has a live transport while not resident
 8321 swarm validated panic: cell "c0" has a live transport while not resident
 8328 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8342 swarm validated panic: cell "c3" has a live transport while not resident
 8343 swarm validated stale-read
-8347 swarm validated panic: cell "c6" is firing an alarm while not resident
-8353 swarm validated panic: cell "c4" has a live transport while not resident
+8347 swarm validated panic: cell "c0" is firing an alarm while not resident
+8353 swarm validated lost-write stale-read
 8364 swarm validated panic: indexed cell op 66 has no owning slot in "c8"
 8377 swarm validated panic: cell "c1" is firing an alarm while not resident
 8378 swarm validated panic: cell "c2" has a live transport while not resident
 8380 swarm validated panic: cell "c1" has a live transport while not resident
 8390 swarm validated liveness
-8419 swarm validated liveness
 8424 swarm validated panic: cell "c4" has a live transport while not resident
 8438 swarm validated panic: cell "c1" has a live transport while not resident
 8445 swarm validated panic: indexed cell op 176 has no owning slot in "c1"
@@ -1004,28 +991,26 @@
 8481 swarm validated panic: confirming cell "c3" left the owner read in Fenced
 8482 swarm validated panic: indexed cell op 120 has no owning slot in "c3"
 8492 swarm validated panic: cell "c1" has a live transport while not resident
-8514 swarm validated panic: cell "c8" has a live transport while not resident
 8515 swarm validated panic: indexed cell op 333 has no owning slot in "c4"
 8520 swarm validated liveness
 8525 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8526 swarm validated panic: handoff cell "c3" is outside the pipeline in Fenced
 8534 swarm validated panic: cell "c0" is firing an alarm while not resident
-8541 swarm validated panic: handoffs 4 exceeds release ceiling 2
+8541 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8553 swarm validated panic: handoff cell "c8" is outside the pipeline in ReadingOwner { op: 1277 }
 8555 swarm validated panic: cell "c2" has a live transport while not resident
 8557 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8580 swarm validated panic: cell "c1" is firing an alarm while not resident
-8581 swarm validated panic: cell "c4" has a live transport while not resident
 8585 swarm validated panic: cell "c4" has a live transport while not resident
 8588 swarm validated panic: cell "c3" has a live transport while not resident
 8612 swarm validated panic: cell "c2" has a live transport while not resident
 8617 swarm validated stale-read
+8633 swarm validated panic: cell "c1" has a live transport while not resident
 8645 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8646 swarm validated panic: cell "c3" has a live transport while not resident
 8653 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8666 swarm validated stale-read
 8669 swarm validated panic: cell "c0" has a live transport while not resident
-8671 swarm validated lost-write stale-read
 8678 swarm validated panic: cell "c0" has a live transport while not resident
 8679 swarm validated panic: cell "c0" has a live transport while not resident
 8687 swarm validated panic: cell "c3" is firing an alarm while not resident
@@ -1034,20 +1019,20 @@
 8713 swarm validated panic: cell "c4" is firing an alarm while not resident
 8718 swarm validated panic: cell "c3" has a live transport while not resident
 8726 swarm validated panic: handoffs 3 exceeds release ceiling 2
-8727 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8736 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8740 swarm validated panic: cell "c0" is firing an alarm while not resident
+8751 swarm validated liveness
 8786 swarm validated panic: cell "c0" is firing an alarm while not resident
+8791 swarm validated panic: cell "c1" is firing an alarm while not resident
 8792 swarm validated panic: cell "c1" is firing an alarm while not resident
-8810 swarm validated panic: cell "c6" has a live transport while not resident
 8812 swarm validated panic: cell "c4" has a live transport while not resident
 8829 swarm validated panic: cell "c0" is firing an alarm while not resident
+8843 swarm validated panic: confirming cell "c6" left the owner read in Inactive
 8845 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8852 swarm validated panic: cell "c2" is firing an alarm while not resident
 8866 swarm validated panic: cell "c0" is firing an alarm while not resident
-8883 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8884 swarm validated panic: cell "c3" is firing an alarm while not resident
-8889 swarm validated panic: confirming cell "c0" left the owner read in Inactive
+8885 swarm validated panic: cell "c3" has a live transport while not resident
 8895 swarm validated alarm-not-fired liveness
 8897 swarm validated panic: cell "c1" has a live transport while not resident
 8904 swarm validated panic: cell "c6" is firing an alarm while not resident
@@ -1055,12 +1040,12 @@
 8945 swarm validated panic: cell "c6" is firing an alarm while not resident
 8948 swarm validated panic: cell "c1" has a live transport while not resident
 8949 swarm validated panic: cell "c3" is firing an alarm while not resident
+8958 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8968 swarm validated panic: handoffs 4 exceeds release ceiling 2
 8976 swarm validated panic: cell "c1" has a live transport while not resident
-8988 swarm validated panic: indexed cell op 73 has no owning slot in "c5"
+8988 swarm validated panic: handoffs 3 exceeds release ceiling 2
 8990 swarm validated panic: handoffs 4 exceeds release ceiling 2
 8997 swarm validated panic: handoffs 3 exceeds release ceiling 2
-9002 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9003 swarm validated panic: cell "c7" is firing an alarm while not resident
 9007 swarm validated panic: cell "c0" has a live transport while not resident
 9020 swarm validated panic: cell "c0" has a live transport while not resident
@@ -1071,16 +1056,20 @@
 9035 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9047 swarm validated panic: cell "c2" has a live transport while not resident
 9059 swarm validated panic: cell "c8" is firing an alarm while not resident
+9060 swarm validated panic: cell "c0" is firing an alarm while not resident
 9067 swarm validated panic: indexed cell op 114 has no owning slot in "c7"
 9080 swarm validated panic: cell "c0" has a live transport while not resident
 9090 swarm validated panic: cell "c0" is firing an alarm while not resident
 9091 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9102 swarm validated panic: handoff cell "c7" is outside the pipeline in Fenced
+9103 swarm validated alarm-not-fired liveness
 9106 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9107 swarm validated panic: handoffs 4 exceeds release ceiling 2
 9112 swarm validated panic: cell "c4" is firing an alarm while not resident
 9113 swarm validated lost-write stale-read
 9114 swarm validated panic: handoffs 3 exceeds release ceiling 2
+9120 swarm validated lost-write stale-read
+9142 swarm validated panic: cell "c5" has a live transport while not resident
 9143 swarm validated panic: indexed cell op 230 has no owning slot in "c3"
 9146 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9150 swarm validated panic: cell "c3" is firing an alarm while not resident
@@ -1089,19 +1078,17 @@
 9163 swarm validated panic: handoffs 4 exceeds release ceiling 2
 9170 swarm validated panic: confirming cell "c7" left the owner read in Inactive
 9186 swarm validated panic: handoffs 3 exceeds release ceiling 2
-9193 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9196 swarm validated panic: indexed cell op 83 has no owning slot in "c3"
 9206 swarm validated panic: cell "c1" is firing an alarm while not resident
 9212 swarm validated panic: cell "c2" is firing an alarm while not resident
 9230 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9234 swarm validated panic: cell "c2" has a live transport while not resident
-9236 swarm validated panic: cell "c1" is firing an alarm while not resident
 9249 swarm validated panic: cell "c4" is firing an alarm while not resident
 9254 swarm validated panic: cell "c1" is firing an alarm while not resident
 9268 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9281 swarm validated panic: cell "c4" has a live transport while not resident
 9290 swarm validated panic: handoffs 3 exceeds release ceiling 2
-9294 swarm validated panic: cell "c4" is firing an alarm while not resident
+9294 swarm validated lost-write stale-read
 9296 swarm validated stale-read
 9298 swarm validated panic: cell "c4" has a live transport while not resident
 9301 swarm validated panic: cell "c5" is firing an alarm while not resident
@@ -1114,7 +1101,7 @@
 9351 swarm validated liveness
 9353 swarm validated panic: cell "c1" has a live transport while not resident
 9360 swarm validated panic: cell "c4" has a live transport while not resident
-9366 swarm validated panic: handoffs 3 exceeds release ceiling 2
+9366 swarm validated panic: handoffs 4 exceeds release ceiling 2
 9379 swarm validated panic: indexed cell op 46 has no owning slot in "c1"
 9382 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9391 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -1122,6 +1109,7 @@
 9407 swarm validated panic: indexed cell op 286 has no owning slot in "c5"
 9416 swarm validated liveness
 9438 swarm validated panic: handoffs 3 exceeds release ceiling 2
+9454 swarm validated panic: indexed cell op 160 has no owning slot in "c4"
 9461 swarm validated lost-write stale-read
 9467 swarm validated panic: cell "c3" has a live transport while not resident
 9503 swarm validated panic: cell "c1" has a live transport while not resident
@@ -1130,8 +1118,6 @@
 9511 swarm validated panic: indexed cell op 170 has no owning slot in "c7"
 9515 swarm validated panic: indexed cell op 300 has no owning slot in "c0"
 9520 swarm validated panic: indexed cell op 88 has no owning slot in "c2"
-9524 swarm validated panic: handoffs 3 exceeds release ceiling 2
-9538 swarm validated stale-read
 9539 swarm validated panic: indexed cell op 72 has no owning slot in "c0"
 9542 swarm validated stale-read panic: confirming cell "c1" left the owner read in Fenced
 9547 swarm validated panic: cell "c1" has a live transport while not resident
@@ -1139,9 +1125,8 @@
 9585 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9589 swarm validated panic: handoffs 4 exceeds release ceiling 2
 9592 swarm validated liveness
-9615 swarm validated panic: cell "c6" has a live transport while not resident
+9615 swarm validated liveness
 9622 swarm validated panic: handoffs 3 exceeds release ceiling 2
-9628 swarm validated panic: cell "c5" is firing an alarm while not resident
 9629 swarm validated panic: cell "c4" has a live transport while not resident
 9633 swarm validated panic: confirming cell "c9" left the owner read in Inactive
 9640 swarm validated panic: cell "c0" has a live transport while not resident
@@ -1155,13 +1140,16 @@
 9685 swarm validated panic: cell "c1" is firing an alarm while not resident
 9693 swarm validated stale-read
 9696 swarm validated panic: cell "c3" is firing an alarm while not resident
+9697 swarm validated panic: confirming cell "c1" left the owner read in Inactive
 9707 swarm validated liveness
 9720 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9733 swarm validated panic: cell "c5" is firing an alarm while not resident
 9738 swarm validated panic: cell "c2" has a live transport while not resident
+9751 swarm validated panic: cell "c1" has a live transport while not resident
 9757 swarm validated panic: cell "c2" is firing an alarm while not resident
 9759 swarm validated panic: cell "c3" is firing an alarm while not resident
-9774 swarm validated liveness
+9764 swarm validated panic: handoff cell "c5" is outside the pipeline in Fenced
+9774 swarm validated panic: indexed cell op 274 has no owning slot in "c0"
 9783 swarm validated panic: cell "c0" is firing an alarm while not resident
 9788 swarm validated liveness
 9791 swarm validated panic: handoffs 3 exceeds release ceiling 2
@@ -1175,7 +1163,6 @@
 9841 swarm validated panic: indexed cell op 277 has no owning slot in "c0"
 9842 swarm validated liveness
 9853 swarm validated panic: confirming cell "c7" left the owner read in Fenced
-9856 swarm validated lost-write stale-read
 9863 swarm validated liveness lost-write stale-read
 9866 swarm validated panic: confirming cell "c7" left the owner read in Fenced
 9872 swarm validated panic: cell "c1" has a live transport while not resident
@@ -1192,79 +1179,87 @@
 9981 swarm validated panic: confirming cell "c3" left the owner read in Inactive
 9990 swarm validated panic: handoffs 3 exceeds release ceiling 2
 9991 swarm validated panic: cell "c4" is firing an alarm while not resident
+9993 swarm validated liveness lost-write stale-read
 9999 swarm validated panic: indexed cell op 677 has no owning slot in "c1"
 
 # SimConfig::swarm, seeds 0..10000, unvalidated.
+39 swarm unvalidated liveness
+82 swarm unvalidated lost-write stale-read
 167 swarm unvalidated liveness
 173 swarm unvalidated stale-read
-181 swarm unvalidated liveness
 215 swarm unvalidated evicted-pinned
 216 swarm unvalidated evicted-pinned
 256 swarm unvalidated alarm-not-fired liveness
 300 swarm unvalidated lost-write stale-read
 302 swarm unvalidated liveness
-373 swarm unvalidated lost-write stale-read
+331 swarm unvalidated lost-write stale-read
 410 swarm unvalidated liveness
 460 swarm unvalidated liveness
 484 swarm unvalidated liveness
 515 swarm unvalidated lost-write stale-read
 525 swarm unvalidated liveness
 536 swarm unvalidated lost-write stale-read
-626 swarm unvalidated lost-write stale-read
 657 swarm unvalidated lost-write stale-read
+666 swarm unvalidated liveness
 675 swarm unvalidated stale-read
 705 swarm unvalidated liveness
-713 swarm unvalidated lost-write stale-read
 721 swarm unvalidated stale-read
 744 swarm unvalidated alarm-not-fired liveness
 753 swarm unvalidated liveness
-775 swarm unvalidated liveness
 815 swarm unvalidated stale-read
-950 swarm unvalidated lost-write stale-read
+937 swarm unvalidated liveness
 997 swarm unvalidated liveness
 1008 swarm unvalidated liveness
 1040 swarm unvalidated stale-read
 1047 swarm unvalidated evicted-pinned
 1205 swarm unvalidated liveness
 1227 swarm unvalidated liveness
-1274 swarm unvalidated liveness
 1293 swarm unvalidated lost-write stale-read
 1322 swarm unvalidated liveness
 1334 swarm unvalidated liveness
+1410 swarm unvalidated lost-write stale-read
 1500 swarm unvalidated liveness
 1511 swarm unvalidated liveness
 1544 swarm unvalidated stale-read
+1551 swarm unvalidated lost-write stale-read
 1622 swarm unvalidated liveness
 1634 swarm unvalidated liveness
+1637 swarm unvalidated liveness
 1655 swarm unvalidated late-ack lost-write stale-read
 1664 swarm unvalidated lost-write stale-read
 1704 swarm unvalidated liveness
+1706 swarm unvalidated liveness
 1753 swarm unvalidated liveness
 1786 swarm unvalidated liveness
+1812 swarm unvalidated liveness
 1888 swarm unvalidated liveness
-1895 swarm unvalidated liveness
 2004 swarm unvalidated liveness
 2037 swarm unvalidated liveness
 2043 swarm unvalidated liveness stale-read
 2046 swarm unvalidated lost-write stale-read
 2052 swarm unvalidated liveness
 2062 swarm unvalidated liveness
+2076 swarm unvalidated liveness
 2134 swarm unvalidated stale-read
-2194 swarm unvalidated liveness lost-write stale-read
+2163 swarm unvalidated lost-write stale-read
 2203 swarm unvalidated liveness
 2214 swarm unvalidated lost-write stale-read
+2219 swarm unvalidated lost-write stale-read
 2293 swarm unvalidated liveness
 2329 swarm unvalidated lost-write stale-read
+2429 swarm unvalidated lost-write stale-read
 2471 swarm unvalidated liveness
 2480 swarm unvalidated lost-write stale-read
-2554 swarm unvalidated stale-read
+2656 swarm unvalidated liveness
 2674 swarm unvalidated stale-read
 2698 swarm unvalidated liveness
 2768 swarm unvalidated liveness
 2795 swarm unvalidated lost-write stale-read
-2864 swarm unvalidated liveness
 2892 swarm unvalidated lost-write stale-read
 2914 swarm unvalidated liveness
+2941 swarm unvalidated alarm-not-fired liveness
+2956 swarm unvalidated lost-write stale-read
+3017 swarm unvalidated liveness
 3087 swarm unvalidated stale-read
 3224 swarm unvalidated stale-read
 3229 swarm unvalidated liveness
@@ -1272,9 +1267,7 @@
 3345 swarm unvalidated liveness
 3404 swarm unvalidated lost-write stale-read
 3439 swarm unvalidated liveness
-3547 swarm unvalidated liveness
 3552 swarm unvalidated liveness
-3627 swarm unvalidated liveness
 3648 swarm unvalidated lost-write stale-read
 3684 swarm unvalidated liveness
 3808 swarm unvalidated alarm-not-fired
@@ -1282,14 +1275,13 @@
 3984 swarm unvalidated stale-read
 4093 swarm unvalidated lost-write stale-read
 4134 swarm unvalidated liveness
+4154 swarm unvalidated liveness
 4184 swarm unvalidated stale-read
-4293 swarm unvalidated liveness
 4327 swarm unvalidated liveness
 4381 swarm unvalidated alarm-not-fired liveness
 4413 swarm unvalidated stale-read
 4456 swarm unvalidated liveness
 4480 swarm unvalidated liveness
-4497 swarm unvalidated alarm-not-fired liveness
 4502 swarm unvalidated lost-write stale-read
 4549 swarm unvalidated stale-read
 4551 swarm unvalidated stale-read
@@ -1299,6 +1291,7 @@
 4603 swarm unvalidated liveness
 4636 swarm unvalidated alarm-not-fired liveness
 4685 swarm unvalidated lost-write stale-read
+4739 swarm unvalidated liveness
 4804 swarm unvalidated alarm-not-fired liveness
 4856 swarm unvalidated lost-write stale-read
 4912 swarm unvalidated stale-read
@@ -1311,22 +1304,26 @@
 5126 swarm unvalidated alarm-not-fired liveness
 5170 swarm unvalidated liveness
 5199 swarm unvalidated liveness
+5243 swarm unvalidated liveness
 5342 swarm unvalidated liveness
 5392 swarm unvalidated liveness
 5414 swarm unvalidated evicted-pinned
-5498 swarm unvalidated lost-write stale-read
 5504 swarm unvalidated stale-read
 5598 swarm unvalidated liveness
 5772 swarm unvalidated liveness
+5837 swarm unvalidated lost-write stale-read
 5907 swarm unvalidated liveness
+5973 swarm unvalidated alarm-not-fired liveness
 5998 swarm unvalidated liveness
+6015 swarm unvalidated stale-read
 6054 swarm unvalidated evicted-pinned
+6055 swarm unvalidated alarm-not-fired liveness
 6094 swarm unvalidated lost-write stale-read
+6138 swarm unvalidated liveness
 6158 swarm unvalidated alarm-not-fired liveness
 6232 swarm unvalidated late-ack lost-write stale-read
 6245 swarm unvalidated alarm-not-fired liveness
 6254 swarm unvalidated stale-read
-6255 swarm unvalidated lost-write stale-read
 6296 swarm unvalidated liveness
 6325 swarm unvalidated liveness
 6336 swarm unvalidated evicted-pinned
@@ -1336,7 +1333,6 @@
 6439 swarm unvalidated liveness
 6557 swarm unvalidated stale-read
 6609 swarm unvalidated liveness
-6628 swarm unvalidated lost-write stale-read
 6703 swarm unvalidated liveness
 6768 swarm unvalidated alarm-not-fired liveness
 6862 swarm unvalidated lost-write stale-read
@@ -1347,14 +1343,13 @@
 7357 swarm unvalidated liveness
 7426 swarm unvalidated liveness
 7434 swarm unvalidated liveness
-7454 swarm unvalidated liveness
+7457 swarm unvalidated liveness
 7503 swarm unvalidated liveness
 7542 swarm unvalidated lost-write stale-read
 7600 swarm unvalidated liveness
 7793 swarm unvalidated liveness
 7810 swarm unvalidated stale-read
 7820 swarm unvalidated liveness lost-write stale-read
-7914 swarm unvalidated lost-write stale-read
 8014 swarm unvalidated lost-write stale-read
 8066 swarm unvalidated lost-write stale-read
 8088 swarm unvalidated lost-write stale-read
@@ -1367,15 +1362,15 @@
 8343 swarm unvalidated stale-read
 8353 swarm unvalidated lost-write stale-read
 8390 swarm unvalidated liveness
-8419 swarm unvalidated liveness
 8520 swarm unvalidated liveness
 8557 swarm unvalidated liveness
 8617 swarm unvalidated stale-read
 8666 swarm unvalidated stale-read
-8671 swarm unvalidated lost-write stale-read
+8751 swarm unvalidated liveness
 8895 swarm unvalidated alarm-not-fired liveness
+9103 swarm unvalidated alarm-not-fired liveness
 9113 swarm unvalidated lost-write stale-read
-9186 swarm unvalidated lost-write stale-read
+9120 swarm unvalidated lost-write stale-read
 9294 swarm unvalidated lost-write stale-read
 9296 swarm unvalidated stale-read
 9306 swarm unvalidated liveness lost-write stale-read
@@ -1384,18 +1379,16 @@
 9416 swarm unvalidated liveness
 9461 swarm unvalidated lost-write stale-read
 9504 swarm unvalidated alarm-not-fired liveness
-9538 swarm unvalidated stale-read
 9542 swarm unvalidated stale-read
 9592 swarm unvalidated liveness
-9615 swarm unvalidated liveness lost-write stale-read
+9615 swarm unvalidated liveness
 9657 swarm unvalidated stale-read
 9693 swarm unvalidated stale-read
 9707 swarm unvalidated liveness
-9774 swarm unvalidated liveness
 9788 swarm unvalidated liveness
 9808 swarm unvalidated stale-read
 9809 swarm unvalidated stale-read
 9842 swarm unvalidated liveness
-9856 swarm unvalidated lost-write stale-read
 9863 swarm unvalidated liveness lost-write stale-read
 9887 swarm unvalidated liveness
+9993 swarm unvalidated liveness lost-write stale-read

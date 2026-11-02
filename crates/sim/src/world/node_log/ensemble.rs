@@ -9,7 +9,8 @@
 //!   recruits the first two live by this node's clock. A healthy log
 //!   reconfigures only to grow wider (denoland/celld#245).
 //! - Once the bucket holds everything the log shipped, of open databases
-//!   and tails (`may_reconfigure`), the degraded leader reopens the log at
+//!   and tails, and no round is outstanding (`may_reconfigure`), the
+//!   degraded leader reopens the log at
 //!   the next log epoch with them, by a lease write that applies only while
 //!   the lease is still its own and open.
 //! - The new epoch has no fleet acks yet, and its fragments start where the
@@ -36,7 +37,7 @@ impl World {
     /// A frame's backstop ran out. A member that has not confirmed it
     /// failed its append: degrade (`degrade_shared`).
     pub(super) fn backstop(&mut self, node: usize, log_epoch: u64, frame: u64) {
-        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+        let Some(log) = self.machines[node].proc().log.as_ref() else {
             return;
         };
         // Frames restart at 1 in each log epoch: an earlier epoch's
@@ -44,29 +45,22 @@ impl World {
         if log.epoch != log_epoch {
             return;
         }
-        let Some(confirmers) = log.pending.remove(&frame) else {
-            return;
-        };
         // The lanes that never answered give up: a failed append.
-        let late: Vec<(usize, u64)> = (log.sent.iter())
+        let late: Vec<(usize, u64, String)> = (log.sent.iter())
             .filter(|((f, _), _)| *f == frame)
-            .map(|((_, member), started)| (*member, *started))
+            .map(|(&(_, member), &started)| (member, started, self.machines[member].name.clone()))
             .collect();
         let mono = self.mono(node);
-        let late: Vec<(usize, u64, String)> = (late.into_iter())
-            .map(|(member, started)| (member, started, self.machines[member].name.clone()))
-            .collect();
         let log = self.machines[node]
             .proc_mut()
             .log
             .as_mut()
             .expect("checked");
-        for (member, started, name) in late {
-            log.sent.remove(&(frame, member));
-            log.health.append_completed(&name, mono, mono - started);
+        for (member, started, name) in &late {
+            log.sent.remove(&(frame, *member));
+            log.health.append_completed(name, mono, mono - started);
         }
-        let session = log.session.clone();
-        if confirmers.len() < self.session(&session).ensemble.len() {
+        if !late.is_empty() {
             self.degrade(node, &format!("frame {frame} unconfirmed"));
         }
     }
@@ -91,6 +85,11 @@ impl World {
     /// left it degraded.
     pub(super) fn watch(&mut self, node: usize) {
         self.work(node, WATCH_MS, Work::Log(LogWork::Watch));
+        // The watch awaits its own passes: nothing else runs until one ends.
+        let waiting = self.machines[node].proc().log.as_ref();
+        if waiting.is_some_and(|log| matches!(log.pass, Some((_, true)))) {
+            return;
+        }
         self.probe_followers(node);
         self.evict_gray_followers(node);
         let t = self.t;
@@ -103,15 +102,16 @@ impl World {
         }
         if t.saturating_sub(log.repair_tried) >= log.repair_ms {
             log.repair_tried = t;
-            self.maintain(node);
+            self.maintain(node, true);
         }
     }
 
-    /// `maintain`, from the posture watch or the maintenance tick. A
+    /// `maintain`, from the posture watch (`from_watch`) or the
+    /// maintenance tick. A
     /// healthy log at full width has nothing to do. Otherwise read the
     /// peers' leases, a bucket call that can fail; the pass goes on in
     /// `peers_read`.
-    pub(super) fn maintain(&mut self, node: usize) {
+    pub(super) fn maintain(&mut self, node: usize, from_watch: bool) {
         let Some(log) = self.machines[node].proc().log.as_ref() else {
             return;
         };
@@ -129,7 +129,7 @@ impl World {
             .log
             .as_mut()
             .expect("checked");
-        log.pass = Some(log.epoch);
+        log.pass = Some((log.epoch, from_watch));
         self.store_call(node, StoreReq::ReadPeers);
     }
 
@@ -144,7 +144,7 @@ impl World {
         let Some(log) = self.machines[node].proc().log.as_ref() else {
             return;
         };
-        let Some(peers) = peers.filter(|_| log.pass.is_some()) else {
+        let Some(peers) = peers else {
             return self.pass_ended(node);
         };
         let now = self.wall(node);
@@ -160,9 +160,8 @@ impl World {
             }
             self.degrade(node, "a wider ensemble is available");
         }
-        let log = self.machines[node].proc().log.as_ref().expect("checked");
         let untiered = self.config.mutation == Some(Mutation::ReopenUntiered);
-        let barrier = log.pending.is_empty() && (untiered || self.all_shipped_tiered(node));
+        let barrier = !self.outstanding(node) && (untiered || self.all_shipped_tiered(node));
         if !barrier || members.is_empty() {
             return self.pass_ended(node);
         }
@@ -171,8 +170,6 @@ impl World {
             .log
             .as_mut()
             .expect("checked");
-        log.posture = Posture::Reopening;
-        log.published = log.epoch + 1;
         let req = StoreReq::Reopen {
             session: log.session.clone(),
             from: log.epoch,
@@ -181,14 +178,15 @@ impl World {
         self.store_call(node, req);
     }
 
-    /// A maintain pass ended. The repair cadence resets while healthy, and
-    /// doubles, up to the swap cadence, after a pass that stepped the epoch
-    /// but left the shipper degraded.
+    /// A maintain pass ended. After a pass the watch began, the repair
+    /// cadence resets while healthy, and doubles, up to the swap cadence,
+    /// after a pass that stepped the epoch but left the shipper degraded.
+    /// The tick's passes leave the watch's cadence alone.
     fn pass_ended(&mut self, node: usize) {
         let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
         };
-        let Some(before) = log.pass.take() else {
+        let Some((before, true)) = log.pass.take() else {
             return;
         };
         log.repair_ms = if log.posture != Posture::Shipping && log.epoch != before {
@@ -201,7 +199,18 @@ impl World {
     /// The maintenance loop's tick.
     pub(super) fn tick(&mut self, node: usize) {
         self.work(node, TICK_MS, Work::Log(LogWork::Tick));
-        self.maintain(node);
+        self.maintain(node, false);
+    }
+
+    /// Whether a round is outstanding (`outstanding`): a frame some lane
+    /// still waits on, or proofs waiting on the activation write, which
+    /// production's round awaits before it completes.
+    fn outstanding(&self, node: usize) -> bool {
+        let Some(log) = self.machines[node].proc().log.as_ref() else {
+            return false;
+        };
+        log.sent.keys().any(|&(frame, _)| frame != 0)
+            || matches!(log.activation, Activation::Waiting(_))
     }
 
     /// `may_reconfigure`'s barrier: every row the log shipped of an open
@@ -262,7 +271,6 @@ impl World {
             return self.pass_ended(node);
         };
         log.epoch = epoch;
-        log.published = log.published.max(epoch);
         log.health.reset();
         log.sent.clear();
         log.posture = Posture::Shipping;

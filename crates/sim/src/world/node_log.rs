@@ -51,7 +51,8 @@
 //!   late. The posture watch probes idle members and runs `log_evict`'s
 //!   verdicts, its swap rate cap and its correlated-stall test, as
 //!   production's `evict_gray_followers` does: a correlated stall suspects
-//!   the leader itself, and only a member's answer lifts that.
+//!   the leader itself, and only a probe's answer or a completed round
+//!   lifts that.
 //!
 //! Not modelled: the incapable-peer quarantine (every simulated peer can
 //! follow), recruitment at startup (a process opens
@@ -95,9 +96,6 @@ pub(super) struct Log {
     /// A lease write carrying `Open` landed: fleet proofs may begin.
     open: bool,
     posture: Posture,
-    /// The members that confirmed each frame of this epoch still inside
-    /// its backstop.
-    pending: BTreeMap<u64, BTreeSet<usize>>,
     /// The longest database of each cell epoch each follower confirmed.
     confirmed: BTreeMap<(usize, String, Epoch), usize>,
     /// The longest database of each cell epoch shipped so far.
@@ -114,22 +112,20 @@ pub(super) struct Log {
     /// record them, and the eviction watch judges them (`log_evict`).
     health: FollowerHealth,
     /// When each member's append of each frame of this log epoch went out,
-    /// on this process's monotonic clock; frame 0 is an idle probe.
+    /// on this process's monotonic clock, until it answers or its lane
+    /// deadline passes; frame 0 is an idle probe. A frame with a lane here
+    /// is an outstanding round (`outstanding`).
     sent: BTreeMap<(u64, usize), u64>,
     /// Every member stalled at once: the fault is likely ours, so
     /// recruitment parks until a member answers a probe.
     suspect_self: bool,
-    /// A maintain pass is in flight, begun at this log epoch.
-    pass: Option<u64>,
+    /// A maintain pass is in flight, begun at this log epoch, and whether
+    /// the posture watch began it (the watch awaits its passes).
+    pass: Option<(u64, bool)>,
     /// When the posture watch last tried a repair, and how long it waits
     /// before the next.
     repair_tried: super::Time,
     repair_ms: u64,
-    /// The newest log epoch whose record this process published: a reopen
-    /// publishes the next one before its lease write, and from then on
-    /// no activation of an earlier one applies (`activate` compares the
-    /// published record with its own).
-    published: u64,
 }
 
 /// Whether a log ships to its ensemble.
@@ -139,8 +135,6 @@ enum Posture {
     /// A member failed an append: nothing ships until a reopen installs
     /// a new ensemble, and the gate rides the bundle loop.
     Degraded,
-    /// Degraded, with a reopen's lease write in flight.
-    Reopening,
 }
 
 /// What a machine's disk holds as a follower. A wipe loses all of it.
@@ -178,7 +172,7 @@ struct Frames {
 /// One session as its log record names it: its leader, its log epoch and
 /// that epoch's followers, how many frames it has shipped at it, and
 /// whether the fleet may have proved a write at it (`may_have_fleet_acks`,
-/// set as the first credit is, cleared by a reopen).
+/// set by a lease write that carries it, cleared by a reopen).
 pub(super) struct Session {
     node: usize,
     inc: u64,
@@ -455,13 +449,11 @@ impl World {
             epoch: 1,
             open: false,
             posture: Posture::Shipping,
-            pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
             shipped: BTreeMap::new(),
             floor: BTreeMap::new(),
             bundling: false,
             activation: Activation::Idle,
-            published: 1,
             health: FollowerHealth::default(),
             sent: BTreeMap::new(),
             suspect_self: false,
@@ -589,7 +581,6 @@ impl World {
             .log
             .as_mut()
             .expect("checked");
-        log.pending.insert(frame, BTreeSet::new());
         for (&follower, name) in ensemble.iter().zip(&names) {
             log.health.append_started(name, mono);
             log.sent.insert((frame, follower), mono);
@@ -699,14 +690,11 @@ impl World {
         if log.epoch != log_epoch {
             return;
         }
-        // The lane records every answer, late or not.
-        if let Some(started) = log.sent.remove(&(frame, follower)) {
-            log.health.append_completed(&name, mono, mono - started);
-        }
-        let Some(confirmers) = log.pending.get_mut(&frame) else {
+        // An answer after the lane's deadline failed it already.
+        let Some(started) = log.sent.remove(&(frame, follower)) else {
             return;
         };
-        confirmers.insert(follower);
+        log.health.append_completed(&name, mono, mono - started);
         let held = log
             .confirmed
             .entry((follower, cell.clone(), epoch))
