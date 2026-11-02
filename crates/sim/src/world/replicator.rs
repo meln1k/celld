@@ -218,10 +218,8 @@ impl World {
                 content,
             } => {
                 self.stats.paged += 1;
-                self.open_restored(node, op, cell.clone(), epoch, Some(content));
+                self.open_restored(node, op, cell.clone(), epoch, Some(content), true);
                 let fill_ms = self.net_rng.range(200, 10_000);
-                let p = self.machines[node].proc_mut();
-                p.replicas.get_mut(&(cell.clone(), epoch)).unwrap().filling = true;
                 self.work(
                     node,
                     fill_ms,
@@ -433,11 +431,12 @@ impl World {
                 return self.store_call(node, req);
             }
         }
-        self.open_restored(node, op, cell, epoch, chain);
+        self.open_restored(node, op, cell, epoch, chain, false);
     }
 
     /// Open a database the bucket restored, `None` when it held nothing,
-    /// and tell the core.
+    /// and tell the core. A paged one is `filling` from the start, before
+    /// the core can stop it.
     fn open_restored(
         &mut self,
         node: usize,
@@ -445,11 +444,13 @@ impl World {
         cell: String,
         epoch: Epoch,
         chain: Option<Vec<WriteId>>,
+        filling: bool,
     ) {
         let restored = chain.is_some();
         self.stats.restored += 1;
         let chain = chain.unwrap_or_default();
         self.open_replica(node, cell.clone(), epoch, chain, false);
+        self.replica_mut(node, &cell, epoch).filling = filling;
         let event = self.restore_completed(node, op, &cell, epoch, restored);
         self.drive(node, event);
     }
