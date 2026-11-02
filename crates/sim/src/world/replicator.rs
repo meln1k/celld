@@ -219,7 +219,7 @@ impl World {
             } => {
                 self.stats.paged += 1;
                 self.open_restored(node, op, cell.clone(), epoch, Some(content), true);
-                let fill_ms = self.net_rng.range(200, 10_000);
+                let fill_ms = self.page_rng.range(200, 10_000);
                 self.work(
                     node,
                     fill_ms,
@@ -421,7 +421,7 @@ impl World {
         // demand, and its epoch continues the chain from the cut instead of
         // opening at the first position. Its marker lands before it serves.
         if let Some(content) = chain.clone().filter(|content| !content.is_empty()) {
-            if self.config.paged > 0.0 && self.net_rng.chance(self.config.paged) {
+            if self.config.paged > 0.0 && self.page_rng.chance(self.config.paged) {
                 let req = StoreReq::PutMarker {
                     op,
                     cell,

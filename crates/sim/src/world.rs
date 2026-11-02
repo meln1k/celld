@@ -480,6 +480,8 @@ pub struct World {
     stop_rng: Rng,
     /// When and where memory surges, and by how much.
     surge_rng: Rng,
+    /// Which bucket restores page their cell, and how long each fill takes.
+    page_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -509,6 +511,7 @@ impl World {
         let disk_rng = master.fork();
         let stop_rng = master.fork();
         let surge_rng = master.fork();
+        let page_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -540,6 +543,7 @@ impl World {
             disk_rng,
             stop_rng,
             surge_rng,
+            page_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),

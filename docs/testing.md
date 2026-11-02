@@ -625,6 +625,17 @@ from 1,095 to 1,109. Every seed that newly lost writes followed a failed
 fold (8) or a failed bucket read (2). Every seed that newly failed on
 liveness had a wedged walk-down (61) or a late fold (1).
 
+Paging then got a random stream of its own, so that a paged restore no
+longer shifts every later network delay. That moved timing in every seed
+that pages, about half, and reshuffled which of them fail: 11,178
+failing seeds in a debug build and 2,036 with validation compiled out.
+Lost writes went from 208 to 213 and from 247 to 252; every seed that
+newly lost writes followed a failed fold (56) or a failed bucket read (2),
+and every one that newly failed on liveness or `alarm-not-fired` a wedged
+walk-down (299), a late fold (26) or the capacity livelock (11). One seed
+(swarm 98934) acknowledged a write late: a replacement resumed a cell in
+place after a peer had taken it over, the slow clean reload above.
+
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
 failing seed of the suite's configurations and of swarm seeds 0..10000, in
