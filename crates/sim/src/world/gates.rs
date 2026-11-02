@@ -33,6 +33,9 @@ pub(super) struct Gate {
     observed: Option<u64>,
     /// When the handler made the call.
     pub(super) opened: Time,
+    /// For an alarm handler's call: the write that set the alarm it
+    /// consumed, which names the installation across epochs.
+    consumed: Option<WriteId>,
 }
 
 impl World {
@@ -65,12 +68,23 @@ impl World {
         let Some(req) = self.machines[node].proc().client(request) else {
             return;
         };
-        let (cell, epoch, committed, sent_at) = (
-            req.cell.clone(),
-            req.epoch.unwrap(),
-            req.committed,
-            req.sent_at,
-        );
+        let (cell, epoch) = (req.cell.clone(), req.epoch.unwrap());
+        let (committed, sent_at) = (req.committed, req.sent_at);
+        self.raise_call(node, cell, epoch, committed, sent_at, None);
+    }
+
+    /// A handler of `cell` at `epoch` calls out to a third party, after
+    /// committing `committed`, if anything. An alarm handler's call names
+    /// the write that set the alarm it `consumed`.
+    pub(super) fn raise_call(
+        &mut self,
+        node: usize,
+        cell: String,
+        epoch: Epoch,
+        committed: Option<(WriteId, u64)>,
+        sent_at: Time,
+        consumed: Option<WriteId>,
+    ) {
         let Some(egress) = self.egress(node, &cell, epoch, committed.is_some()) else {
             return;
         };
@@ -85,6 +99,7 @@ impl World {
             position: egress.position,
             observed: egress.observed,
             opened: self.t,
+            consumed,
         };
         let gate = self.pend(node, Pending::Gate(held));
         let event = Event::GateRequestAt {
@@ -146,6 +161,10 @@ impl World {
             let who = self.who(node);
             self.checker
                 .response_released(self.t, &self.store, &who, &gate.reveal);
+            if let (Some(set_by), Some((write, _))) = (gate.consumed, gate.reveal.committed) {
+                let cell = &gate.reveal.cell;
+                (self.checker).alarm_call_released(self.t, &who, cell, set_by, write);
+            }
         }
         let delay = self.net_rng.range(0, 2);
         let cell = gate.reveal.cell;

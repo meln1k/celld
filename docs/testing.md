@@ -85,7 +85,10 @@ one simulated bucket. A simulated shell carries out each effect the way
 `crates/celld/actor.rs` does. A cell is a scripted handler that can commit
 one write and answers through the output gate. A handler can also call a
 third party mid-request, which waits at the gate too, and can upgrade its
-request to a WebSocket, whose messages are requests of their own. Top-level
+request to a WebSocket, whose messages are requests of their own. An alarm
+handler that consumes or re-arms its alarm can call a third party after
+its commit, as often as a request handler does, through the same gate.
+Top-level
 Worker requests borrow idle resident isolates. Some clients give up before
 they hear back, an operator evicts cells by hand and shuts nodes down, a
 balancer gives idle cells away, and the log tier nudges node leases. A node
@@ -366,6 +369,12 @@ core, not to the simulator or to the property itself.
   handler's call held at the output gate, or an alarm handler the core
   fired was still unanswered 20 s after it began, or after the fleet
   settled if later: the operation deadline and 5 s.
+- **alarm-call-repeated**: an alarm handler released a call to a third
+  party for an installation (named by the write that set the alarm)
+  whose call another run, here or on another node, had already released
+  after a different consuming commit. The gate releases a call only once
+  the consumption is durable, and every later restore loads it, so the
+  same installation never fires twice with a released call.
 - **rearm-undiscoverable**: as **alarm-undiscoverable**, or
   **crash-uncovered-alarm** at a death, for an alarm that an alarm
   handler's proven commit re-armed. No client hears of it, but the core
@@ -407,7 +416,7 @@ never fired, so nothing yet shows that it can. In 100,000 swarm seeds:
   after faulty clocks, the slow clean reload below, or a claim during a
   preserve. Fewer seeds reload cleanly than before: a node that has evicted a
   cell to a snapshot never does (the shell bug below).
-- 1,612 seeds (1,840 with validation compiled out) fired an alarm the core
+- 1,601 seeds (1,830 with validation compiled out) fired an alarm the core
   had no due report of. Both causes are in the core, and both are
   harmless here and in production, because the handler reads the alarm
   again, finds nothing due and writes nothing. In a sample of 194 traced
@@ -418,6 +427,11 @@ never fired, so nothing yet shows that it can. In 100,000 swarm seeds:
   `alarm_finished` settled on an observation that reached the core while
   the handler ran (`observed.unwrap_or`), read before the consuming
   commit, so the core armed the consumed alarm again.
+- 1 seed (1 with validation compiled out) released an alarm handler's
+  call twice for one installation: swarm 91268, where the known lost write
+  below lost the proven commit that consumed the alarm, so the cell fired
+  it again. The others the first sweep found followed a declared loss that
+  forgave the consuming commit, which the check now forgives too.
 - 2 seeds (2 with validation compiled out) left an acknowledged alarm with
   no wake entry due by its time, both after a failed activation handed its
   cell away (below) and lost the write that set it.

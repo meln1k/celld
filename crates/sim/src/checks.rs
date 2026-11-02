@@ -96,6 +96,10 @@ pub struct Checker {
     /// that process's log may lose them, and nothing else.
     fleet_acked: BTreeSet<(String, String, Epoch, WriteId)>,
     pub violations: Vec<Violation>,
+    /// The first call each alarm installation's handler released, by the
+    /// cell and the write that set the alarm: the commit that consumed it,
+    /// and the process that ran it.
+    alarm_calls: BTreeMap<(String, WriteId), (WriteId, String)>,
     /// Every wake entry the bucket ever took: (cell, due instant).
     wakes: BTreeSet<(String, i64)>,
     /// Hits on watched properties, the first per kind and subject.
@@ -473,6 +477,39 @@ impl Checker {
         );
     }
 
+    /// Watched: **an alarm's call goes out once across the fleet.** An
+    /// alarm handler's call to a third party leaves only once the commit
+    /// that consumed the alarm is durable, and every later restore loads
+    /// that consumption, so no other run of a handler for the same
+    /// installation (set by `set_by`) can release one: not on this node,
+    /// and not on the node that takes the cell over. A declared loss that
+    /// forgives the consuming commit forgives the repeat too.
+    pub fn alarm_call_released(
+        &mut self,
+        t: u64,
+        who: &str,
+        cell: &str,
+        set_by: WriteId,
+        commit: WriteId,
+    ) {
+        let key = (cell.to_string(), set_by);
+        let (first, by) = (self.alarm_calls)
+            .entry(key)
+            .or_insert_with(|| (commit, who.to_string()))
+            .clone();
+        if first != commit {
+            self.watch(
+                t,
+                "alarm-call-repeated",
+                format!("{cell} {set_by}"),
+                format!(
+                    "{who} released a call of {cell}'s alarm set by {set_by}, consumed by \
+                     {commit}, after {by} released one consumed by {first}"
+                ),
+            );
+        }
+    }
+
     /// The bucket took a wake entry for `cell` due at `at_ms`.
     pub fn wake_landed(&mut self, cell: &str, at_ms: i64) {
         self.wakes.insert((cell.to_string(), at_ms));
@@ -585,6 +622,8 @@ impl Checker {
             }
             self.acked.remove(&(cell.clone(), *epoch, *write));
             self.handler_proven.remove(&(cell.clone(), *epoch, *write));
+            // A consumption the loss forgave may fire again.
+            (self.alarm_calls).retain(|(c, _), (first, _)| c != cell || first != write);
             if let Some(acks) = self.acked_at.get_mut(cell) {
                 acks.retain(|(_, w)| w != write);
             }

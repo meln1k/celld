@@ -489,6 +489,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::DropLeaseRetry => &["zombie-process"],
             Mutation::AlarmClockAhead => &["alarm-not-due"],
             Mutation::LostFetchRelease => &["unresolved"],
+            Mutation::KeepConsumedAlarm => &["alarm-call-repeated"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -579,8 +580,10 @@ fn every_planted_bug_is_caught_by_its_check() {
             // Only a fleet that runs epoch GC deletes prefixes, and only an
             // epoch that has uploaded nothing yet is not its chain's base:
             // one a snapshot or a restore opened, with no write since. A
-            // full node evicts often, so cells reopen often.
+            // full node evicts often, so cells reopen often, and few
+            // requests write, so a reopened epoch stays empty for a while.
             Mutation::GcUnlisted => SimConfig {
+                write_probability: 0.2,
                 epoch_gc_grace_ms: Some(0),
                 sticky_eviction: true,
                 max_resident: 2,

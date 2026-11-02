@@ -272,10 +272,14 @@ pub enum Mutation {
     /// The shell drops the core's release of a handler's call to a third
     /// party, so the call waits forever. Caught by `unresolved`.
     LostFetchRelease,
+    /// An alarm handler that does not re-arm commits without consuming its
+    /// alarm, so the alarm fires again and its call goes out twice. Caught
+    /// by `alarm-call-repeated`.
+    KeepConsumedAlarm,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 37] = [
+    pub const ALL: [Mutation; 38] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -313,6 +317,7 @@ impl Mutation {
         Mutation::DropLeaseRetry,
         Mutation::AlarmClockAhead,
         Mutation::LostFetchRelease,
+        Mutation::KeepConsumedAlarm,
     ];
 }
 

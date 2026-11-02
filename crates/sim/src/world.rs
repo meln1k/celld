@@ -486,6 +486,8 @@ pub struct World {
     page_rng: Rng,
     /// How long each log recovery's gather takes.
     recovery_rng: Rng,
+    /// Which alarm handlers call a third party.
+    call_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -520,6 +522,7 @@ impl World {
         let surge_rng = master.fork();
         let page_rng = master.fork();
         let recovery_rng = master.fork();
+        let call_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -553,6 +556,7 @@ impl World {
             surge_rng,
             page_rng,
             recovery_rng,
+            call_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),

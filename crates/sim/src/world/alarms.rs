@@ -389,6 +389,10 @@ impl World {
                     .at_ms()
                     .is_some_and(|at| at <= now);
                 if due {
+                    let set_by = (content.iter().rev())
+                        .find(|w| self.alarm_writes.contains_key(w))
+                        .copied()
+                        .expect("armed");
                     let rearm = self
                         .work_rng
                         .chance(0.3)
@@ -400,8 +404,23 @@ impl World {
                     alarms
                         .commits
                         .insert((cell.clone(), epoch, position), write);
+                    let fired_at = alarms.fired_at.get(&op).copied().unwrap_or(self.t);
                     let gate = Waiter::Alarm(op);
-                    let (alarm, gated) = self.alarm_written(node, &cell, epoch, write, rearm, gate);
+                    let keep = rearm.is_none()
+                        && self.config.mutation == Some(Mutation::KeepConsumedAlarm);
+                    let (alarm, gated) = if keep {
+                        // The planted bug: the write leaves the alarm be.
+                        let content = self.seen(node, &cell, epoch).expect("open database");
+                        (self.alarm_of(content, epoch), false)
+                    } else {
+                        self.alarm_written(node, &cell, epoch, write, rearm, gate)
+                    };
+                    // The handler calls a third party after its commit.
+                    if self.call_rng.chance(self.config.effect_probability) {
+                        let committed = Some((write, position));
+                        let consumed = Some(set_by);
+                        self.raise_call(node, cell.clone(), epoch, committed, fired_at, consumed);
+                    }
                     let alarm = self.reported(alarm);
                     self.stats.alarms_fired += 1;
                     if gated {
