@@ -9,7 +9,8 @@
 //!
 //! - node leases, `nodes/<node>.json`, which carry each node's log state;
 //! - ownership records, `cells/<cell>/own.json`;
-//! - replica prefixes, `cells/<cell>/ltx/e<epoch>/`;
+//! - replica prefixes, `cells/<cell>/ltx/e<epoch>/`, and the marker a paged
+//!   epoch continues the chain below it from;
 //! - node bundles, `log/<session>/bundle/<seq>`;
 //! - wake entries, `wake/<minute>/<cell>/<id>`: one per alarm installation
 //!   that some node must wake its cell for, each cell's retirement
@@ -36,6 +37,18 @@ pub type Row = (String, Epoch, Vec<WriteId>);
 
 /// A bundle row without its writes: its cell epoch and how many it holds.
 pub type RowLen = (String, Epoch, usize);
+
+/// A restore found objects for a cell but no chain down to its first
+/// position: what the epochs above continue was deleted or never written.
+#[derive(Debug)]
+pub struct NoBase;
+
+/// One epoch of a restore chain: the positions above `cut` up to `ends`.
+struct Span {
+    epoch: Epoch,
+    cut: usize,
+    ends: usize,
+}
 
 /// The load a node reports in its lease body, sampled when it writes it.
 /// Peers read it to choose where an unowned cell should land.
@@ -65,6 +78,11 @@ pub struct Store {
     /// upload adds files and never rolls the prefix back. Keeping the longest
     /// list has the same effect.
     prefixes: BTreeMap<(String, Epoch), Vec<WriteId>>,
+    /// Paged epochs (`CELLD_LTX_PAGED`): the position each continues the
+    /// chain below it from, and whether its marker is still in the bucket.
+    /// A paged epoch's objects hold only the positions above its cut; the
+    /// ones below are the chain's (`Store::spans`).
+    cuts: BTreeMap<(String, Epoch), (usize, bool)>,
     /// How long a chain each epoch was restored from. An older owner can
     /// still extend the prefix below after the restore read it, and those
     /// writes are not in this epoch's database.
@@ -315,74 +333,159 @@ impl Store {
 
     /// Whether a prefix at `epoch` or above holds objects.
     pub fn used_since(&self, cell: &str, epoch: Epoch) -> bool {
-        (self
-            .prefixes
-            .range((cell.to_string(), epoch)..=(cell.to_string(), Epoch::MAX)))
-        .any(|(_, writes)| !writes.is_empty())
+        let range = (cell.to_string(), epoch)..=(cell.to_string(), Epoch::MAX);
+        (self.prefixes.range(range)).any(|(key, writes)| self.listed(key, writes))
     }
 
-    /// `scan_epochs`: the restore chain's epochs, and every epoch that holds
-    /// objects, with its newest upload's time. Every upload carries the
-    /// whole database, so the chain is the newest prefix alone.
+    /// The paged cut of a cell epoch and whether its marker is there:
+    /// `(0, false)` for an epoch that opens at the first position.
+    fn cut(&self, key: &(String, Epoch)) -> (usize, bool) {
+        self.cuts.get(key).copied().unwrap_or((0, false))
+    }
+
+    /// Whether a listing finds objects in the prefix: its marker, or a
+    /// position above its cut.
+    fn listed(&self, key: &(String, Epoch), writes: &[WriteId]) -> bool {
+        let (cut, marker) = self.cut(key);
+        marker || writes.len() > cut
+    }
+
+    /// `scan_epochs`: the restore chain's epochs, oldest first, and every
+    /// epoch that holds objects, with its newest upload's time.
     pub fn list_epochs(&self, cell: &str) -> (Vec<Epoch>, Vec<ListedEpoch>) {
-        let Some((base, _)) = self.newest(cell) else {
-            return (Vec::new(), Vec::new());
+        let chain = match self.spans(cell, Epoch::MAX) {
+            Ok(spans) => spans.iter().rev().map(|span| span.epoch).collect(),
+            Err(NoBase) => Vec::new(),
         };
         let cell_range = (cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX);
         let listed = (self.prefixes.range(cell_range))
-            .filter(|(_, writes)| !writes.is_empty())
+            .filter(|(key, writes)| self.listed(key, writes))
             .map(|(key, _)| ListedEpoch {
                 epoch: key.1,
                 newest_ms: self.uploaded_ms[key],
             })
             .collect();
-        (vec![base], listed)
+        (chain, listed)
     }
 
-    /// Delete every object of one epoch prefix.
+    /// Delete every object of one epoch prefix, its marker too.
     pub fn delete_epoch(&mut self, cell: &str, epoch: Epoch) {
-        self.prefixes.remove(&(cell.to_string(), epoch));
-        self.retired.insert((cell.to_string(), epoch));
+        let key = (cell.to_string(), epoch);
+        self.prefixes.remove(&key);
+        if let Some((_, marker)) = self.cuts.get_mut(&key) {
+            *marker = false;
+        }
+        self.retired.insert(key);
     }
 
-    /// What a restore at `epoch` reads: the newest prefix below it that
-    /// holds data. Every upload carries the whole database, so that one
-    /// prefix is the whole chain.
-    pub fn read_chain(&mut self, cell: &str, epoch: Epoch) -> Option<Vec<WriteId>> {
-        let chain = self.chain(cell, epoch);
+    /// A paged activation's marker (`seed_continuation`): `epoch` continues
+    /// the chain it restored, `content`, from its last position. Uploaded
+    /// before the cell serves, and it counts as covering that position
+    /// (`note_covered`).
+    pub fn put_marker(&mut self, cell: &str, epoch: Epoch, content: &[WriteId], at_ms: u64) {
+        let key = (cell.to_string(), epoch);
+        self.cuts.insert(key, (content.len(), true));
+        self.put(cell, epoch, content, at_ms);
+    }
+
+    /// What a restore at `epoch` reads: the chain below it. `None` when no
+    /// epoch below holds objects.
+    pub fn read_chain(&mut self, cell: &str, epoch: Epoch) -> Result<Option<Vec<WriteId>>, NoBase> {
+        let chain = self.chain(cell, epoch)?;
         let len = chain.as_ref().map_or(0, Vec::len);
         let base = self.bases.entry((cell.to_string(), epoch)).or_default();
         *base = (*base).max(len);
-        chain
+        Ok(chain)
     }
 
-    fn chain(&self, cell: &str, epoch: Epoch) -> Option<Vec<WriteId>> {
-        // The planted bug skips the previous epoch's prefix, the usual source.
+    fn chain(&self, cell: &str, epoch: Epoch) -> Result<Option<Vec<WriteId>>, NoBase> {
         let epoch = match self.mutation {
+            // The planted bug skips the previous epoch's prefix, the usual
+            // source.
             Some(Mutation::StaleRestore) => epoch.saturating_sub(1),
+            // The planted bug restores the newest epoch that opens at the
+            // first position, as if no epoch continued a chain.
+            Some(Mutation::NewestBase) => {
+                let range = (cell.to_string(), 0)..(cell.to_string(), epoch);
+                return Ok((self.prefixes.range(range).rev())
+                    .find(|(key, writes)| self.cut(key).0 == 0 && !writes.is_empty())
+                    .map(|(_, writes)| writes.clone()));
+            }
             _ => epoch,
         };
-        let chain = self.chain_below(cell, epoch).map(<[WriteId]>::to_vec);
-        match (self.mutation, chain) {
+        let chain = self.chain_below(cell, epoch)?;
+        Ok(match (self.mutation, chain) {
             (Some(Mutation::TornRestore), Some(chain)) if chain.len() >= 2 => {
                 Some(chain[1..].to_vec())
             }
             (_, chain) => chain,
+        })
+    }
+
+    /// The database the chain below `epoch` restores, as the bucket truly
+    /// holds it. The oracle reads this, so a planted bug never bends its
+    /// view.
+    fn chain_below(&self, cell: &str, epoch: Epoch) -> Result<Option<Vec<WriteId>>, NoBase> {
+        let spans = self.spans(cell, epoch)?;
+        Ok((!spans.is_empty()).then(|| self.assemble(cell, &spans)))
+    }
+
+    /// `EpochChain::build` over the epochs below `below`, newest first: walk
+    /// down from the newest epoch that lists objects, clip each lower epoch
+    /// to the positions below the span above it, link it only when it ends
+    /// exactly at that span's cut, and stop at the first span that opens at
+    /// the first position. Linking on anything but the exact cut would take
+    /// a fenced owner's late object for the base and lose what lies between
+    /// it and the cut (`BreakLinkByOrder`). Empty when nothing is listed,
+    /// `NoBase` when objects are but no span opens at the first position
+    /// (`TxNotAvailable`).
+    ///
+    /// Production's marker takes a transaction of its own, after the cut;
+    /// here it takes none, so a paged epoch's first write follows the cut.
+    fn spans(&self, cell: &str, below: Epoch) -> Result<Vec<Span>, NoBase> {
+        let mut spans: Vec<Span> = Vec::new();
+        let range = (cell.to_string(), 0)..(cell.to_string(), below);
+        for (key, writes) in self.prefixes.range(range).rev() {
+            if !self.listed(key, writes) {
+                continue;
+            }
+            let (cut, marker) = self.cut(key);
+            let ends = match spans.last() {
+                None => writes.len(),
+                Some(above) => {
+                    let ends = writes.len().min(above.cut);
+                    // A marker holds no position; it lists the epoch, and
+                    // links only an epoch that adds nothing to the chain.
+                    if ends != above.cut || (ends <= cut && !(marker && cut == ends)) {
+                        continue;
+                    }
+                    ends
+                }
+            };
+            spans.push(Span {
+                epoch: key.1,
+                cut,
+                ends,
+            });
+            if cut == 0 {
+                return Ok(spans);
+            }
+        }
+        match spans.is_empty() {
+            true => Ok(spans),
+            false => Err(NoBase),
         }
     }
 
-    /// The newest non-empty prefix below `epoch`, as the bucket truly holds
-    /// it. The oracle reads this, so a planted bug never bends its view.
-    fn chain_below(&self, cell: &str, epoch: Epoch) -> Option<&[WriteId]> {
-        self.newest_below(cell, epoch).map(|(_, writes)| writes)
-    }
-
-    fn newest_below(&self, cell: &str, epoch: Epoch) -> Option<(Epoch, &[WriteId])> {
-        self.prefixes
-            .range((cell.to_string(), 0)..(cell.to_string(), epoch))
-            .rev()
-            .find(|(_, writes)| !writes.is_empty())
-            .map(|((_, epoch), writes)| (*epoch, writes.as_slice()))
+    /// The database the spans restore: each span's positions, base first.
+    fn assemble(&self, cell: &str, spans: &[Span]) -> Vec<WriteId> {
+        (spans.iter().rev())
+            .flat_map(|span| {
+                let writes = &self.prefixes[&(cell.to_string(), span.epoch)];
+                &writes[span.cut..span.ends]
+            })
+            .copied()
+            .collect()
     }
 
     /// An activation opened `epoch` from an eviction snapshot of `len`
@@ -419,10 +522,10 @@ impl Store {
         }
     }
 
-    /// The cell's newest database in the per-cell layout, and the epoch
-    /// that opened it.
-    pub fn newest(&self, cell: &str) -> Option<(Epoch, &[WriteId])> {
-        self.newest_below(cell, Epoch::MAX)
+    /// The cell's newest database in the per-cell layout, as its restore
+    /// chain holds it. `None` when nothing restores.
+    pub fn newest(&self, cell: &str) -> Option<Vec<WriteId>> {
+        self.chain_below(cell, Epoch::MAX).ok().flatten()
     }
 
     /// `WakeFlusher::publish`: write the wake entry of an armed alarm.

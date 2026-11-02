@@ -107,6 +107,10 @@ pub(super) struct Replica {
     stop: Option<OpId>,
     /// Whether that stop keeps the closed database as an eviction snapshot.
     snapshot: bool,
+    /// Opened paged and still filling in the background: it reads the
+    /// chain it restored, so epoch GC leaves the cell alone
+    /// (`pinned_reads`).
+    filling: bool,
 }
 
 /// A durability proof someone is waiting on.
@@ -183,6 +187,15 @@ pub(super) enum ReplicaWork {
         epoch: Epoch,
         chain: Result<Option<Vec<WriteId>>, Failure>,
     },
+    /// A paged activation's marker landed: the cell may serve `content`.
+    Marked {
+        op: OpId,
+        cell: String,
+        epoch: Epoch,
+        content: Vec<WriteId>,
+    },
+    /// A paged cell's background fill completed.
+    Filled { cell: String, epoch: Epoch },
 }
 
 impl World {
@@ -200,6 +213,29 @@ impl World {
                 epoch,
                 chain,
             } => self.chain_read(node, op, cell, epoch, chain),
+            ReplicaWork::Marked {
+                op,
+                cell,
+                epoch,
+                content,
+            } => {
+                self.stats.paged += 1;
+                self.open_restored(node, op, cell.clone(), epoch, Some(content));
+                let fill_ms = self.net_rng.range(200, 10_000);
+                let p = self.machines[node].proc_mut();
+                p.replicas.get_mut(&(cell.clone(), epoch)).unwrap().filling = true;
+                self.work(
+                    node,
+                    fill_ms,
+                    Work::Replica(ReplicaWork::Filled { cell, epoch }),
+                );
+            }
+            ReplicaWork::Filled { cell, epoch } => {
+                let p = self.machines[node].proc_mut();
+                if let Some(replica) = p.replicas.get_mut(&(cell, epoch)) {
+                    replica.filling = false;
+                }
+            }
             ReplicaWork::Compacted { cell, epoch, len } => self.compacted(node, cell, epoch, len),
         }
     }
@@ -395,6 +431,33 @@ impl World {
                 return self.drive(node, Event::RestoreCompleted { op, result });
             }
         };
+        // A paged activation (`CELLD_LTX_PAGED`) faults the chain in on
+        // demand, and its epoch continues the chain from the cut instead of
+        // opening at the first position. Its marker lands before it serves.
+        if let Some(content) = chain.clone().filter(|content| !content.is_empty()) {
+            if self.config.paged > 0.0 && self.net_rng.chance(self.config.paged) {
+                let req = StoreReq::PutMarker {
+                    op,
+                    cell,
+                    epoch,
+                    content,
+                };
+                return self.store_call(node, req);
+            }
+        }
+        self.open_restored(node, op, cell, epoch, chain);
+    }
+
+    /// Open a database the bucket restored, `None` when it held nothing,
+    /// and tell the core.
+    fn open_restored(
+        &mut self,
+        node: usize,
+        op: OpId,
+        cell: String,
+        epoch: Epoch,
+        chain: Option<Vec<WriteId>>,
+    ) {
         let restored = chain.is_some();
         self.stats.restored += 1;
         let chain = chain.unwrap_or_default();
@@ -437,6 +500,7 @@ impl World {
             deadlines: BTreeMap::new(),
             stop: None,
             snapshot: false,
+            filling: false,
         };
         self.machines[node]
             .proc_mut()
@@ -796,6 +860,13 @@ impl World {
             .filter(|(_, replica)| replica.stop.is_none())
             .map(|(key, _)| key.clone())
             .collect()
+    }
+
+    /// Whether the open database of `cell` at `epoch` was paged in and its
+    /// background fill has not completed.
+    pub(super) fn filling(&self, node: usize, cell: &str, epoch: Epoch) -> bool {
+        let replicas = &self.machines[node].proc().replicas;
+        (replicas.get(&(cell.to_string(), epoch))).is_some_and(|replica| replica.filling)
     }
 
     /// The open database of `cell` at `epoch`, which the caller knows is

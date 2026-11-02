@@ -573,15 +573,28 @@ impl Checker {
     /// Watched: **epoch GC never deletes a restore's base.** Epoch GC is
     /// about to delete `epoch` of `cell`, and `base` is the epoch a restore
     /// of the cell would read now.
-    pub fn epoch_deleted(&mut self, t: u64, cell: &str, epoch: Epoch, base: Option<Epoch>) {
-        if base == Some(epoch) {
+    pub fn epoch_deleted(&mut self, t: u64, cell: &str, epoch: Epoch, chain: &[Epoch]) {
+        if chain.contains(&epoch) {
             self.watch(
                 t,
                 "base-deleted",
                 format!("{cell}/{epoch}"),
-                format!("epoch GC deleted {cell} epoch {epoch}, the base a restore reads"),
+                format!("epoch GC deleted {cell} epoch {epoch}, in the chain a restore reads"),
             );
         }
+    }
+
+    /// Watched: **every cell with objects restores.** A restore listed
+    /// objects for `cell` but found no chain down to its first position:
+    /// something deleted the base the epochs above continue, or never
+    /// wrote it. The core then never serves the cell again.
+    pub fn unrestorable(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch) {
+        self.watch(
+            t,
+            "unrestorable",
+            format!("{cell}/{epoch}"),
+            format!("{who} found no chain to the first position restoring {cell} at epoch {epoch}"),
+        );
     }
 
     /// An upload landed in the prefix of `cell` epoch `epoch`: the other

@@ -63,10 +63,7 @@ impl World {
         self.stats.bundles_deleted += (before - self.store.bundles_of(session).len()) as u64;
         for (cell, epoch, content) in rows {
             let covered = self.store.percell_len(&cell, epoch).min(content.len());
-            let newest = self
-                .store
-                .newest(&cell)
-                .map_or(&[][..], |(_, writes)| writes);
+            let newest = self.store.newest(&cell).unwrap_or_default();
             let lost: Vec<WriteId> = (content[covered..].iter())
                 .filter(|&&w| self.checker.answered(&cell, w) && !newest.contains(&w))
                 .copied()

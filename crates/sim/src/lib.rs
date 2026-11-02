@@ -87,6 +87,10 @@ pub struct SimConfig {
     /// epoch prefixes below their restore chain's base once the newest
     /// upload into one is this old. `None` runs no epoch GC.
     pub epoch_gc_grace_ms: Option<u64>,
+    /// The share of bucket restores that page their cell
+    /// (`CELLD_LTX_PAGED`): the epoch continues the chain below it from the
+    /// restored position instead of opening at the first one.
+    pub paged: f64,
     /// A bug planted in the simulated shell or bucket.
     pub mutation: Option<Mutation>,
     /// Keep a human-readable line for every event and effect.
@@ -240,10 +244,18 @@ pub enum Mutation {
     /// Bundle GC deletes every bundle of its session, covered or not.
     /// Caught by `bundle-deleted-uncovered`.
     GcUncovered,
+    /// A restore takes the newest epoch that opens at the first position
+    /// for the whole chain, and drops the paged epochs that continue it.
+    /// Caught by `lost-write`.
+    NewestBase,
+    /// Epoch GC plans as if the chain's newest epoch were its base, as it
+    /// could when no epoch continued a chain, and deletes what a paged
+    /// epoch continues. Caught by `unrestorable`.
+    GcChainHead,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 29] = [
+    pub const ALL: [Mutation; 31] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -273,6 +285,8 @@ impl Mutation {
         Mutation::LossWithoutWaiting,
         Mutation::CreditBeforeActivation,
         Mutation::GcUncovered,
+        Mutation::NewestBase,
+        Mutation::GcChainHead,
     ];
 }
 
@@ -378,6 +392,7 @@ impl SimConfig {
             cells_per_heap: 32,
             memory: None,
             epoch_gc_grace_ms: None,
+            paged: 0.0,
             mutation: None,
             trace: false,
         }
@@ -457,6 +472,12 @@ impl SimConfig {
             faults.max_gray_ms = gray.range(2_000, 15_000);
             faults.gray_latency_ms = gray.range(30, 3_000);
         }
+        // Paging, likewise.
+        let mut paging = Rng::new(seed ^ 0x5041_4745_0000_0000);
+        let paged = match paging.chance(0.5) {
+            true => *paging.pick(&[0.3, 1.0]).unwrap(),
+            false => 0.0,
+        };
         Self {
             nodes: r.range(2, 5) as usize,
             cells: r.range(2, 10) as usize,
@@ -481,6 +502,7 @@ impl SimConfig {
             error_probability: *r.pick(&[0.0, 0.05, 0.2]).unwrap(),
             epoch_gc_grace_ms: r.chance(0.5).then(|| *r.pick(&[0, 2_000, 10_000]).unwrap()),
             cells_per_heap: *r.pick(&[1, 2, 3, 32]).unwrap(),
+            paged,
             // The same 20 s of faults and 25 s of calm as `crashing`.
             ..Self::crashing(0.0)
         }
@@ -573,6 +595,8 @@ pub struct Stats {
     /// Databases restored from the bucket: each one is checked for lost
     /// writes.
     pub restored: u64,
+    /// Of those, the ones that paged their cell.
+    pub paged: u64,
     /// Databases opened from an eviction snapshot instead of the bucket.
     pub reused: u64,
     /// Evictions an operator asked for, and those that evicted.

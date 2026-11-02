@@ -98,7 +98,17 @@ eviction snapshot, and the node's next activation of the cell opens it
 instead of reading the bucket, unless that activation took the cell over. In
 half of the swarm seeds, owners also run epoch GC every 5 s: list the cell's
 epochs, plan with `epoch_gc::plan`, read the owner record, then delete each
-epoch prefix below the restore chain's base, one bucket call per step. A
+epoch prefix below the restore chain's base, one bucket call per step. In
+half of the swarm seeds, some or all bucket restores page their cell
+(`CELLD_LTX_PAGED`): the epoch's marker lands before the cell serves, and
+the epoch then continues the chain below it from the restored position
+instead of opening at the first one. A restore walks the chain as
+`EpochChain::build` does: down from the newest listed epoch, clipping each
+lower epoch below the cut above it, linking only an epoch that ends exactly
+at that cut, and stopping at one that opens at the first position. A paged
+cell pins epoch GC until its background fill completes, a few seconds
+later. Page faults themselves are not modelled: a paged cell holds its
+whole database from the start. A
 deploy moves a node's resident cells onto a new application generation, which
 restarts each runtime on its open database. A write can set or clear its
 cell's alarm, which lives in the database like any other write, with its
@@ -293,8 +303,10 @@ core, not to the simulator or to the property itself.
   is due by its time.
 - **unclaimed-handoff**: a peer told a donor it accepted a cell at an epoch
   that no claim by the peer's node installed.
-- **base-deleted**: epoch GC deleted the epoch prefix a restore of the cell
-  would read.
+- **base-deleted**: epoch GC deleted an epoch prefix of the chain a restore
+  of the cell would read.
+- **unrestorable**: a restore listed objects for its cell but found no chain
+  down to the first position, so the cell can never be served again.
 - **unjustified-loss**: a declared loss forgave an acknowledged write that a
   follower disk on a machine still in the fleet holds. The loss is declared
   after recovery uploads what it gathered, so it forgives only what that
@@ -317,7 +329,8 @@ once the fleet is quiet, 15 s after the faults end, so that a bucket call lost
 just before the end has timed out. The others judge at the moment their fact
 arrives. **unclaimed-handoff**, **base-deleted**, **unjustified-loss**,
 **bundle-credit-unheld**, **fleet-proof-unbacked**,
-**credit-before-activation** and **bundle-deleted-uncovered** have never
+**credit-before-activation**, **bundle-deleted-uncovered** and
+**unrestorable** have never
 fired on the
 current simulator, and **alarm-undiscoverable** fires only after a known
 bug lost the write behind it, so each has a planted bug that the test suite
@@ -538,6 +551,16 @@ bundles hold. Gray followers degrade logs more often. Compaction makes
 them rarer: it moves bundle rows into the per-cell layout while the cell
 is still open, so the peer that adopts a cell handed away restores them
 from the bucket (lost writes fell from 321 to 189 when it was modelled).
+
+The numbers above predate paged restores. Modelling them changed only the
+seeds that page, and the totals moved within the noise: 11,737 failing
+seeds in a debug build and 2,049 with validation compiled out, 186 and 229
+on lost writes, 131 and 167 holding a log degraded. The only new failure
+is one seed (swarm 3664) that stops on the known `queued twice` invariant.
+Across both modes, every seed that newly lost writes followed a failed fold (86), a failed
+bucket read (7) or a superseded replacement (swarm 19158),
+and no restore found its chain broken (**unrestorable** and
+**torn-restore** never fired).
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

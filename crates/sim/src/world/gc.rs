@@ -10,8 +10,10 @@
 //! fence, a takeover or a late upload can land between any two of them, and
 //! a call already sent applies even if its process dies.
 //!
-//! Every upload here carries the whole database, so each listed prefix is a
-//! base of its own and the chain is the newest one. Listings are consistent,
+//! The chain is `EpochChain::build`'s (`Store::spans`): a paged epoch
+//! continues the one below it, and a cell still filling in the background
+//! pins it (`pinned_reads`), so its pass decides nothing. Listings are
+//! consistent,
 //! so the retired mark's guard against a lagging one is not modelled. Its
 //! effect on coverage is: a deleted epoch counts as covered whole
 //! (`Store::percell_len`), and the oracle goes on counting its writes as
@@ -92,16 +94,18 @@ impl World {
                 chain,
                 listed,
             } => {
-                let chain = if self.config.mutation == Some(Mutation::GcUnlisted) {
+                let chain = match self.config.mutation {
                     // The planted bug skips the proof that the owner's own
                     // epoch is listed: it plans as if it were the base.
-                    vec![epoch]
-                } else {
-                    chain
+                    Some(Mutation::GcUnlisted) => vec![epoch],
+                    // This one takes the chain's newest epoch for its base.
+                    Some(Mutation::GcChainHead) => chain.last().into_iter().copied().collect(),
+                    _ => chain,
                 };
                 let grace_ms = self.config.epoch_gc_grace_ms.expect("epoch GC runs");
                 let now_ms = self.wall(node);
-                let plan = epoch_gc::plan(epoch, &chain, &listed, None, false, now_ms, grace_ms);
+                let pinned = self.filling(node, &cell, epoch);
+                let plan = epoch_gc::plan(epoch, &chain, &listed, None, pinned, now_ms, grace_ms);
                 if let Some(plan) = plan.filter(|plan| !plan.delete.is_empty()) {
                     let call = GcCall::ReadOwner {
                         delete: plan.delete,
@@ -155,8 +159,8 @@ impl World {
                 let victim = victims.remove(0);
                 self.stats.epochs_deleted += 1;
                 self.note(|| format!("epoch GC deletes {cell} epoch {victim}"));
-                let base = self.store.newest(&cell).map(|(base, _)| base);
-                self.checker.epoch_deleted(self.t, &cell, victim, base);
+                let (chain, _) = self.store.list_epochs(&cell);
+                self.checker.epoch_deleted(self.t, &cell, victim, &chain);
                 self.store.delete_epoch(&cell, victim);
                 self.judge_discoverable(&cell);
                 GcWork::Delete {

@@ -481,6 +481,8 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::LossWithoutWaiting => &["unjustified-loss"],
             Mutation::CreditBeforeActivation => &["credit-before-activation"],
             Mutation::GcUncovered => &["bundle-deleted-uncovered"],
+            Mutation::NewestBase => &["lost-write"],
+            Mutation::GcChainHead => &["unrestorable"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -559,6 +561,19 @@ fn every_planted_bug_is_caught_by_its_check() {
             // epoch that has uploaded nothing yet is not its chain's base:
             // one a snapshot or a restore opened, with no write since.
             Mutation::GcUnlisted => SimConfig {
+                epoch_gc_grace_ms: Some(0),
+                sticky_eviction: true,
+                ..crashing_and_pausing()
+            },
+            // Only a paged restore continues a chain.
+            Mutation::NewestBase => SimConfig {
+                paged: 1.0,
+                ..crashing_and_pausing()
+            },
+            // And only a chain whose fill completed lets epoch GC plan over
+            // it: cells move often, and each move pages the next epoch.
+            Mutation::GcChainHead => SimConfig {
+                paged: 1.0,
                 epoch_gc_grace_ms: Some(0),
                 sticky_eviction: true,
                 ..crashing_and_pausing()

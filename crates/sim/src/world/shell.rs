@@ -17,7 +17,7 @@ use super::node_log::{Flushed, LogWork};
 use super::replicator::ReplicaWork;
 use super::waker::WakerReq;
 use super::{Item, Pending, Work, World, WALL_EPOCH_MS};
-use crate::store::{Load, Row};
+use crate::store::{Load, NoBase, Row};
 use crate::{Mutation, WriteId};
 
 /// The bucket client's timeout for one attempt (`bucket.rs`).
@@ -117,6 +117,15 @@ pub(super) enum StoreReq {
     },
     /// The replicator uploads the epoch's whole database.
     Upload {
+        cell: String,
+        epoch: Epoch,
+        content: Vec<WriteId>,
+    },
+    /// A paged activation's marker (`seed_continuation`): the epoch
+    /// continues the chain it restored, and the cell serves only once the
+    /// marker is in the bucket.
+    PutMarker {
+        op: OpId,
         cell: String,
         epoch: Epoch,
         content: Vec<WriteId>,
@@ -636,10 +645,12 @@ impl World {
             }),
             // Production reports every failed restore as definite
             // (`Effect::Restore` in `actor.rs`): nothing was opened.
-            StoreReq::ReadChain { op, .. } => core(Event::RestoreCompleted {
-                op: *op,
-                result: Err(Failure::Definite),
-            }),
+            StoreReq::ReadChain { op, .. } | StoreReq::PutMarker { op, .. } => {
+                core(Event::RestoreCompleted {
+                    op: *op,
+                    result: Err(Failure::Definite),
+                })
+            }
             // The arm gate turns its response into a failure.
             StoreReq::Wake {
                 gate: Some(waiter), ..
@@ -785,6 +796,24 @@ impl World {
                     len: content.len(),
                 })
             }
+            StoreReq::PutMarker {
+                op,
+                cell,
+                epoch,
+                content,
+            } => {
+                self.checker.upload_applied(self.t, &sender, &cell, epoch);
+                self.store
+                    .put_marker(&cell, epoch, &content, WALL_EPOCH_MS + self.t);
+                self.checker.bucket_holds(self.t, &cell, epoch, &content);
+                self.judge_discoverable(&cell);
+                Work::Replica(ReplicaWork::Marked {
+                    op,
+                    cell,
+                    epoch,
+                    content,
+                })
+            }
             StoreReq::ReadChain {
                 op,
                 cell,
@@ -802,7 +831,12 @@ impl World {
                     op,
                     chain: match self.store.used_since(&cell, epoch) {
                         true => Err(Failure::Definite),
-                        false => Ok(self.store.read_chain(&cell, epoch)),
+                        false => self.store.read_chain(&cell, epoch).map_err(|NoBase| {
+                            // The restore fails, as `EpochChain::build`'s
+                            // `TxNotAvailable` fails the activation.
+                            self.checker.unrestorable(self.t, &name, &cell, epoch);
+                            Failure::Definite
+                        }),
                     },
                     cell,
                     epoch,
