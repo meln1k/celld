@@ -50,6 +50,10 @@ struct Donor {
     started_mono: u64,
     wait_ms: u64,
     baseline: Vec<RestorationBaseline>,
+    /// The wall clock when its current read began. Production samples
+    /// `now_ms` before the peer read and before each claim's read, and
+    /// judges what comes back by that sample.
+    read_ms: u64,
     /// The ETag of the claim it holds, once it holds one.
     hold: Option<u64>,
     /// The token is decided, and the core is handing cells off.
@@ -107,11 +111,12 @@ impl World {
 
     /// A drain begins: claim the token within `wait_ms` before handing off.
     pub(super) fn claim_token(&mut self, node: usize, wait_ms: u64) {
-        let started_mono = self.mono(node);
+        let (started_mono, read_ms) = (self.mono(node), self.wall(node));
         self.machines[node].proc_mut().drain.donor = Some(Donor {
             started_mono,
             wait_ms,
             baseline: Vec::new(),
+            read_ms,
             hold: None,
             handing_off: false,
         });
@@ -139,9 +144,11 @@ impl World {
 
     pub(super) fn drain_work(&mut self, node: usize, work: DrainWork) {
         let me = self.machines[node].name.clone();
-        let now_ms = self.wall(node);
         match work {
             DrainWork::Baselined(peers) => {
+                let Some(now_ms) = self.read_ms(node) else {
+                    return;
+                };
                 let mut baseline: Vec<RestorationBaseline> = (peers.into_iter())
                     .filter(|peer| peer.expires_ms > now_ms)
                     .map(|peer| RestorationBaseline {
@@ -153,15 +160,17 @@ impl World {
                 if let Some(donor) = self.machines[node].proc_mut().drain.donor.as_mut() {
                     donor.baseline = baseline;
                 }
-                self.store_call(node, StoreReq::Drain(DrainReq::Read));
+                self.read_token(node);
             }
             DrainWork::Read(current) => {
+                let Some(now_ms) = self.read_ms(node) else {
+                    return;
+                };
                 let held = current.as_ref().map(|(token, _)| token);
                 let may = self.config.mutation == Some(Mutation::IgnoreDrainToken)
                     || drain::may_claim(held, &me, now_ms);
-                let Some(donor) = self.machines[node].proc().drain.donor.as_ref() else {
-                    return;
-                };
+                let donor = self.machines[node].proc().drain.donor.as_ref();
+                let donor = donor.expect("read_ms found the donor");
                 if !may {
                     return self.claim_failed(node);
                 }
@@ -181,9 +190,7 @@ impl World {
                 }
             }
             DrainWork::Claimed(None) => self.claim_failed(node),
-            DrainWork::Retry => {
-                self.store_call(node, StoreReq::Drain(DrainReq::Read));
-            }
+            DrainWork::Retry => self.read_token(node),
             DrainWork::GateTick => {
                 if !self.machines[node].proc().drain.ready {
                     self.store_call(node, StoreReq::Drain(DrainReq::Gate));
@@ -192,6 +199,22 @@ impl World {
             DrainWork::GateRead(read) => self.gate_read(node, read),
             DrainWork::Released => {}
         }
+    }
+
+    /// When the donor's current read began, on its wall clock: what
+    /// production judges the answer by. `None` once the donor is gone.
+    fn read_ms(&self, node: usize) -> Option<u64> {
+        let donor = self.machines[node].proc().drain.donor.as_ref();
+        donor.map(|donor| donor.read_ms)
+    }
+
+    /// `try_claim`: sample the clock, then read the token.
+    fn read_token(&mut self, node: usize) {
+        let wall = self.wall(node);
+        if let Some(donor) = self.machines[node].proc_mut().drain.donor.as_mut() {
+            donor.read_ms = wall;
+        }
+        self.store_call(node, StoreReq::Drain(DrainReq::Read));
     }
 
     /// No claim this time: try again a second later, or, once the wait is
