@@ -353,6 +353,11 @@ pub struct Faults {
     pub gray_followers: f64,
     pub max_gray_ms: u64,
     pub gray_latency_ms: u64,
+    /// A process's memory grows by up to `max_surge_mb` for a few seconds,
+    /// held by no cell (a large request body, an allocator spike), so
+    /// shedding cells cannot give it back. Only with `SimConfig::memory`.
+    pub surges: f64,
+    pub max_surge_mb: u64,
 }
 
 impl SimConfig {
@@ -472,6 +477,12 @@ impl SimConfig {
             faults.max_gray_ms = gray.range(2_000, 15_000);
             faults.gray_latency_ms = gray.range(30, 3_000);
         }
+        // Memory surges, likewise.
+        let mut surging = Rng::new(seed ^ 0x5355_5247_0000_0000);
+        if surging.chance(0.5) {
+            faults.surges = *surging.pick(&[3.0, 10.0]).unwrap();
+            faults.max_surge_mb = *surging.pick(&[100, 400]).unwrap();
+        }
         // Paging, likewise.
         let mut paging = Rng::new(seed ^ 0x5041_4745_0000_0000);
         let paged = match paging.chance(0.5) {
@@ -542,6 +553,8 @@ impl Faults {
             gray_followers: 0.0,
             max_gray_ms: 0,
             gray_latency_ms: 0,
+            surges: 0.0,
+            max_surge_mb: 0,
         }
     }
 }
@@ -601,6 +614,8 @@ pub struct Stats {
     /// request took back before they published.
     pub stop_retries: u64,
     pub stops_abandoned: u64,
+    /// Memory surges a process took.
+    pub surges: u64,
     /// Databases opened from an eviction snapshot instead of the bucket.
     pub reused: u64,
     /// Evictions an operator asked for, and those that evicted.

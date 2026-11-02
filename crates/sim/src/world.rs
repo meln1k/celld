@@ -125,6 +125,8 @@ enum Item {
     Offer { node: usize, offer: Offer },
     /// A follower disk turns slow.
     Gray,
+    /// A process's memory surges.
+    Surge,
     /// The next fault of this kind.
     Fault(Fault),
     /// The next act of this kind.
@@ -312,6 +314,8 @@ struct Process {
     log: Option<Log>,
     /// The memory the last load sample measured.
     memory: u64,
+    /// Memory no cell holds, in bytes, and when it passes.
+    surge: Option<(u64, Time)>,
 }
 
 impl Process {
@@ -339,6 +343,7 @@ impl Process {
             watch: Watch::default(),
             log: None,
             memory: 0,
+            surge: None,
         }
     }
 }
@@ -463,6 +468,8 @@ pub struct World {
     disk_rng: Rng,
     /// How long each eviction's snapshot capture takes.
     stop_rng: Rng,
+    /// When and where memory surges, and by how much.
+    surge_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -491,6 +498,7 @@ impl World {
         let gray_rng = master.fork();
         let disk_rng = master.fork();
         let stop_rng = master.fork();
+        let surge_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -521,6 +529,7 @@ impl World {
             gray_rng,
             disk_rng,
             stop_rng,
+            surge_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),
@@ -662,6 +671,7 @@ impl World {
             Item::Offer { node, offer } => self.offer_arrives(node, offer),
             Item::Fault(fault) => self.fault(fault),
             Item::Gray => self.gray(),
+            Item::Surge => self.surge(),
             Item::Operator(act) => self.operator(act),
             Item::Restart { node } => self.restart(node),
             Item::BootRecover {
@@ -774,7 +784,11 @@ impl World {
         let memory = self.config.memory.map_or(0, |m| {
             let p = self.machines[node].proc();
             let (heaps, open) = (p.isolates.heaps() as u64, p.replicas.len() as u64);
-            m.base + m.heap * heaps + m.cell * open
+            let surge = match p.surge {
+                Some((bytes, until)) if self.t < until => bytes,
+                _ => 0,
+            };
+            m.base + m.heap * heaps + m.cell * open + surge
         });
         self.machines[node].proc_mut().memory = memory;
         let load = pressure::Load {

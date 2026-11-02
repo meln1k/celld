@@ -196,7 +196,7 @@ fn main() {
     println!(
         "crashes {}, pauses {}, partitions {}, bucket failures {}, restores from the bucket {} \
          ({} paged), from an eviction snapshot {}\n\
-         clean stop retries {}, evictions abandoned {}",
+         clean stop retries {}, evictions abandoned {}, memory surges {}",
         stats.crashes,
         stats.pauses,
         stats.partitions,
@@ -205,7 +205,8 @@ fn main() {
         stats.paged,
         stats.reused,
         stats.stop_retries,
-        stats.stops_abandoned
+        stats.stops_abandoned,
+        stats.surges
     );
     println!(
         "evictions asked {}, evicted {}, drains {}, cells handed off {}, preserves {}, \

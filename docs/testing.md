@@ -203,7 +203,9 @@ before the first lease and every second after. The machine is sized so that
 the core's ceiling (`from_limits`: 80% of the machine) is crossed a little
 above ROOM open cells in one heap and its resume line sits just above ROOM.
 A node over the ceiling sheds, and its lease tells peers it is pressured and
-whether it has headroom.
+whether it has headroom. In half of those seeds, memory also surges during
+the faults: a process holds 20 MB to 400 MB more for one to five seconds,
+which no cell owns, so shedding cells cannot give it back.
 
 Every seed places each starting runtime on a heap, as `runtime.rs` does with
 `isolate::place_cell`: the fullest heap of the current generation with room,
@@ -576,6 +578,11 @@ from 229 to 254; every seed that newly lost writes followed a failed fold
 (180), a failed bucket read (11) or a clock step in the fleet posture
 (swarm 87144). A request takes an eviction back in about half the seeds; a
 final upload outlasts its 10 s attempt only rarely, under a long partition.
+
+Memory surges changed only the seeds that surge with memory modelled, and
+nothing new failed: 11,516 and 1,977 failing seeds, 203 and 253 on lost
+writes, every new one after a failed fold. A surge makes a node shed in
+about a quarter of the seeds that surge.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

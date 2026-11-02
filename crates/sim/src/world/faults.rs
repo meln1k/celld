@@ -6,6 +6,7 @@
 //! system's doing, not the fault's. Only a clock step outlasts the chaos, as
 //! the skew does: a clock stays where a step put it. Bucket call failures are drawn per call
 //! in `shell.rs`; a fixed clock skew per node is drawn in `World::new`.
+//! Slow follower disks and memory surges have streams of their own.
 
 use super::{mono_ms, Item, World};
 
@@ -44,6 +45,37 @@ impl World {
             let gap = self.gray_gap();
             self.after(gap, Item::Gray);
         }
+        if self.config.faults.surges > 0.0 && self.config.memory.is_some() {
+            let gap = self.surge_gap();
+            self.after(gap, Item::Surge);
+        }
+    }
+
+    fn surge_gap(&mut self) -> u64 {
+        let mean = (60_000.0 / self.config.faults.surges) as u64;
+        self.surge_rng.range(1, 2 * mean.max(1))
+    }
+
+    /// Memory no cell holds grows on one machine's process for a few
+    /// seconds. Its load samples report it until it passes.
+    pub(super) fn surge(&mut self) {
+        if self.t >= self.config.chaos_ms {
+            return;
+        }
+        let node = self.surge_rng.below(self.machines.len() as u64) as usize;
+        let mb = self
+            .surge_rng
+            .range(20, self.config.faults.max_surge_mb.max(21));
+        let duration = self.surge_rng.range(1_000, 5_000);
+        let until = self.t + duration;
+        if let Some(p) = self.machines[node].proc.as_mut() {
+            p.surge = Some((mb << 20, until));
+            self.stats.surges += 1;
+            self.note(|| format!("n{node}'s memory surges by {mb} MB for {duration} ms"));
+            self.disturbed_until(until);
+        }
+        let gap = self.surge_gap();
+        self.after(gap, Item::Surge);
     }
 
     fn gray_gap(&mut self) -> u64 {
