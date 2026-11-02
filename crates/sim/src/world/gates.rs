@@ -9,7 +9,7 @@
 
 use celld_logic::{Channel, Epoch, Event, RequestError, RequestId, Route};
 
-use super::{Pending, Work, World};
+use super::{Pending, Time, Work, World};
 use crate::checks::Reveal;
 use crate::{Mutation, WriteId};
 
@@ -31,6 +31,8 @@ pub(super) struct Gate {
     pub(super) reveal: Reveal,
     position: Option<u64>,
     observed: Option<u64>,
+    /// When the handler made the call.
+    pub(super) opened: Time,
 }
 
 impl World {
@@ -82,6 +84,7 @@ impl World {
             },
             position: egress.position,
             observed: egress.observed,
+            opened: self.t,
         };
         let gate = self.pend(node, Pending::Gate(held));
         let event = Event::GateRequestAt {

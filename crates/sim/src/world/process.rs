@@ -111,6 +111,8 @@ impl World {
         self.judge_memory(node);
         self.judge_ready(node);
         self.judge_reopen(node);
+        self.judge_zombie(node);
+        self.judge_resolved(node);
     }
 
     /// The process on `node` dies. Its open databases stay on disk as it

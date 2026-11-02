@@ -472,7 +472,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::ErrorsBypassGate => &["read-before-durable"],
             Mutation::FollowerCorrupts => &["unverified-ack", "fleet-proof-unbacked"],
             Mutation::AcceptUnclaimed => &["unclaimed-handoff"],
-            Mutation::RetireUnproven => &["alarm-undiscoverable"],
+            Mutation::RetireUnproven => &["alarm-undiscoverable", "rearm-undiscoverable"],
             Mutation::StaleSnapshot => &["lost-write"],
             Mutation::GcUnlisted => &["base-deleted"],
             Mutation::CollectUnretired => &["alarm-undiscoverable"],
@@ -486,6 +486,9 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::IgnoreDrainToken => &["donors-overlap"],
             Mutation::GateReadsReleasedClaim => &["ready-stuck"],
             Mutation::GateStopsAsking => &["ready-stuck"],
+            Mutation::DropLeaseRetry => &["zombie-process"],
+            Mutation::AlarmClockAhead => &["alarm-not-due"],
+            Mutation::LostFetchRelease => &["unresolved"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -613,6 +616,14 @@ fn every_planted_bug_is_caught_by_its_check() {
                 paged: 1.0,
                 epoch_gc_grace_ms: Some(0),
                 sticky_eviction: true,
+                ..crashing_and_pausing()
+            },
+            // Only a process whose first lease write fails retries it.
+            Mutation::DropLeaseRetry => SimConfig {
+                faults: Faults {
+                    store_definite: 0.2,
+                    ..crashing_and_pausing().faults
+                },
                 ..crashing_and_pausing()
             },
             // Only a handler that throws answers with an error.

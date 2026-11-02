@@ -929,20 +929,22 @@ impl World {
     /// the alarm into this epoch, and no wake entry of this epoch can have
     /// landed yet.
     fn restore_completed(
-        &self,
+        &mut self,
         node: usize,
         op: OpId,
         cell: &str,
         epoch: Epoch,
         restored: bool,
     ) -> Event {
-        let alarm = self
-            .seen(node, cell, epoch)
-            .and_then(|content| self.reported(self.alarm_of(content, epoch)).at_ms())
-            .map(|at_ms| RestoredAlarm {
-                at_ms,
-                covered: false,
-            });
+        let content = self.seen(node, cell, epoch).expect("opened");
+        let (read_at, at_ms) = (content.len() as u64, self.alarm_of(content, epoch).at_ms());
+        let at_ms = at_ms.filter(|_| self.config.mutation != Some(Mutation::AlarmsUnreported));
+        // The core takes it before the cell can fire.
+        self.alarm_told(node, cell, (epoch, read_at), at_ms);
+        let alarm = at_ms.map(|at_ms| RestoredAlarm {
+            at_ms,
+            covered: false,
+        });
         Event::RestoreCompleted {
             op,
             result: Ok(RestoreOutcome { restored, alarm }),

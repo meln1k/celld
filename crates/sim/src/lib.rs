@@ -261,10 +261,21 @@ pub enum Mutation {
     /// The readiness gate stops asking after one unsettled read. Caught by
     /// `ready-stuck`.
     GateStopsAsking,
+    /// The shell drops the lease renewal timer the core arms while it holds
+    /// no lease, so a process whose first lease write failed never asks
+    /// again, and never halts. Caught by `zombie-process`.
+    DropLeaseRetry,
+    /// The shell stamps an alarm timer's firing a second late on the wall
+    /// clock, so the core takes an alarm a second early for due. Caught by
+    /// `alarm-not-due`.
+    AlarmClockAhead,
+    /// The shell drops the core's release of a handler's call to a third
+    /// party, so the call waits forever. Caught by `unresolved`.
+    LostFetchRelease,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 34] = [
+    pub const ALL: [Mutation; 37] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -299,6 +310,9 @@ impl Mutation {
         Mutation::IgnoreDrainToken,
         Mutation::GateReadsReleasedClaim,
         Mutation::GateStopsAsking,
+        Mutation::DropLeaseRetry,
+        Mutation::AlarmClockAhead,
+        Mutation::LostFetchRelease,
     ];
 }
 

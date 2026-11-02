@@ -16,7 +16,7 @@ use super::replicator::ReplicaWork;
 use super::waker::WakerReq;
 use super::{Item, Work, World, WALL_EPOCH_MS};
 use crate::store::{Load, NoBase, Row};
-use crate::WriteId;
+use crate::{Mutation, WriteId};
 
 /// The bucket client's timeout for one attempt (`crates/celld/bucket.rs`).
 pub(super) const STORE_TIMEOUT_MS: u64 = 15_000;
@@ -575,6 +575,11 @@ impl World {
                 gate,
             } => {
                 self.store.publish_wake(&cell, alarm);
+                // What the bucket took: a lost entry write took nothing.
+                let lost = self.config.mutation == Some(Mutation::LostWakeEntry);
+                if let Some(at_ms) = alarm.at_ms().filter(|_| !lost) {
+                    self.checker.wake_landed(&cell, at_ms);
+                }
                 let retirement = retire
                     .then(|| self.retirement_proven(node, inc, &cell, alarm))
                     .flatten();

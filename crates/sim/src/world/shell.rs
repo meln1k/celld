@@ -50,6 +50,12 @@ impl World {
             Effect::ScheduleTimer { timer, at_mono_ms } => {
                 let mono = self.mono(node);
                 let n = self.machines[node].proc_mut();
+                if self.config.mutation == Some(Mutation::DropLeaseRetry)
+                    && matches!(timer, Timer::NodeLeaseRenew { .. })
+                    && !n.state.node_authoritative()
+                {
+                    return;
+                }
                 let slot = Slot::of(&timer);
                 let ordinal = n.next_ordinal;
                 n.next_ordinal += 1;

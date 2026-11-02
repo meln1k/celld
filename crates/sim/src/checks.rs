@@ -96,6 +96,8 @@ pub struct Checker {
     /// that process's log may lose them, and nothing else.
     fleet_acked: BTreeSet<(String, String, Epoch, WriteId)>,
     pub violations: Vec<Violation>,
+    /// Every wake entry the bucket ever took: (cell, due instant).
+    wakes: BTreeSet<(String, i64)>,
     /// Hits on watched properties, the first per kind and subject.
     pub watched: Vec<Violation>,
     watched_keys: BTreeSet<(&'static str, String)>,
@@ -430,6 +432,87 @@ impl Checker {
             "reopen-stuck",
             who.to_string(),
             format!("{who}'s log stayed degraded {stalled_ms} ms with a peer to recruit"),
+        );
+    }
+
+    /// Watched: **no zombie process.** In a quiet fleet, a process that is
+    /// up holds its node lease, or halts: a node whose lease expired fences
+    /// itself and exits (`docs/guarantees.md`), and one that never got a
+    /// lease keeps asking for one.
+    pub fn zombie(&mut self, t: u64, who: &str, unauthoritative_ms: u64) {
+        self.watch(
+            t,
+            "zombie-process",
+            who.to_string(),
+            format!("{who} has held no node lease for {unauthoritative_ms} ms and runs on"),
+        );
+    }
+
+    /// Watched: **an alarm fires only when due.** The core asks for a
+    /// handler only when the database it fires on holds an armed alarm
+    /// due by the node's own clock. `detail` says what the database held.
+    pub fn alarm_not_due(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch, detail: String) {
+        self.watch(
+            t,
+            "alarm-not-due",
+            format!("{who} {cell} {epoch}"),
+            format!("{who} fired {cell}'s alarm at epoch {epoch}, but {detail}"),
+        );
+    }
+
+    /// Watched: **every operation resolves.** In a quiet fleet, an output
+    /// held at the gate, a request running here, or an alarm handler is
+    /// answered within the operation deadline and some slack, as long as
+    /// its process lives (`operation_deadline_ms`).
+    pub fn unresolved(&mut self, t: u64, who: &str, what: String, open_ms: u64) {
+        self.watch(
+            t,
+            "unresolved",
+            format!("{who} {what}"),
+            format!("{who}'s {what} is still unanswered after {open_ms} ms"),
+        );
+    }
+
+    /// The bucket took a wake entry for `cell` due at `at_ms`.
+    pub fn wake_landed(&mut self, cell: &str, at_ms: i64) {
+        self.wakes.insert((cell.to_string(), at_ms));
+    }
+
+    /// Whether the bucket ever took a wake entry for `cell` due at `at_ms`.
+    pub fn wake_ever_landed(&self, cell: &str, at_ms: i64) -> bool {
+        self.wakes.contains(&(cell.to_string(), at_ms))
+    }
+
+    /// Whether the output gate proved an alarm handler's commit `write`.
+    pub fn handler_proved(&self, cell: &str, write: WriteId) -> bool {
+        (self.handler_proven.iter()).any(|(c, _, w)| c == cell && *w == write)
+    }
+
+    /// Watched: **a handler's re-arm stays discoverable**, as an
+    /// acknowledged alarm does (`alarm-undiscoverable`, and
+    /// `crash-uncovered-alarm` at a death): the core settles a proven
+    /// re-arm as durable, so cleanup may retire its entries no more than a
+    /// client's. `dying` names the process whose death left it uncovered.
+    /// Unlike a client's, a re-arm's arm gate tells nobody when its entry
+    /// write fails, so while its owner lives only an entry that landed and
+    /// went counts.
+    pub fn rearm_undiscoverable(
+        &mut self,
+        t: u64,
+        dying: Option<&str>,
+        cell: &str,
+        write: WriteId,
+        at_ms: i64,
+    ) {
+        let at = dying.map_or(String::new(), |who| format!(" as {who} dies"));
+        self.watch(
+            t,
+            "rearm-undiscoverable",
+            format!("{cell} {write}"),
+            format!(
+                "{cell}'s durable alarm at {at_ms}, re-armed by proven handler write {write}, \
+                 has no wake entry due by then{at}"
+            ),
         );
     }
 

@@ -15,7 +15,7 @@ use celld_logic::drain;
 use celld_logic::{Epoch, WebSocketKind};
 
 use super::alarms::ALARM_SLACK_MS;
-use super::{Pending, Time, World, LOAD_SAMPLE_MS, WALL_EPOCH_MS};
+use super::{Pending, Time, World, LOAD_SAMPLE_MS, OPERATION_DEADLINE_MS, WALL_EPOCH_MS};
 
 /// How long a quiet node may stay over its memory ceiling.
 const MEMORY_RELIEF_MS: u64 = 10_000;
@@ -27,6 +27,8 @@ const REOPEN_MS: u64 = 10_000;
 const READY_MS: u64 = 10_000;
 /// How long after a deploy's `max_age_ms` its forced moves may still take.
 pub(super) const DEPLOY_SLACK_MS: u64 = 10_000;
+/// How long past the operation deadline an operation may stay open.
+const RESOLVE_SLACK_MS: u64 = 5_000;
 
 /// What the judges remember of one process.
 #[derive(Default)]
@@ -41,6 +43,8 @@ pub(super) struct Watch {
     pub(super) reopen_due_since: Option<Time>,
     /// Since when the process could have become ready without a break.
     pub(super) ready_due_since: Option<Time>,
+    /// Since when the process has held no node lease without a break.
+    pub(super) unauthoritative_since: Option<Time>,
     /// Cells whose runtime this step stopped, for good: judged once the
     /// step is over, when every socket it closed has closed.
     pub(super) stopped: Vec<String>,
@@ -89,6 +93,9 @@ impl World {
                 .expect("uncovered: armed");
             if self.checker.answered(&cell, last) {
                 self.checker.died_uncovered(self.t, &who, &cell, last);
+            } else if self.checker.handler_proved(&cell, last) {
+                let at_ms = self.alarm_writes[&last].expect("armed");
+                (self.checker).rearm_undiscoverable(self.t, Some(&who), &cell, last, at_ms);
             }
         }
     }
@@ -117,8 +124,9 @@ impl World {
     }
 
     /// Watched: the bucket changed under `cell`. If the alarm a restore
-    /// would load was set by a write whose handler answered its client, a
-    /// wake entry must still be due by its time.
+    /// would load was set by a write whose handler answered its client, or
+    /// by an alarm handler's proven re-arm, a wake entry must still be due
+    /// by its time.
     pub(super) fn judge_discoverable(&mut self, cell: &str) {
         let Some((epoch, content)) = self.checker.newest_held(cell) else {
             return;
@@ -132,9 +140,86 @@ impl World {
             .find(|w| self.alarm_writes.contains_key(w))
             .copied()
             .expect("armed");
-        if self.checker.answered(cell, set_by) && !self.store.wake_covers(cell, at_ms) {
+        if self.store.wake_covers(cell, at_ms) {
+            return;
+        }
+        if self.checker.answered(cell, set_by) {
             self.checker
                 .alarm_undiscoverable(self.t, cell, set_by, at_ms);
+        } else if self.checker.handler_proved(cell, set_by)
+            && self.checker.wake_ever_landed(cell, at_ms)
+        {
+            (self.checker).rearm_undiscoverable(self.t, None, cell, set_by, at_ms);
+        }
+    }
+
+    /// Watched: the core fires `cell`'s alarm at `epoch` here. The newest
+    /// report of the alarm it has taken must hold one, due by this node's
+    /// clock. Not the database: a report already on its way when a handler
+    /// commits a new alarm is stale by the time the core fires on it, in
+    /// production too, and the handler finds nothing due.
+    pub(super) fn judge_fire(&mut self, node: usize, cell: &str, epoch: Epoch) {
+        let now = self.wall(node) as i64;
+        let detail = match self.machines[node].proc().alarms.told.get(cell) {
+            None => "it was never told of one".to_string(),
+            Some((_, None)) => "the newest report it took holds none".to_string(),
+            Some((_, Some(at_ms))) if *at_ms > now => {
+                format!(
+                    "the newest report it took has it due {} ms later",
+                    at_ms - now
+                )
+            }
+            Some(_) => return,
+        };
+        let who = self.who(node);
+        (self.checker).alarm_not_due(self.t, &who, cell, epoch, detail);
+    }
+
+    /// Watched: in a quiet fleet, a process that is up holds its node
+    /// lease or halts, within two lease periods and a retry or two.
+    pub(super) fn judge_zombie(&mut self, node: usize) {
+        let (t, allowance) = (self.t, 2 * self.config.ttl_ms + 5_000);
+        let settled = self.settled_from();
+        let p = self.machines[node].proc_mut();
+        if p.state.node_authoritative() || p.halting || p.shutdown.is_some() {
+            p.watch.unauthoritative_since = None;
+            return;
+        }
+        let since = *p.watch.unauthoritative_since.get_or_insert(t);
+        if t >= settled + allowance && t - since > allowance {
+            let who = self.who(node);
+            self.checker.zombie(t, &who, t - since);
+        }
+    }
+
+    /// Watched: in a quiet fleet, every request running here, call held at
+    /// the output gate, and alarm handler the core fired is answered
+    /// within the operation deadline and some slack. Its clock starts no
+    /// sooner than the fleet settled: what a fault held up before is the
+    /// fault's doing.
+    pub(super) fn judge_resolved(&mut self, node: usize) {
+        let t = self.t;
+        let from = self.settled_from();
+        let p = self.machines[node].proc();
+        let mut open: Vec<(String, Time)> = (p.pending.iter())
+            .filter_map(|(request, pending)| match pending {
+                Pending::Client(req) if req.epoch.is_some() => {
+                    Some((format!("request {request:?} to {}", req.cell), req.admitted))
+                }
+                Pending::Gate(gate) => {
+                    let cell = &gate.reveal.cell;
+                    Some((format!("call {request:?} from {cell}"), gate.opened))
+                }
+                _ => None,
+            })
+            .collect();
+        let alarms = p.alarms.fired_at.iter();
+        open.extend(alarms.map(|(op, at)| (format!("alarm handler {op:?}"), *at)));
+        let who = self.who(node);
+        for (what, at) in open {
+            if t.saturating_sub(at.max(from)) > OPERATION_DEADLINE_MS + RESOLVE_SLACK_MS {
+                self.checker.unresolved(t, &who, what, t - at);
+            }
         }
     }
 

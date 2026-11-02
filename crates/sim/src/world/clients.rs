@@ -185,8 +185,9 @@ pub(super) struct Req {
     pub(super) sent_at: Time,
     /// How the request got here. A forwarded request is never forwarded on.
     via: Via,
-    /// The epoch the request ran at, once routed locally.
+    /// The epoch the request ran at, once routed locally, and since when.
     pub(super) epoch: Option<Epoch>,
+    pub(super) admitted: Time,
     /// The handler has answered: its activity is over, and its response
     /// waits at the output gate.
     answered: bool,
@@ -408,6 +409,7 @@ impl World {
             sent_at,
             via,
             epoch: None,
+            admitted: 0,
             answered: false,
             committed: None,
             alarm: None,
@@ -656,11 +658,9 @@ impl World {
             self.settle(op, false);
             return;
         };
-        self.machines[node]
-            .proc_mut()
-            .client_mut(request)
-            .unwrap()
-            .epoch = Some(epoch);
+        let t = self.t;
+        let req = self.machines[node].proc_mut().client_mut(request).unwrap();
+        (req.epoch, req.admitted) = (Some(epoch), t);
         let commit = self.work_rng.range(0, 10);
         let end = commit + self.work_rng.range(1, 30);
         if write {
@@ -775,6 +775,9 @@ impl World {
         result: Result<(), RequestError>,
     ) {
         if channel == Channel::Fetch {
+            if self.config.mutation == Some(Mutation::LostFetchRelease) {
+                return;
+            }
             return self.gate_released(node, request, result);
         }
         assert_eq!(channel, Channel::Response, "handlers answer or fetch");

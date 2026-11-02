@@ -351,16 +351,38 @@ core, not to the simulator or to the property itself.
   while the bucket's token and leases showed the fleet settled, at the true
   time and by the process's own clock. A peer short of memory or an
   ownership skew keeps the gate shut by design, and does not count.
+- **zombie-process**: in a quiet fleet, a process that was up, not halting
+  and not shutting down held no node lease for two lease periods and 5 s.
+  A node whose lease expired fences itself and exits, and one whose first
+  lease write failed keeps asking.
+- **alarm-not-due**: the core fired a cell's alarm although the newest
+  report of it the core had taken (from the restore, an observation or a
+  finished handler, by database position) held no alarm, or one not yet
+  due by the node's clock. It judges what the core knew, not the database:
+  a report already on its way when a handler commits a new alarm is stale
+  when the core fires on it, in production too, and the handler then
+  finds nothing due.
+- **unresolved**: in a quiet fleet, a request running on a node, a
+  handler's call held at the output gate, or an alarm handler the core
+  fired was still unanswered 20 s after it began, or after the fleet
+  settled if later: the operation deadline and 5 s.
+- **rearm-undiscoverable**: as **alarm-undiscoverable**, or
+  **crash-uncovered-alarm** at a death, for an alarm that an alarm
+  handler's proven commit re-armed. No client hears of it, but the core
+  settles it as durable. A re-arm's arm gate tells nobody when its wake
+  entry write fails (production reports `Ok` either way), so while its
+  owner lives only an entry that landed and was then removed counts.
 
 **deploy-stuck**, **idle-not-evicted**, **memory-not-relieved**,
-**reopen-stuck** and **ready-stuck** judge only once the fleet is quiet, 15
-s after the faults end, so that a bucket call lost just before the end has
-timed out. The others judge at the moment their fact arrives.
+**reopen-stuck**, **ready-stuck**, **zombie-process** and **unresolved**
+judge only once the fleet is quiet, 15 s after the faults end, so that a
+bucket call lost just before the end has timed out. The others judge at the moment their fact arrives.
 **unclaimed-handoff**, **base-deleted**, **unjustified-loss**,
 **bundle-credit-unheld**, **fleet-proof-unbacked**,
 **credit-before-activation**, **bundle-deleted-uncovered**,
-**unrestorable**, **donors-overlap** and **ready-stuck** have never fired on
-the current simulator, and **alarm-undiscoverable** fires only after a known
+**unrestorable**, **donors-overlap**, **ready-stuck**, **zombie-process**,
+**unresolved** and **rearm-undiscoverable** have never fired on the
+current simulator, and **alarm-undiscoverable** fires only after a known
 bug lost the write behind it, so each has a planted bug that the test suite
 requires it to catch, as it does for an enforced check. The sweep below is
 the evidence that the others can fire, except **deploy-stuck**, which has
@@ -385,6 +407,17 @@ never fired, so nothing yet shows that it can. In 100,000 swarm seeds:
   after faulty clocks, the slow clean reload below, or a claim during a
   preserve. Fewer seeds reload cleanly than before: a node that has evicted a
   cell to a snapshot never does (the shell bug below).
+- 1,612 seeds (1,840 with validation compiled out) fired an alarm the core
+  had no due report of. Both causes are in the core, and both are
+  harmless here and in production, because the handler reads the alarm
+  again, finds nothing due and writes nothing. In a sample of 194 traced
+  hits, 131 came after a restore that reported no alarm:
+  `restore_completed` sets the alarm mirror only when the restore
+  reports one, so an older epoch's armed alarm and its timer survive a
+  takeover that found the alarm consumed. The other 63 came after
+  `alarm_finished` settled on an observation that reached the core while
+  the handler ran (`observed.unwrap_or`), read before the consuming
+  commit, so the core armed the consumed alarm again.
 - 2 seeds (2 with validation compiled out) left an acknowledged alarm with
   no wake entry due by its time, both after a failed activation handed its
   cell away (below) and lost the write that set it.

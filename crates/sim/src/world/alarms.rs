@@ -38,7 +38,7 @@ use celld_logic::{Epoch, Event, Failure, OpId, ProofSource, RequestId, Timer};
 
 use super::bucket::StoreReq;
 use super::waker::WakerReq;
-use super::{Work, World};
+use super::{Time, Work, World};
 use crate::{Mutation, WriteId};
 
 /// How far ahead a handler sets an alarm.
@@ -56,6 +56,12 @@ pub(super) struct ProcAlarms {
     covered: BTreeSet<(String, PublicationId)>,
     /// Alarm handlers running: the cell and epoch each fires on.
     firing: BTreeMap<OpId, (String, Epoch)>,
+    /// When each alarm handler the core has not heard finish was fired.
+    pub(super) fired_at: BTreeMap<OpId, Time>,
+    /// The newest alarm the core has taken for each cell, from its restore,
+    /// an observation or a finished handler: the database position it was
+    /// read at, and when it is due.
+    pub(super) told: BTreeMap<String, ((Epoch, u64), Option<i64>)>,
     /// Alarm handlers that re-armed and finished, whose reply waits on its
     /// arm gate: the cell, the epoch, the alarm and the write's position.
     held: BTreeMap<OpId, (String, Epoch, AlarmSnapshot, u64)>,
@@ -357,11 +363,11 @@ impl World {
         let published = self.machines[node].proc().published.get(&cell) == Some(&epoch);
         let name = self.machines[node].name.clone();
         self.checker.routed_local(self.t, &name, &cell, published);
-        self.machines[node]
-            .proc_mut()
-            .alarms
-            .firing
-            .insert(op, (cell, epoch));
+        self.judge_fire(node, &cell, epoch);
+        let t = self.t;
+        let alarms = &mut self.machines[node].proc_mut().alarms;
+        alarms.firing.insert(op, (cell, epoch));
+        alarms.fired_at.insert(op, t);
         let (lo, hi) = ALARM_RUN_MS;
         let run = self.work_rng.range(lo, hi);
         self.work(node, run, Work::Alarm(AlarmWork::Run { op }));
@@ -443,9 +449,28 @@ impl World {
     /// The core is about to take `event`. If it settles a handler
     /// commit's gate, as `settle_gate` does, tell the oracle whether the
     /// commit was proven: by the fleet, or by the bucket once the ownership
-    /// read confirms. A deadline fails it.
-    pub(super) fn alarm_gate_answered(&mut self, node: usize, event: &Event) {
-        let alarms = &self.machines[node].proc().alarms;
+    /// read confirms. A deadline fails it. If it reports a handler
+    /// finished, the handler is no longer outstanding; if it reports an
+    /// alarm, note what the core now knows of it.
+    pub(super) fn alarm_event_taken(&mut self, node: usize, event: &Event) {
+        match event {
+            Event::AlarmObserved { cell, alarm, .. }
+            | Event::AlarmFinished {
+                cell,
+                result: Ok((alarm, ..)),
+                ..
+            } => {
+                if let Some(source) = alarm.source() {
+                    let read_at = (source.id.epoch, source.position);
+                    self.alarm_told(node, cell, read_at, alarm.at_ms());
+                }
+            }
+            _ => {}
+        }
+        let alarms = &mut self.machines[node].proc_mut().alarms;
+        if let Event::AlarmFinished { op, .. } = event {
+            alarms.fired_at.remove(op);
+        }
         let (op, proven, fleet) = match event {
             Event::DurableReached { op, result, source } => {
                 let Some((_, _, position, _)) = alarms.proving.get(op) else {
@@ -475,6 +500,21 @@ impl World {
             self.stats.alarms_proven += 1;
             let who = self.who(node);
             (self.checker).handler_commit_proven(&who, &cell, epoch, write, fleet);
+        }
+    }
+
+    /// The core takes a report of `cell`'s alarm, read from its database
+    /// at `read_at`. A report read earlier than one it took is stale.
+    pub(super) fn alarm_told(
+        &mut self,
+        node: usize,
+        cell: &str,
+        read_at: (Epoch, u64),
+        at_ms: Option<i64>,
+    ) {
+        let told = &mut self.machines[node].proc_mut().alarms.told;
+        if told.get(cell).is_none_or(|(newest, _)| *newest <= read_at) {
+            told.insert(cell.to_string(), (read_at, at_ms));
         }
     }
 
