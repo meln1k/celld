@@ -79,62 +79,62 @@ protocol variants verify that the checkers detect the faults.
 
 ### The simulator in this repository
 
-[`crates/sim`](../crates/sim) covers the core of this design. It runs several
-`celld-logic` cores in one thread, on one simulated clock, against one
-simulated bucket. A simulated shell carries out each effect the way
-`crates/celld/actor.rs` does. A cell is a scripted handler that can commit one
-write and answers through the output gate. A handler can also call a third
-party mid-request, which waits at the gate too, and can upgrade its request to
-a WebSocket, whose messages are requests of their own. Top-level Worker
-requests borrow idle resident isolates. Some clients give up before they hear
-back, an operator evicts cells by hand and shuts nodes down, a balancer gives
-idle cells away, and the log tier nudges node leases. A node that shuts
-down or gives a cell away offers it to its peers until one acquires it, as
-`AdoptReleased` and the peer's handoff endpoint do in production. A drain
-first claims the fleet drain token, one bucket object written under its
-ETag, so that donors hand off one at a time: it retries every second for up
-to three quarters of its shutdown budget, then hands off unserialized, and it
-releases its claim on the way out. In seeds with a balancer, a fresh process
-runs the first-readiness gate (`drain::fleet_status`) over the token and the
-node leases every second, and balances only once it is ready. A node can
-also be replaced in place: its process preserves its cells and exits, and the
-replacement resumes each database at the same epoch without the bucket. An
-idle eviction or a cleanup keeps the closed database on its node as an
-eviction snapshot, and the node's next activation of the cell opens it
-instead of reading the bucket, unless that activation took the cell over.
-An eviction or a cleanup stops its cell as `report_stopped_when_released`
-does, attempt after attempt: an eviction first captures its handoff
-snapshot, and a request that reaches the cell can take the eviction back
-only until that capture ends; then the final upload has 10 s, a failed
-attempt retries after 50 ms, and only a failed attempt reads a bounded
-stop's deadline. In
-half of the swarm seeds, owners also run epoch GC every 5 s: list the cell's
-epochs, plan with `epoch_gc::plan`, read the owner record, then delete each
-epoch prefix below the restore chain's base, one bucket call per step. In
-half of the swarm seeds, some or all bucket restores page their cell
-(`CELLD_LTX_PAGED`): the epoch's marker lands before the cell serves, and
-the epoch then continues the chain below it from the restored position
-instead of opening at the first one. A restore walks the chain as
-`EpochChain::build` does: down from the newest listed epoch, clipping each
-lower epoch below the cut above it, linking only an epoch that ends exactly
-at that cut, and stopping at one that opens at the first position. A paged
-cell pins epoch GC until its background fill completes, a few seconds
-later. Page faults themselves are not modelled: a paged cell holds its
-whole database from the start. A
-deploy moves a node's resident cells onto a new application generation, which
-restarts each runtime on its open database. A write can set or clear its
-cell's alarm, which lives in the database like any other write, with its
-installation id: opening the database at a new epoch moves the id into that
-epoch, as production's wake record does. Its wake
-entry goes to the bucket, a timer fires it on the owner, and each node scans
-the due wake entries every second to wake cells nobody holds. One node holds
-the advisory waker role, a lease in the bucket, and hints the cells whose
-owner is dead or absent. Old entries go only below a retirement certificate,
-which an owner raises once it has proven its current alarm durable and its
-ownership current. Its eager delete of them can fail, and every node's
-collector lists the entries each second, deletes those the certificate
-retires, and wakes the due cells it does not. Each of these bucket calls can
-fail like any other.
+[`crates/sim`](../crates/sim) covers the core of this design. It runs
+several `celld-logic` cores in one thread, on one simulated clock, against
+one simulated bucket. A simulated shell carries out each effect the way
+`crates/celld/actor.rs` does. A cell is a scripted handler that can commit
+one write and answers through the output gate. A handler can also call a
+third party mid-request, which waits at the gate too, and can upgrade its
+request to a WebSocket, whose messages are requests of their own. Top-level
+Worker requests borrow idle resident isolates. Some clients give up before
+they hear back, an operator evicts cells by hand and shuts nodes down, a
+balancer gives idle cells away, and the log tier nudges node leases. A node
+that shuts down or gives a cell away offers it to its peers until one
+acquires it, as `AdoptReleased` and the peer's handoff endpoint do in
+production. A drain first claims the fleet drain token, one bucket object
+written under its ETag, so that donors hand off one at a time: it retries
+every second for up to three quarters of its shutdown budget, then hands off
+unserialized, and it releases its claim on the way out. In seeds with a
+balancer, a fresh process runs the first-readiness gate
+(`drain::fleet_status`) over the token and the node leases every second, and
+balances only once it is ready. A node can also be replaced in place: its
+process preserves its cells and exits, and the replacement resumes each
+database at the same epoch without the bucket. An idle eviction or a cleanup
+keeps the closed database on its node as an eviction snapshot, and the
+node's next activation of the cell opens it instead of reading the bucket,
+unless that activation took the cell over. An eviction or a cleanup stops
+its cell as `report_stopped_when_released` does, attempt after attempt: an
+eviction first captures its handoff snapshot, and a request that reaches the
+cell can take the eviction back only until that capture ends; then the final
+upload has 10 s, a failed attempt retries after 50 ms, and only a failed
+attempt reads a bounded stop's deadline. In half of the swarm seeds, owners
+also run epoch GC every 5 s: list the cell's epochs, plan with
+`epoch_gc::plan`, read the owner record, then delete each epoch prefix below
+the restore chain's base, one bucket call per step. In half of the swarm
+seeds, some or all bucket restores page their cell (`CELLD_LTX_PAGED`): the
+epoch's marker lands before the cell serves, and the epoch then continues
+the chain below it from the restored position instead of opening at the
+first one. A restore walks the chain as `EpochChain::build` does: down from
+the newest listed epoch, clipping each lower epoch below the cut above it,
+linking only an epoch that ends exactly at that cut, and stopping at one
+that opens at the first position. A paged cell pins epoch GC until its
+background fill completes, a few seconds later. Every fill here completes;
+production can turn the fill off, and such a cell pins epoch GC for as long
+as it stays open. Page faults themselves are not modelled: a paged cell
+holds its whole database from the start. A deploy moves a node's resident
+cells onto a new application generation, which restarts each runtime on its
+open database. A write can set or clear its cell's alarm, which lives in the
+database like any other write, with its installation id: opening the
+database at a new epoch moves the id into that epoch, as production's wake
+record does. Its wake entry goes to the bucket, a timer fires it on the
+owner, and each node scans the due wake entries every second to wake cells
+nobody holds. One node holds the advisory waker role, a lease in the bucket,
+and hints the cells whose owner is dead or absent. Old entries go only below
+a retirement certificate, which an owner raises once it has proven its
+current alarm durable and its ownership current. Its eager delete of them
+can fail, and every node's collector lists the entries each second, deletes
+those the certificate retires, and wakes the due cells it does not. Each of
+these bucket calls can fail like any other.
 
 The simulated shell carries out every effect the core can return, and sends
 every event production sends, in its timed form.
@@ -282,8 +282,9 @@ A check can judge only the phases the core actually reaches. The simulator
 reads every cell's phase before and after each event
 (`crates/sim/src/coverage.rs`). A sweep ends with the number of distinct
 transitions its seeds took and the phases none of them entered, and
-`--coverage` prints every transition with how many seeds took it. The fault tests require their runs to enter every
-phase of `Phase`, so a simulator change that stops reaching one fails a test.
+`--coverage` prints every transition with how many seeds took it. The
+fault tests require their runs to enter every phase of `Phase`, so a
+simulator change that stops reaching one fails a test.
 A phase the core enters and leaves within one event is not seen.
 
 Each check has a planted bug (`Mutation` in `crates/sim/src/lib.rs`) in the
@@ -350,12 +351,11 @@ just before the end has timed out. The others judge at the moment their fact
 arrives. **unclaimed-handoff**, **base-deleted**, **unjustified-loss**,
 **bundle-credit-unheld**, **fleet-proof-unbacked**,
 **credit-before-activation**, **bundle-deleted-uncovered**,
-**unrestorable**, **donors-overlap** and **ready-stuck** have never
-fired on the
-current simulator, and **alarm-undiscoverable** fires only after a known
-bug lost the write behind it, so each has a planted bug that the test suite
-requires it to catch, as it does for an enforced check. The sweep below is the evidence that the others can
-fire, except **deploy-stuck**, which has never fired, so nothing yet shows
+**unrestorable**, **donors-overlap** and **ready-stuck** have never fired
+on the current simulator, and **alarm-undiscoverable** fires only after a
+known bug lost the write behind it, so each has a planted bug that the test
+suite requires it to catch, as it does for an enforced check. The sweep
+below is the evidence that the others can fire, except **deploy-stuck**, which has never fired, so nothing yet shows
 that it can. In 100,000 swarm seeds:
 
 - 406 seeds kept an idle cell resident, 364 of them in a run where a
@@ -407,8 +407,8 @@ that it can. In 100,000 swarm seeds:
 The simulator does not yet model V8, or, in the fleet log, the recovery
 claim, the incapable-peer quarantine, hedged retransmission of a slow
 append, recruitment at startup, and the epoch opener's forced compaction
-(`crates/sim/src/world/node_log.rs` says how each is approximated). Its memory has no allocator slack, cgroup or
-containers, no noise between samples, and returns a cell's whole share when
+(`crates/sim/src/world/node_log.rs` says how each is approximated). Its
+memory has no allocator slack, cgroup or containers, no noise between samples, and returns a cell's whole share when
 the cell goes, and its heap's the moment the heap is empty.
 
 The core on `main` fails some seeds.
@@ -548,8 +548,8 @@ takes it for the leader's own partition: it degrades and sets
 `suspect_self`, and `maintain` recruits no one until a member answers a
 probe. Members that are paused or down answer nothing until they come
 back, so the log stays degraded while live peers could follow it: 29 s in
-swarm 4564, where its members paused and then crashed. As with the skew above, writes
-go on at the bucket's latency and nothing is lost. In 100,000 swarm seeds
+swarm 4564, where its members paused and then crashed. As with the skew
+above, writes go on at the bucket's latency and nothing is lost. In 100,000 swarm seeds
 this held 7 logs degraded (8 with validation compiled out). A fix would
 let an answer from any peer, such as a lease read that shows peers
 renewing, lift the suspicion.
@@ -585,9 +585,9 @@ seeds that page, and the totals moved within the noise: 11,737 failing
 seeds in a debug build and 2,049 with validation compiled out, 186 and 229
 on lost writes, 131 and 167 holding a log degraded. The only new failure
 is one seed (swarm 3664) that stops on the known `queued twice` invariant.
-Across both modes, every seed that newly lost writes followed a failed fold (86), a failed
-bucket read (7) or a superseded replacement (swarm 19158),
-and no restore found its chain broken (**unrestorable** and
+Across both modes, every seed that newly lost writes followed a failed
+fold (86), a failed bucket read (7) or a superseded replacement (swarm
+19158), and no restore found its chain broken (**unrestorable** and
 **torn-restore** never fired).
 
 Modelling the clean stop's retry loop moved timing in every seed that

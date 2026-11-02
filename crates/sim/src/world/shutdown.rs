@@ -13,8 +13,10 @@
 //!   is, at the same epoch, without reading the bucket.
 //!
 //! A drain first claims the fleet drain token (`drain.rs`), so donors hand
-//! off one at a time. Either way, the shutdown has a deadline. A process that reaches it exits
-//! as it stands, and its cells recover as a crashed node's do.
+//! off one at a time.
+//!
+//! Both kinds have a deadline. A process that reaches it exits as it
+//! stands, and its cells recover as a crashed node's do.
 
 use celld_logic::Event;
 

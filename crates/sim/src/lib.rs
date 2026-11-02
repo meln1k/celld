@@ -365,9 +365,10 @@ pub struct Faults {
     pub gray_followers: f64,
     pub max_gray_ms: u64,
     pub gray_latency_ms: u64,
-    /// A process's memory grows by up to `max_surge_mb` for a few seconds,
-    /// held by no cell (a large request body, an allocator spike), so
-    /// shedding cells cannot give it back. Only with `SimConfig::memory`.
+    /// Per simulated minute, as every rate here: a process's memory grows
+    /// by up to `max_surge_mb` for a few seconds, held by no cell (a large
+    /// request body, an allocator spike), so shedding cells cannot give it
+    /// back. Only with `SimConfig::memory`.
     pub surges: f64,
     pub max_surge_mb: u64,
 }
