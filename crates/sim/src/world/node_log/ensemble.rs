@@ -112,7 +112,9 @@ impl World {
     /// peers' leases, a bucket call that can fail; the pass goes on in
     /// `peers_read`.
     pub(super) fn maintain(&mut self, node: usize, from_watch: bool) {
-        let Some(log) = self.machines[node].proc().log.as_ref() else {
+        let p = self.machines[node].proc();
+        // A process shutting down repairs nothing (`task_stop`).
+        let Some(log) = p.log.as_ref().filter(|_| p.shutdown.is_none()) else {
             return;
         };
         let width = self.session(&log.session).ensemble.len();
@@ -162,7 +164,9 @@ impl World {
         }
         let untiered = self.config.mutation == Some(Mutation::ReopenUntiered);
         let barrier = !self.outstanding(node) && (untiered || self.all_shipped_tiered(node));
-        if !barrier || members.is_empty() {
+        // The write needs a running log (`transition.is_running()`).
+        let stopping = self.machines[node].proc().shutdown.is_some();
+        if !barrier || members.is_empty() || stopping {
             return self.pass_ended(node);
         }
         let log = self.machines[node]
@@ -249,6 +253,7 @@ impl World {
             entry.ensemble = ensemble;
             entry.frames = 0;
             entry.proved = false;
+            entry.credited = false;
         }
         (entry.epoch > from).then(|| (entry.epoch, entry.ensemble.clone()))
     }

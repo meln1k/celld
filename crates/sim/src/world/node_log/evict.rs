@@ -4,7 +4,7 @@
 //! shipper.
 
 use super::super::{Work, World};
-use super::{LogWork, Posture, APPEND_DEADLINE_MS};
+use super::{append_deadline_ms, LogWork, Posture};
 use celld_logic::log_evict::{EvictionPolicy, Verdict};
 
 /// How long a member must be quiet before it owes an idle probe.
@@ -55,7 +55,7 @@ impl World {
                 follower: member,
                 started: mono,
             });
-            self.work(node, APPEND_DEADLINE_MS, deadline);
+            self.work(node, append_deadline_ms(), deadline);
         }
     }
 

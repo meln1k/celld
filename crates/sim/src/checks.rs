@@ -336,26 +336,19 @@ impl Checker {
         }
     }
 
-    /// Watched: **the activation fence.** `who`'s log credited a fleet
-    /// proof of a cell epoch at `log_epoch` while the bucket's record did
-    /// not yet say that log epoch may have fleet acks. A recovery that read
-    /// it then would seal what it gathered as if nothing had been
-    /// acknowledged (`LiveLogTransitions::activate`).
-    pub fn credit_unactivated(
-        &mut self,
-        t: u64,
-        who: &str,
-        cell: &str,
-        epoch: Epoch,
-        log_epoch: u64,
-    ) {
+    /// Watched: **the activation fence.** A recovery or a fold read the
+    /// record of `who`'s log at `log_epoch` as having no fleet acks, though
+    /// the fleet proved writes at that epoch. Reading it so, a recovery
+    /// seals what it gathered as if nothing had been acknowledged, and a
+    /// fold trusts an incomplete follower (`LiveLogTransitions::activate`).
+    pub fn credit_unactivated(&mut self, t: u64, who: &str, log_epoch: u64) {
         self.watch(
             t,
             "credit-before-activation",
             format!("{who} {log_epoch}"),
             format!(
-                "{who} credited a fleet proof of {cell} epoch {epoch} at log epoch {log_epoch} \
-                 before its record said it may have fleet acks"
+                "a recovery or fold read {who}'s log record at log epoch {log_epoch} as having \
+                 no fleet acks, though the fleet proved writes at it"
             ),
         );
     }

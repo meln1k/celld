@@ -97,18 +97,10 @@ const PEER_PROTOCOL: u16 = 1;
 /// Something due at a simulated instant.
 enum Item {
     /// Work for one process. Dropped if that process has died since.
-    Proc {
-        node: usize,
-        inc: u64,
-        work: Work,
-    },
+    Proc { node: usize, inc: u64, work: Work },
     /// Work another node's process sent over the network: `Proc`, but lost
     /// if the receiver's machine is partitioned when it arrives.
-    Peer {
-        node: usize,
-        inc: u64,
-        work: Work,
-    },
+    Peer { node: usize, inc: u64, work: Work },
     /// A bucket request arrives at the bucket and is applied. It applies
     /// even if its sender has died since: it was already on the wire. Its
     /// answer returns after `answer_ms`, or never when the response is lost.
@@ -121,38 +113,24 @@ enum Item {
     /// A client sends its next request.
     ClientNew,
     /// A client stops waiting for its request.
-    GiveUp {
-        op: u64,
-    },
+    GiveUp { op: u64 },
     /// A request reaches a node: from its client, or forwarded by the
     /// ingress. Not tied to a process: it reaches whichever
     /// process runs on the node by then, or none.
-    Arrive {
-        node: usize,
-        op: u64,
-        via: Via,
-    },
+    Arrive { node: usize, op: u64, via: Via },
     /// A forward came back to the ingress without running.
-    Bounced {
-        op: u64,
-        why: Bounce,
-    },
+    Bounced { op: u64, why: Bounce },
     /// A donor's offer of a released cell reaches a peer. Like `Arrive`,
     /// it reaches whichever process runs there by then.
-    Offer {
-        node: usize,
-        offer: Offer,
-    },
-    /// The next fault of this kind.
+    Offer { node: usize, offer: Offer },
     /// A follower disk turns slow.
     Gray,
+    /// The next fault of this kind.
     Fault(Fault),
     /// The next act of this kind.
     Operator(Act),
     /// The supervisor starts a new process on the node.
-    Restart {
-        node: usize,
-    },
+    Restart { node: usize },
     /// A booting process's recovery of its predecessor's log reaches the
     /// bucket and the followers. Its answer returns after `answer_ms`, or
     /// never.
@@ -168,23 +146,15 @@ enum Item {
         recovered: bool,
     },
     /// A paused process runs again.
-    Resume {
-        node: usize,
-        inc: u64,
-    },
+    Resume { node: usize, inc: u64 },
     /// A node's network comes back.
-    Heal {
-        node: usize,
-        partition: u64,
-    },
+    Heal { node: usize, partition: u64 },
     /// Liveness: every cell must now take a write.
     Probe,
     /// Liveness: the fleet dies and a fresh node must restore every cell.
     Audit,
     /// One attempt at a liveness goal.
-    GoalSend {
-        goal: usize,
-    },
+    GoalSend { goal: usize },
     /// The run is over.
     End,
 }
@@ -250,6 +220,9 @@ struct Machine {
     proc: Option<Process>,
     /// Until when its follower disk is slow, and by up to how much.
     gray: Option<(Time, u64)>,
+    /// When this machine's follower disk finishes the last write it took:
+    /// one disk, so it finishes them in order.
+    disk_free: Time,
 }
 
 impl Machine {
@@ -266,6 +239,7 @@ impl Machine {
             boot: 0,
             proc: None,
             gray: None,
+            disk_free: 0,
         }
     }
 
@@ -484,6 +458,9 @@ pub struct World {
     op_rng: Rng,
     /// Slow follower disks: when, where, and how slow.
     gray_rng: Rng,
+    /// How long each write a slow disk takes: apart from `gray_rng`, so
+    /// that traffic does not move which disk turns slow, or when.
+    disk_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -510,6 +487,7 @@ impl World {
         let mut fault_rng = master.fork();
         let op_rng = master.fork();
         let gray_rng = master.fork();
+        let disk_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -538,6 +516,7 @@ impl World {
             fault_rng,
             op_rng,
             gray_rng,
+            disk_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),

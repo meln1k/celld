@@ -70,12 +70,17 @@ impl World {
         self.after(gap, Item::Gray);
     }
 
-    /// How much longer this machine's follower disk takes to answer now.
+    /// How long until this machine's follower disk has written what it is
+    /// given now: behind every write it already took, and, while it is
+    /// slow, up to its latency more.
     pub(super) fn gray_delay(&mut self, node: usize) -> u64 {
-        match self.machines[node].gray {
-            Some((until, latency)) if self.t < until => self.gray_rng.range(latency / 2, latency),
+        let slow = match self.machines[node].gray {
+            Some((until, latency)) if self.t < until => self.disk_rng.range(latency / 2, latency),
             _ => 0,
-        }
+        };
+        let m = &mut self.machines[node];
+        m.disk_free = m.disk_free.max(self.t + slow);
+        m.disk_free - self.t
     }
 
     fn rate(&self, fault: Fault) -> f64 {

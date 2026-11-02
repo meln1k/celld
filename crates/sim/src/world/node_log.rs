@@ -47,22 +47,24 @@
 //!   follower drops what it held of an earlier epoch when it adopts a new
 //!   one. Fold and recovery read the current epoch's members only.
 //!
-//! - Gray followers (`Faults::gray_followers`) answer appends and probes
-//!   late. The posture watch probes idle members and runs `log_evict`'s
+//! - Gray followers (`Faults::gray_followers`) write appends and answer
+//!   probes late, in the order their disk took them; an append is on the
+//!   disk only once written. The posture watch probes idle members and runs `log_evict`'s
 //!   verdicts, its swap rate cap and its correlated-stall test, as
 //!   production's `evict_gray_followers` does: a correlated stall suspects
 //!   the leader itself, and only a probe's answer or a completed round
 //!   lifts that.
 //!
-//! Not modelled: the incapable-peer quarantine (every simulated peer can
-//! follow), recruitment at startup (a process opens
-//! its log with the machines it finds, and a process that starts alone
-//! never opens one), compaction of bundle rows into per-cell objects, and
-//! bundle GC (bundles are never deleted).
+//! Not modelled: the recovery claim (`Recovering` and its heartbeat), the
+//! incapable-peer quarantine (every simulated peer can follow), hedged
+//! retransmission of a slow append (`run_hedged`), recruitment at startup
+//! (a process opens its log with the machines it finds, and a process
+//! that starts alone never opens one), compaction of bundle rows into
+//! per-cell objects, and bundle GC (bundles are never deleted).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use celld_logic::log_evict::FollowerHealth;
+use celld_logic::log_evict::{EvictionPolicy, FollowerHealth};
 use celld_logic::log_tier::LogState;
 use celld_logic::{Epoch, Event, Failure, OpId};
 
@@ -86,7 +88,9 @@ const PEER_MS: (u64, u64) = (1, 5);
 /// How long an append may stay unconfirmed before it fails and the
 /// shipper degrades ("member append failed"): the lane's deadline,
 /// `log_evict`'s backstop plus 100 ms.
-pub(super) const APPEND_DEADLINE_MS: u64 = 1_600;
+fn append_deadline_ms() -> u64 {
+    EvictionPolicy::default().backstop_ms + 100
+}
 /// The log a process leads.
 pub(super) struct Log {
     session: String,
@@ -180,6 +184,9 @@ pub(super) struct Session {
     ensemble: Vec<usize>,
     frames: u64,
     proved: bool,
+    /// The oracle's side of `proved`: a fleet proof did credit the gate at
+    /// this log epoch, whatever the record says.
+    credited: bool,
 }
 
 /// What the members of a session that answer hold of it.
@@ -233,6 +240,8 @@ pub(super) enum LogWork {
         /// Where the fragment starts (`Log::floor`).
         from: usize,
         content: Vec<WriteId>,
+        /// The follower's disk has written it: it waited its turn there.
+        written: bool,
     },
     /// A follower confirmed holding `len` writes of a cell epoch.
     Confirmed {
@@ -309,7 +318,26 @@ impl World {
                 epoch,
                 from,
                 content,
+                written,
             } => {
+                // The disk writes it in its turn, and a slow one later: a
+                // crash before then loses it.
+                let wait = if written { 0 } else { self.gray_delay(node) };
+                if wait > 0 {
+                    let work = Work::Log(LogWork::Append {
+                        session,
+                        leader,
+                        log_epoch,
+                        frame,
+                        cell,
+                        epoch,
+                        from,
+                        content,
+                        written: true,
+                    });
+                    self.work(node, wait, work);
+                    return;
+                }
                 let at = (log_epoch, frame);
                 self.append(node, session, leader, at, cell, epoch, from, content)
             }
@@ -440,6 +468,7 @@ impl World {
             ensemble: ensemble.clone(),
             frames: 0,
             proved: false,
+            credited: false,
         };
         self.sessions.insert(session.clone(), entry);
         let who = self.who(node);
@@ -485,11 +514,6 @@ impl World {
         log.and_then(|log| log.shipped.get(&(cell.to_string(), epoch)))
             .copied()
             .unwrap_or(0)
-    }
-
-    /// The fleet just proved a write for this process.
-    pub(super) fn fleet_proved(&mut self) {
-        self.stats.fleet_proofs += 1;
     }
 
     fn session(&self, session: &str) -> &Session {
@@ -571,7 +595,7 @@ impl World {
         entry.frames += 1;
         let (frame, ensemble) = (entry.frames, entry.ensemble.clone());
         let backstop = Work::Log(LogWork::Backstop { log_epoch, frame });
-        self.work(node, APPEND_DEADLINE_MS, backstop);
+        self.work(node, append_deadline_ms(), backstop);
         let mono = self.mono(node);
         let names: Vec<String> = (ensemble.iter())
             .map(|&f| self.machines[f].name.clone())
@@ -595,6 +619,7 @@ impl World {
                 epoch,
                 from,
                 content: content.clone(),
+                written: false,
             });
             self.peer_send(node, follower, None, work);
         }
@@ -664,8 +689,7 @@ impl World {
             epoch,
             len,
         });
-        let fsync = self.gray_delay(node);
-        self.peer_send_after(node, leader.0, Some(leader.1), work, fsync);
+        self.peer_send(node, leader.0, Some(leader.1), work);
     }
 
     /// A follower's confirmation reaches its leader. Once every follower
@@ -910,6 +934,7 @@ impl World {
         }
         let entry = self.session(session);
         let (dead, proved) = (self.who_at(entry.node, entry.inc), entry.proved);
+        self.judge_activated(session);
         let gathered = self.gather(session, None);
         let loss = proved && !gathered.witnessed;
         let wait = self.config.mutation != Some(Mutation::LossWithoutWaiting);
@@ -949,6 +974,17 @@ impl World {
     /// epoch that ended without its final upload left. Without a witness,
     /// a session that may have fleet acks fails the restore rather than
     /// open a database that may miss acknowledged writes.
+    /// A recovery or a fold reads the session's record: it must say the
+    /// log epoch may have fleet acks if the fleet proved any.
+    fn judge_activated(&mut self, session: &str) {
+        let entry = self.session(session);
+        if entry.credited && !entry.proved {
+            let who = self.who_at(entry.node, entry.inc);
+            let log_epoch = entry.epoch;
+            self.checker.credit_unactivated(self.t, &who, log_epoch);
+        }
+    }
+
     pub(super) fn fold_tail(&mut self, node: usize, inc: u64, cell: &str) -> Result<(), Failure> {
         let session = shutdown::generation(node, inc);
         if !self.sessions.contains_key(&session) {
@@ -958,6 +994,7 @@ impl World {
             return Err(Failure::Ambiguous);
         }
         let gathered = self.gather(&session, Some(cell));
+        self.judge_activated(&session);
         if self.session(&session).proved && !gathered.witnessed {
             self.note(|| format!("fold of {cell} in {session} finds no complete follower"));
             return Err(Failure::Ambiguous);

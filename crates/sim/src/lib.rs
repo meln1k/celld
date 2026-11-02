@@ -328,8 +328,10 @@ pub struct Faults {
     pub store_spike_probability: f64,
     pub store_spike_ms: u64,
     /// A machine's follower disk turns slow for a while, up to
-    /// `max_gray_ms`: each append or probe it answers waits up to
-    /// `gray_latency_ms` longer, as behind a dying disk's fsync.
+    /// `max_gray_ms`: each append it writes, and each probe it answers,
+    /// takes up to `gray_latency_ms` longer, as behind a dying disk's
+    /// fsync, in the order the disk took them. An append is not on the disk,
+    /// and not confirmed, until then.
     pub gray_followers: f64,
     pub max_gray_ms: u64,
     pub gray_latency_ms: u64,
@@ -449,7 +451,7 @@ impl SimConfig {
         if gray.chance(0.5) {
             faults.gray_followers = gray.range(1, 6) as f64;
             faults.max_gray_ms = gray.range(2_000, 15_000);
-            faults.gray_latency_ms = gray.range(30, 1_200);
+            faults.gray_latency_ms = gray.range(30, 3_000);
         }
         Self {
             nodes: r.range(2, 5) as usize,

@@ -102,12 +102,16 @@ impl World {
         let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
         };
-        if log.epoch != log_epoch || !matches!(log.activation, Activation::Waiting(_)) {
+        if log.epoch != log_epoch {
             return;
         }
-        let Activation::Waiting(held) = std::mem::replace(&mut log.activation, Activation::Done)
-        else {
-            unreachable!("checked");
+        let held = match std::mem::replace(&mut log.activation, Activation::Done) {
+            Activation::Waiting(held) => held,
+            // Nothing waited on this write: it changes nothing.
+            other => {
+                log.activation = other;
+                return;
+            }
         };
         for (cell, epoch, fleet) in held {
             self.fleet_credit(node, &cell, epoch, fleet);
@@ -130,9 +134,9 @@ impl World {
         // A completed round proves this node is not cut off.
         log.suspect_self = false;
         let (session, log_epoch) = (log.session.clone(), log.epoch);
-        if !self.session(&session).proved {
-            self.checker
-                .credit_unactivated(self.t, &who, cell, epoch, log_epoch);
+        let entry = self.session_mut(&session);
+        if entry.epoch == log_epoch {
+            entry.credited = true;
         }
         self.fleet_reached(node, cell, epoch, fleet);
     }
