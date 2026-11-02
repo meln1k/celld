@@ -69,6 +69,32 @@ pub struct Load {
     pub draining: bool,
 }
 
+/// One epoch prefix of a cell, `cells/<cell>/ltx/e<epoch>/`.
+#[derive(Default)]
+struct Prefix {
+    /// A cell's database is a list of writes, so a prefix holds the longest
+    /// list any upload into it carried. Real LTX files are immutable and
+    /// named by transaction range: a late or repeated upload adds files and
+    /// never rolls the prefix back. Keeping the longest list has the same
+    /// effect.
+    writes: Vec<WriteId>,
+    /// A paged epoch (`CELLD_LTX_PAGED`): the position it continues the
+    /// chain below it from, and whether its marker is still in the bucket.
+    /// Its objects hold only the positions above the cut; the ones below are
+    /// the chain's (`Store::spans`). 0 for an epoch that opens at the first
+    /// position.
+    cut: usize,
+    marker: bool,
+}
+
+impl Prefix {
+    /// Whether a listing finds objects in the prefix: its marker, or a
+    /// position above its cut.
+    fn listed(&self) -> bool {
+        self.marker || self.writes.len() > self.cut
+    }
+}
+
 #[derive(Default)]
 pub struct Store {
     /// A planted bug in the bucket itself, if any.
@@ -77,17 +103,9 @@ pub struct Store {
     leases: BTreeMap<String, (NodeLeaseRecord, u64, Load)>,
     /// Cell → (owner node, epoch, etag).
     owners: BTreeMap<String, (Option<String>, Epoch, u64)>,
-    /// One prefix per cell epoch. A cell's database is a list of writes, so
-    /// a prefix holds the longest list any upload into it carried. Real LTX
-    /// files are immutable and named by transaction range: a late or repeated
-    /// upload adds files and never rolls the prefix back. Keeping the longest
-    /// list has the same effect.
-    prefixes: BTreeMap<(String, Epoch), Vec<WriteId>>,
-    /// Paged epochs (`CELLD_LTX_PAGED`): the position each continues the
-    /// chain below it from, and whether its marker is still in the bucket.
-    /// A paged epoch's objects hold only the positions above its cut; the
-    /// ones below are the chain's (`Store::spans`).
-    cuts: BTreeMap<(String, Epoch), (usize, bool)>,
+    /// One prefix per cell epoch. A deleted prefix keeps its entry, empty and
+    /// without its marker, so a late upload lands above the same cut.
+    prefixes: BTreeMap<(String, Epoch), Prefix>,
     /// How long a chain each epoch was restored from. An older owner can
     /// still extend the prefix below after the restore read it, and those
     /// writes are not in this epoch's database.
@@ -280,8 +298,8 @@ impl Store {
         let key = (cell.to_string(), epoch);
         self.uploaded_ms.insert(key.clone(), at_ms);
         let prefix = self.prefixes.entry(key).or_default();
-        if content.len() > prefix.len() {
-            *prefix = content.to_vec();
+        if content.len() > prefix.writes.len() {
+            prefix.writes = content.to_vec();
         }
     }
 
@@ -328,7 +346,7 @@ impl Store {
     /// How long the live prefix of a cell epoch is: what its objects hold,
     /// not counting the base below it or a retired mark.
     pub fn prefix_len(&self, cell: &str, epoch: Epoch) -> usize {
-        (self.prefixes.get(&(cell.to_string(), epoch))).map_or(0, Vec::len)
+        (self.prefixes.get(&(cell.to_string(), epoch))).map_or(0, |prefix| prefix.writes.len())
     }
 
     /// The longest row of each cell epoch in `session`'s bundles: of `cell`
@@ -357,20 +375,7 @@ impl Store {
     /// Whether a prefix at `epoch` or above holds objects.
     pub fn used_since(&self, cell: &str, epoch: Epoch) -> bool {
         let range = (cell.to_string(), epoch)..=(cell.to_string(), Epoch::MAX);
-        (self.prefixes.range(range)).any(|(key, writes)| self.listed(key, writes))
-    }
-
-    /// The paged cut of a cell epoch and whether its marker is there:
-    /// `(0, false)` for an epoch that opens at the first position.
-    fn cut(&self, key: &(String, Epoch)) -> (usize, bool) {
-        self.cuts.get(key).copied().unwrap_or((0, false))
-    }
-
-    /// Whether a listing finds objects in the prefix: its marker, or a
-    /// position above its cut.
-    fn listed(&self, key: &(String, Epoch), writes: &[WriteId]) -> bool {
-        let (cut, marker) = self.cut(key);
-        marker || writes.len() > cut
+        (self.prefixes.range(range)).any(|(_, prefix)| prefix.listed())
     }
 
     /// `scan_epochs`: the restore chain's epochs, oldest first, and every
@@ -382,7 +387,7 @@ impl Store {
         };
         let cell_range = (cell.to_string(), 0)..=(cell.to_string(), Epoch::MAX);
         let listed = (self.prefixes.range(cell_range))
-            .filter(|(key, writes)| self.listed(key, writes))
+            .filter(|(_, prefix)| prefix.listed())
             .map(|(key, _)| ListedEpoch {
                 epoch: key.1,
                 newest_ms: self.uploaded_ms[key],
@@ -394,9 +399,9 @@ impl Store {
     /// Delete every object of one epoch prefix, its marker too.
     pub fn delete_epoch(&mut self, cell: &str, epoch: Epoch) {
         let key = (cell.to_string(), epoch);
-        self.prefixes.remove(&key);
-        if let Some((_, marker)) = self.cuts.get_mut(&key) {
-            *marker = false;
+        if let Some(prefix) = self.prefixes.get_mut(&key) {
+            prefix.writes.clear();
+            prefix.marker = false;
         }
         self.retired.insert(key);
     }
@@ -406,8 +411,9 @@ impl Store {
     /// before the cell serves, and it counts as covering that position
     /// (`note_covered`).
     pub fn put_marker(&mut self, cell: &str, epoch: Epoch, content: &[WriteId], at_ms: u64) {
-        let key = (cell.to_string(), epoch);
-        self.cuts.insert(key, (content.len(), true));
+        let prefix = self.prefixes.entry((cell.to_string(), epoch)).or_default();
+        prefix.cut = content.len();
+        prefix.marker = true;
         self.put(cell, epoch, content, at_ms);
     }
 
@@ -431,8 +437,8 @@ impl Store {
             Some(Mutation::NewestBase) => {
                 let range = (cell.to_string(), 0)..(cell.to_string(), epoch);
                 return Ok((self.prefixes.range(range).rev())
-                    .find(|(key, writes)| self.cut(key).0 == 0 && !writes.is_empty())
-                    .map(|(_, writes)| writes.clone()));
+                    .find(|(_, prefix)| prefix.cut == 0 && !prefix.writes.is_empty())
+                    .map(|(_, prefix)| prefix.writes.clone()));
             }
             _ => epoch,
         };
@@ -468,18 +474,20 @@ impl Store {
     fn spans(&self, cell: &str, below: Epoch) -> Result<Vec<Span>, NoBase> {
         let mut spans: Vec<Span> = Vec::new();
         let range = (cell.to_string(), 0)..(cell.to_string(), below);
-        for (key, writes) in self.prefixes.range(range).rev() {
-            if !self.listed(key, writes) {
+        for (key, prefix) in self.prefixes.range(range).rev() {
+            if !prefix.listed() {
                 continue;
             }
-            let (cut, marker) = self.cut(key);
             let ends = match spans.last() {
-                None => writes.len(),
+                None => prefix.writes.len(),
                 Some(above) => {
-                    let ends = writes.len().min(above.cut);
-                    // A marker holds no position; it lists the epoch, and
-                    // links only an epoch that adds nothing to the chain.
-                    if ends != above.cut || (ends <= cut && !(marker && cut == ends)) {
+                    let ends = prefix.writes.len().min(above.cut);
+                    // A span links when it ends exactly at the cut above and
+                    // adds positions, or is a marker alone at that cut: a
+                    // marker holds no position, so it links an epoch that
+                    // adds nothing to the chain.
+                    let adds = ends > prefix.cut || (ends == prefix.cut && prefix.marker);
+                    if ends != above.cut || !adds {
                         continue;
                     }
                     ends
@@ -487,10 +495,10 @@ impl Store {
             };
             spans.push(Span {
                 epoch: key.1,
-                cut,
+                cut: prefix.cut,
                 ends,
             });
-            if cut == 0 {
+            if prefix.cut == 0 {
                 return Ok(spans);
             }
         }
@@ -504,8 +512,8 @@ impl Store {
     fn assemble(&self, cell: &str, spans: &[Span]) -> Vec<WriteId> {
         (spans.iter().rev())
             .flat_map(|span| {
-                let writes = &self.prefixes[&(cell.to_string(), span.epoch)];
-                &writes[span.cut..span.ends]
+                let prefix = &self.prefixes[&(cell.to_string(), span.epoch)];
+                &prefix.writes[span.cut..span.ends]
             })
             .copied()
             .collect()
@@ -531,11 +539,7 @@ impl Store {
         if self.retired.contains(&(cell.to_string(), epoch)) {
             return usize::MAX;
         }
-        let live = self
-            .prefixes
-            .get(&(cell.to_string(), epoch))
-            .map_or(0, Vec::len);
-        self.covered(live, cell, epoch)
+        self.covered(self.prefix_len(cell, epoch), cell, epoch)
     }
 
     fn covered(&self, len: usize, cell: &str, epoch: Epoch) -> usize {
