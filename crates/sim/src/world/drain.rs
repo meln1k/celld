@@ -26,7 +26,7 @@ use celld_logic::drain::{self, DrainToken, RestorationBaseline};
 use celld_logic::{CapacityPeer, Event};
 
 use super::shell::StoreReq;
-use super::{Time, Work, World, WALL_EPOCH_MS};
+use super::{Time, Work, World};
 use crate::Mutation;
 
 /// How long one claim lives without a renewal (`TOKEN_TTL_MS`).
@@ -35,9 +35,6 @@ pub(super) const TOKEN_TTL_MS: u64 = 120_000;
 const RETRY_MS: u64 = 1_000;
 /// Between readiness checks.
 const GATE_TICK_MS: u64 = 1_000;
-/// How long a fresh process may stay unready in a quiet fleet whose token
-/// nobody else holds.
-const READY_MS: u64 = 10_000;
 
 /// A process's part in the drain token: whether it is ready, since when it
 /// runs, and its claim while it drains.
@@ -229,20 +226,7 @@ impl World {
             return;
         }
         donor.handing_off = true;
-        // Watched: **one donor at a time.** No other process is handing
-        // cells off under a claim of its own when this one starts to.
-        if donor.hold.is_some() {
-            let other = (0..self.machines.len()).find(|&other| {
-                other != node
-                    && (self.machines[other].proc.as_ref())
-                        .and_then(|p| p.drain.donor.as_ref())
-                        .is_some_and(|d| d.handing_off && d.hold.is_some())
-            });
-            if let Some(other) = other {
-                let (me, other) = (self.who(node), self.who(other));
-                self.checker.donors_overlap(self.t, &me, &other);
-            }
-        }
+        self.judge_donors(node);
         self.drive(node, Event::ReleaseAll);
     }
 
@@ -272,28 +256,28 @@ impl World {
                 self.machines[node].proc_mut().drain.ready = true;
                 self.stats.ready += 1;
             }
-            Err(why) => {
-                // Watched: in a quiet fleet, a fresh process opens readiness
-                // within a few seconds unless what it read truly shows the
-                // fleet unsettled: the same read, judged at the true time.
-                // A peer short of memory or an ownership skew holds the gate
-                // shut by design; a gate that misreads the token or judges
-                // by a stepped clock does not.
-                let t = self.t;
-                let started = self.machines[node].proc().drain.started;
-                let quiet = t >= self.settled_from() + READY_MS && t - started >= READY_MS;
-                let truly = read.as_ref().map(|(token, peers)| {
-                    let now = WALL_EPOCH_MS + t;
-                    drain::fleet_status(token.as_ref(), &me, now, peers, max_restoring)
-                });
-                if quiet && truly.is_some_and(|truly| truly.is_ok()) {
-                    let who = self.who(node);
-                    self.checker.ready_stuck(t, &who, t - started, &why);
-                }
+            // The planted bug stops asking after one unsettled read.
+            Err(_) if self.config.mutation == Some(Mutation::GateStopsAsking) => {}
+            Err(_) => {
                 let delay = self.agenda_ms(GATE_TICK_MS);
                 self.work(node, delay, Work::Drain(DrainWork::GateTick));
             }
         }
+    }
+
+    /// Whether the process runs a readiness gate that has not opened yet,
+    /// and since when it runs.
+    pub(super) fn unready_since(&self, node: usize) -> Option<Time> {
+        let p = self.machines[node].proc.as_ref()?;
+        let gated = self.config.operator.rebalances > 0.0;
+        (gated && !p.drain.ready && p.shutdown.is_none()).then_some(p.drain.started)
+    }
+
+    /// Whether the process is handing cells off under a claim of its own.
+    pub(super) fn donor_under_claim(&self, node: usize) -> bool {
+        (self.machines[node].proc.as_ref())
+            .and_then(|p| p.drain.donor.as_ref())
+            .is_some_and(|donor| donor.handing_off && donor.hold.is_some())
     }
 
     /// The call reaches the bucket. Returns the work its answer does.

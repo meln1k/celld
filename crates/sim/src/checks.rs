@@ -147,14 +147,14 @@ impl Checker {
         );
     }
 
-    /// Watched: **a fresh node becomes ready.** In a quiet fleet whose
-    /// drain token no other node holds, the readiness gate stayed shut.
-    pub fn ready_stuck(&mut self, t: u64, who: &str, waited_ms: u64, why: &str) {
+    /// Watched: **a fresh node becomes ready.** In a quiet fleet that the
+    /// bucket shows settled, the readiness gate stayed shut.
+    pub fn ready_stuck(&mut self, t: u64, who: &str, settled_ms: u64) {
         self.watch(
             t,
             "ready-stuck",
             who.to_string(),
-            format!("{who} has waited {waited_ms} ms for readiness: {why}"),
+            format!("{who} is still unready {settled_ms} ms after the fleet settled"),
         );
     }
 

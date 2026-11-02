@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 
+use celld_logic::drain;
 use celld_logic::{Epoch, WebSocketKind};
 
 use super::alarms::ALARM_SLACK_MS;
@@ -21,6 +22,9 @@ const MEMORY_RELIEF_MS: u64 = 10_000;
 /// How long a quiet degraded log may go without reopening once it could:
 /// ten maintain ticks.
 const REOPEN_MS: u64 = 10_000;
+/// How long a process may stay unready once the fleet it could join has
+/// settled.
+const READY_MS: u64 = 10_000;
 /// How long after a deploy's `max_age_ms` its forced moves may still take.
 pub(super) const DEPLOY_SLACK_MS: u64 = 10_000;
 
@@ -35,6 +39,8 @@ pub(super) struct Watch {
     pub(super) shedding_since: Option<Time>,
     /// Since when the process's log could have reopened without a break.
     pub(super) reopen_due_since: Option<Time>,
+    /// Since when the process could have become ready without a break.
+    pub(super) ready_due_since: Option<Time>,
     /// Cells whose runtime this step stopped, for good: judged once the
     /// step is over, when every socket it closed has closed.
     pub(super) stopped: Vec<String>,
@@ -249,6 +255,49 @@ impl World {
         if t >= self.settled_from() + MEMORY_RELIEF_MS && t - since > MEMORY_RELIEF_MS {
             let who = self.who(node);
             self.checker.memory_kept(t, &who, memory, t - since);
+        }
+    }
+
+    /// Watched: **one donor at a time.** A process that starts handing
+    /// cells off under a claim on the drain token of its own finds no other
+    /// process doing the same.
+    pub(super) fn judge_donors(&mut self, node: usize) {
+        if !self.donor_under_claim(node) {
+            return;
+        }
+        let other =
+            (0..self.machines.len()).find(|&other| other != node && self.donor_under_claim(other));
+        if let Some(other) = other {
+            let (me, other) = (self.who(node), self.who(other));
+            self.checker.donors_overlap(self.t, &me, &other);
+        }
+    }
+
+    /// Watched: in a quiet fleet, a process whose readiness gate has not
+    /// opened becomes ready within 10 s of when it could: the bucket's
+    /// token and leases show the fleet settled, at the true time and by the
+    /// process's own clock alike. A peer short of memory or an ownership
+    /// skew holds the gate shut by design, and a clock that misjudges a
+    /// lease misjudges it in production too; neither counts.
+    pub(super) fn judge_ready(&mut self, node: usize) {
+        let t = self.t;
+        let settled = self.unready_since(node).is_some_and(|started| {
+            let me = &self.machines[node].name;
+            let token = self.store.drain_token().map(|(token, _)| token);
+            let peers = self.store.capacity_peers();
+            let max = self.config.max_activations as u64;
+            let at = |now| drain::fleet_status(token, me, now, &peers, max).is_ok();
+            t >= started && at(WALL_EPOCH_MS + t) && at(self.wall(node))
+        });
+        let watch = &mut self.machines[node].proc_mut().watch;
+        if !settled {
+            watch.ready_due_since = None;
+            return;
+        }
+        let since = *watch.ready_due_since.get_or_insert(t);
+        if t >= self.settled_from() + READY_MS && t - since > READY_MS {
+            let who = self.who(node);
+            self.checker.ready_stuck(t, &who, t - since);
         }
     }
 

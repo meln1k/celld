@@ -485,6 +485,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::GcChainHead => &["unrestorable"],
             Mutation::IgnoreDrainToken => &["donors-overlap"],
             Mutation::GateReadsReleasedClaim => &["ready-stuck"],
+            Mutation::GateStopsAsking => &["ready-stuck"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -580,7 +581,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             },
             // Only a fleet with a balancer runs the readiness gate, and only
             // a process that starts after another's drain reads its claim.
-            Mutation::GateReadsReleasedClaim => SimConfig {
+            Mutation::GateReadsReleasedClaim | Mutation::GateStopsAsking => SimConfig {
                 operator: Operator {
                     drains: 6.0,
                     rebalances: 6.0,

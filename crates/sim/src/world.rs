@@ -818,6 +818,7 @@ impl World {
             self.stats.shedding_samples += 1;
         }
         self.judge_memory(node);
+        self.judge_ready(node);
         self.judge_reopen(node);
     }
 

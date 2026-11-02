@@ -339,9 +339,9 @@ core, not to the simulator or to the property itself.
 - **donors-overlap**: two processes began handing cells off, each under a
   claim on the drain token of its own.
 - **ready-stuck**: in a quiet fleet, a process stayed unready for over 10 s
-  although the token and leases it read, judged at the true time, show the
-  fleet settled. A peer short of memory or an ownership skew keeps the gate
-  shut by design, and does not count.
+  while the bucket's token and leases showed the fleet settled, at the true
+  time and by the process's own clock. A peer short of memory or an
+  ownership skew keeps the gate shut by design, and does not count.
 
 **deploy-stuck**, **idle-not-evicted**, **memory-not-relieved**,
 **reopen-stuck** and **ready-stuck** judge only

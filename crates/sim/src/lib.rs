@@ -258,10 +258,13 @@ pub enum Mutation {
     /// The readiness gate reads another node's released claim as live.
     /// Caught by `ready-stuck`.
     GateReadsReleasedClaim,
+    /// The readiness gate stops asking after one unsettled read. Caught by
+    /// `ready-stuck`.
+    GateStopsAsking,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 33] = [
+    pub const ALL: [Mutation; 34] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -295,6 +298,7 @@ impl Mutation {
         Mutation::GcChainHead,
         Mutation::IgnoreDrainToken,
         Mutation::GateReadsReleasedClaim,
+        Mutation::GateStopsAsking,
     ];
 }
 
