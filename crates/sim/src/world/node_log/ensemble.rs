@@ -16,8 +16,8 @@
 //! - The new epoch has no fleet acks yet, and its fragments start where the
 //!   old epoch's shipping stopped.
 
+use super::super::bucket::StoreReq;
 use super::super::replicator::Tail;
-use super::super::shell::StoreReq;
 use super::super::{Work, World};
 use super::{Activation, LogWork, Posture, FOLLOWERS};
 use crate::Mutation;

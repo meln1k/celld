@@ -16,7 +16,7 @@
 //! A phase is a set of goals: one per cell, retried until it is served or
 //! its deadline passes. A goal that is never served is a violation.
 
-use super::shell::STORE_TIMEOUT_MS;
+use super::bucket::STORE_TIMEOUT_MS;
 use super::{Item, Machine, Time, World};
 
 /// How long every cell has to take a write once the probe starts.

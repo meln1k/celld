@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use celld_logic::wake::{AlarmSnapshot, AlarmSource, PublicationId, Retirement};
 use celld_logic::{Epoch, Event, Failure, OpId, ProofSource, RequestId, Timer};
 
-use super::shell::StoreReq;
+use super::bucket::StoreReq;
 use super::waker::WakerReq;
 use super::{Work, World};
 use crate::{Mutation, WriteId};

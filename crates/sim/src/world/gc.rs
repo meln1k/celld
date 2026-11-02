@@ -24,7 +24,7 @@
 use celld_logic::epoch_gc::{self, ListedEpoch};
 use celld_logic::Epoch;
 
-use super::shell::StoreReq;
+use super::bucket::StoreReq;
 use super::{Work, World};
 use crate::Mutation;
 

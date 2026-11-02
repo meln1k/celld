@@ -68,7 +68,7 @@ use celld_logic::log_evict::{EvictionPolicy, FollowerHealth};
 use celld_logic::log_tier::LogState;
 use celld_logic::{Epoch, Event, Failure, OpId};
 
-use super::shell::{Fate, StoreReq};
+use super::bucket::{Fate, StoreReq};
 use super::{shutdown, Item, Work, World, OPERATION_DEADLINE_MS};
 use crate::store::Row;
 use crate::{Mutation, WriteId};

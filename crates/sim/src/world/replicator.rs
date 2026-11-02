@@ -18,8 +18,8 @@ use celld_logic::{
     RestoredAlarm, StopCause,
 };
 
+use super::bucket::StoreReq;
 use super::node_log::{FollowerDisk, Upload};
-use super::shell::StoreReq;
 use super::stop::Stop;
 use super::{AgendaKey, Work, World};
 use crate::store::Row;

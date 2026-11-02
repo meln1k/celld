@@ -16,7 +16,7 @@
 //!   Production lists and deletes after the recovery's answer; here the
 //!   sweep happens at that instant and cannot fail.
 
-use super::super::shell::StoreReq;
+use super::super::bucket::StoreReq;
 use super::super::{shutdown, World};
 use crate::{Mutation, WriteId};
 use celld_logic::Epoch;

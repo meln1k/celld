@@ -25,7 +25,7 @@
 use celld_logic::drain::{self, DrainToken, RestorationBaseline};
 use celld_logic::{CapacityPeer, Event};
 
-use super::shell::StoreReq;
+use super::bucket::StoreReq;
 use super::{Time, Work, World};
 use crate::Mutation;
 

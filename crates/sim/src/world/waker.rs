@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use celld_logic::wake::{elected_hint_needed, PublicationId};
 use celld_logic::{Event, WakeHintScope};
 
-use super::shell::StoreReq;
+use super::bucket::StoreReq;
 use super::{Work, World};
 use crate::Mutation;
 

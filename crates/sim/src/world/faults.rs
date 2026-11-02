@@ -4,8 +4,9 @@
 //! the fleet, drawn from the fault stream, and only until `chaos_ms`. After
 //! that the fleet runs undisturbed, so whatever is still broken then is the
 //! system's doing, not the fault's. Only a clock step outlasts the chaos, as
-//! the skew does: a clock stays where a step put it. Bucket call failures are drawn per call
-//! in `shell.rs`; a fixed clock skew per node is drawn in `World::new`.
+//! the skew does: a clock stays where a step put it. Bucket call failures
+//! are drawn per call in `bucket.rs`; a fixed clock skew per node is drawn
+//! in `World::new`.
 //! Slow follower disks and memory surges have streams of their own.
 
 use super::{mono_ms, Item, World};
