@@ -24,10 +24,11 @@
 //!   degrades and the proofs never credit.
 //! - When a node takes over a cell from a dead owner whose lease says its
 //!   log is not sealed, the core asks for `RecoverNodeLog` first. Recovery
-//!   seals every follower it can reach, so the dead leader can never again
-//!   prove a write through them, uploads what they hold into the bucket,
-//!   and marks the lease body `Sealed`. A restart does the same for its own
-//!   predecessor before it takes the lease over.
+//!   claims the log in the lease body, seals every follower it can reach,
+//!   so the dead leader can never again prove a write through them,
+//!   uploads what they hold into the bucket, and marks the lease body
+//!   `Sealed` (`recovery`). A restart does the same for its own predecessor
+//!   before it takes the lease over.
 //! - A cell epoch that ends without its final upload keeps what its log
 //!   shipped or a bundle covers as a tail (`Process::tails`).
 //!   The cell's next restore here first folds in what the followers and
@@ -55,8 +56,7 @@
 //!   the leader itself, and only a probe's answer or a completed round
 //!   lifts that.
 //!
-//! Not modelled: the recovery claim (`Recovering` and its heartbeat), the
-//! incapable-peer quarantine (every simulated peer can follow), hedged
+//! Not modelled: the incapable-peer quarantine (every simulated peer can follow), hedged
 //! retransmission of a slow append (`run_hedged`), recruitment at startup
 //! (a process opens its log with the machines it finds, and a process
 //! that starts alone never opens one), and the epoch opener's forced
@@ -68,6 +68,8 @@ use celld_logic::log_evict::{EvictionPolicy, FollowerHealth};
 use celld_logic::log_tier::LogState;
 use celld_logic::{Epoch, Event, Failure, OpId};
 
+pub(super) use self::recovery::{Recovery, Step as RecoveryStep};
+use self::recovery::{Runner, Waiter};
 use super::bucket::{Fate, StoreReq};
 use super::{shutdown, Item, Work, World, OPERATION_DEADLINE_MS};
 use crate::store::Row;
@@ -77,6 +79,7 @@ mod activation;
 mod bundle_gc;
 mod ensemble;
 mod evict;
+mod recovery;
 
 use activation::Activation;
 
@@ -427,13 +430,9 @@ impl World {
 
     /// `RecoverNodeLog` for the cells of `owner`.
     fn recover_op(&mut self, node: usize, op: OpId, owner: &str, answer_ms: Option<u64>) {
-        let result = match self.config.mutation {
-            Some(Mutation::SkipLogRecovery) => Ok(()),
-            _ => self.recover(node, owner),
-        };
-        if let Some(delay) = answer_ms {
-            self.deliver(node, delay, Event::NodeLogRecovered { op, result });
-        }
+        let runner = Runner::Process(self.machines[node].inc);
+        let op = Some(op);
+        self.recover(node, runner, owner, Waiter { op, answer_ms });
     }
 
     /// The process on `node` starts: in the fleet posture, open its log
@@ -778,19 +777,6 @@ impl World {
         }
     }
 
-    /// `RecoverNodeLog`, at the instant it reaches the bucket and the
-    /// followers: recover the log of the session `owner`'s lease names, if
-    /// it is not sealed.
-    fn recover(&mut self, by: usize, owner: &str) -> Result<(), Failure> {
-        let Some(lease) = self.store.read_lease(owner) else {
-            return Ok(());
-        };
-        if matches!(lease.log_state, None | Some(LogState::Sealed)) {
-            return Ok(());
-        }
-        self.recover_session(by, owner, &lease.generation)
-    }
-
     /// Before a restart takes the lease over, it recovers the session its
     /// predecessor left open (`ensure_predecessors_recovered`): a call like
     /// any other, which can fail, apply late or never be answered. Until it
@@ -829,15 +815,11 @@ impl World {
 
     pub(super) fn boot_recover(&mut self, node: usize, boot: u64, answer_ms: Option<u64>) {
         let name = self.machines[node].name.clone();
-        let recovered = self.recover(node, &name).is_ok();
-        if let Some(delay) = answer_ms {
-            let item = Item::Booted {
-                node,
-                boot,
-                recovered,
-            };
-            self.after(delay, item);
-        }
+        let waiter = Waiter {
+            op: None,
+            answer_ms,
+        };
+        self.recover(node, Runner::Boot(boot), &name, waiter);
     }
 
     pub(super) fn booted(&mut self, node: usize, boot: u64, recovered: bool) {
@@ -925,55 +907,6 @@ impl World {
             }
         }
         gathered
-    }
-
-    /// Seal every follower of `session` that can be reached, upload what
-    /// they hold, and mark the lease body sealed. The upload is the dead
-    /// leader's own writes, so the oracle counts it as that process's.
-    ///
-    /// Without a witness, a session that may have fleet acks is missing
-    /// some: recovery waits for every undecided member, then declares the
-    /// bounded loss, as production does. A session that never proved
-    /// anything has nothing to lose, and seals what it gathered.
-    fn recover_session(&mut self, by: usize, owner: &str, session: &str) -> Result<(), Failure> {
-        if self.machines[by].partition.is_some() {
-            return Err(Failure::Ambiguous);
-        }
-        let entry = self.session(session);
-        let (dead, proved) = (self.who_at(entry.node, entry.inc), entry.proved);
-        self.judge_activated(session);
-        let gathered = self.gather(session, None);
-        let loss = proved && !gathered.witnessed;
-        let wait = self.config.mutation != Some(Mutation::LossWithoutWaiting);
-        if loss && gathered.undecided && wait {
-            return Err(Failure::Ambiguous);
-        }
-        for member in gathered.answering {
-            let disk = &mut self.machines[member].disk.log;
-            disk.sealed.insert(session.to_string());
-        }
-        // Every bundle of the session, then what the followers hold.
-        for ((cell, epoch), content) in self.store.bundle_rows(session, None) {
-            self.land_upload(&dead, &cell, epoch, &content);
-        }
-        for ((cell, epoch), content) in gathered.copies {
-            self.land_upload(&dead, &cell, epoch, &content);
-        }
-        // Declared once what the recovery restores is in, so it forgives
-        // only what it could not restore.
-        if loss {
-            let on_disk: Vec<_> = (self.machines.iter())
-                .filter(|m| !m.retired)
-                .flat_map(|m| &m.disk.log.copies)
-                .filter(|((s, _, _), _)| s == session)
-                .map(|((_, cell, epoch), copy)| (cell.clone(), *epoch, copy.rows.as_slice()))
-                .collect();
-            let lost = self.checker.declare_loss(self.t, &dead, &on_disk);
-            self.stats.fleet_losses += lost;
-        }
-        self.store.seal_log(owner, session);
-        self.stats.log_recoveries += 1;
-        Ok(())
     }
 
     /// `fold_cell`, as a restore here reaches the bucket: upload what the

@@ -181,17 +181,25 @@ Half of the swarm seeds run the fleet posture (`CELLD_DURABILITY=fleet`,
   holds the whole log epoch, the activation fails rather than open a
   database missing acknowledged writes.
 - Taking over a cell whose dead owner's log is not sealed, or restarting
-  after such a process, first recovers that log. Recovery seals every
-  follower that answers, so the dead leader can prove nothing more, and
-  uploads what they hold. A booting process answers for its follower disk
-  while it waits, and a crash can kill it there. A session that never
-  proved a write through the fleet has nothing to lose, and seals what it
-  gathers. One that may have (`may_have_fleet_acks`) and has no follower
-  holding the whole session waits for every follower that might come back,
-  then declares a bounded loss, and the oracle forgets what that loss
-  covers. Recovery drains every bundle of the session first. It reads and
-  writes the bucket, so it fails, times out, or applies with its answer
-  lost, as a bucket call does, at boot too.
+  after such a process, first recovers that log, once the dead lease has
+  expired by the recoverer's clock. Recovery runs step by step, as
+  production's does. It claims the log in the lease body (`Recovering`, with
+  its node as claimant), which fences the dead session's renewals. A node
+  that finds another's live claim waits for the seal, and takes the claim
+  over once the claimant's heartbeat, beaten every 5 s, is 30 s stale. The
+  claimant then seals every follower that answers, so the dead leader can
+  prove nothing more, and uploads what they hold. A booting process answers
+  for its follower disk while it waits, and a crash can kill it there. A
+  session that never proved a write through the fleet has nothing to lose,
+  and seals what it gathers. One that may have (`may_have_fleet_acks`) and
+  has no follower holding the whole session waits for every follower that
+  might come back, then declares a bounded loss, and the oracle forgets what
+  that loss covers. Recovery drains every bundle of the session first, and
+  seals the log only while it still holds the claim. It reads and writes the
+  bucket, so it fails, times out, or applies with its answer lost, as a
+  bucket call does, at boot too, and a recoverer that dies or is cut off
+  between steps leaves its claim to go stale. The maintenance sweep of dead
+  leaders is not modelled.
 - A graceful exit seals its own log if its prefixes hold everything it
   shipped and bundled, and no tail waits for a fold.
 
@@ -345,18 +353,18 @@ core, not to the simulator or to the property itself.
   ownership skew keeps the gate shut by design, and does not count.
 
 **deploy-stuck**, **idle-not-evicted**, **memory-not-relieved**,
-**reopen-stuck** and **ready-stuck** judge only
-once the fleet is quiet, 15 s after the faults end, so that a bucket call lost
-just before the end has timed out. The others judge at the moment their fact
-arrives. **unclaimed-handoff**, **base-deleted**, **unjustified-loss**,
+**reopen-stuck** and **ready-stuck** judge only once the fleet is quiet, 15
+s after the faults end, so that a bucket call lost just before the end has
+timed out. The others judge at the moment their fact arrives.
+**unclaimed-handoff**, **base-deleted**, **unjustified-loss**,
 **bundle-credit-unheld**, **fleet-proof-unbacked**,
 **credit-before-activation**, **bundle-deleted-uncovered**,
-**unrestorable**, **donors-overlap** and **ready-stuck** have never fired
-on the current simulator, and **alarm-undiscoverable** fires only after a
-known bug lost the write behind it, so each has a planted bug that the test
-suite requires it to catch, as it does for an enforced check. The sweep
-below is the evidence that the others can fire, except **deploy-stuck**, which has never fired, so nothing yet shows
-that it can. In 100,000 swarm seeds:
+**unrestorable**, **donors-overlap** and **ready-stuck** have never fired on
+the current simulator, and **alarm-undiscoverable** fires only after a known
+bug lost the write behind it, so each has a planted bug that the test suite
+requires it to catch, as it does for an enforced check. The sweep below is
+the evidence that the others can fire, except **deploy-stuck**, which has
+never fired, so nothing yet shows that it can. In 100,000 swarm seeds:
 
 - 406 seeds kept an idle cell resident, 364 of them in a run where a
   walk-down had wedged: the core evicts idle cells only while it is not
@@ -404,13 +412,13 @@ that it can. In 100,000 swarm seeds:
   stopped on that invariant at or before the hit in 43, and on another
   invariant first in 2.
 
-The simulator does not yet model V8, or, in the fleet log, the recovery
-claim, the incapable-peer quarantine, hedged retransmission of a slow
-append, recruitment at startup, and the epoch opener's forced compaction
+The simulator does not yet model V8, or, in the fleet log, the
+incapable-peer quarantine, hedged retransmission of a slow append,
+recruitment at startup, and the epoch opener's forced compaction
 (`crates/sim/src/world/node_log.rs` says how each is approximated). Its
 memory has no allocator slack, cgroup or containers, no noise between
-samples, and returns a cell's whole share when the cell goes, and its
-heap's the moment the heap is empty.
+samples, and returns a cell's whole share when the cell goes, and its heap's
+the moment the heap is empty.
 
 The core on `main` fails some seeds.
 
@@ -545,18 +553,18 @@ judge a peer's liveness without comparing two machines' wall clocks, for
 example by a successful probe, or by how long ago this node saw the peer's
 lease change on its own monotonic clock.
 
-**Self-suspicion parks recruitment while every member is down** (watched
-as **reopen-stuck**). When every member of a leader's ensemble stalls past
-the backstop at once, `evict_gray_followers` in `crates/celld/node_log.rs`
-takes it for the leader's own partition: it degrades and sets
-`suspect_self`, and `maintain` recruits no one until a member answers a
-probe. Members that are paused or down answer nothing until they come
-back, so the log stays degraded while live peers could follow it: 29 s in
-swarm 4564, where its members paused and then crashed. As with the skew
-above, writes go on at the bucket's latency and nothing is lost. In 100,000 swarm seeds
-this held 7 logs degraded (8 with validation compiled out). A fix would
-let an answer from any peer, such as a lease read that shows peers
-renewing, lift the suspicion.
+**Self-suspicion parks recruitment while every member is down** (watched as
+**reopen-stuck**). When every member of a leader's ensemble stalls past the
+backstop at once, `evict_gray_followers` in `crates/celld/node_log.rs` takes
+it for the leader's own partition: it degrades and sets `suspect_self`, and
+`maintain` recruits no one until a member answers a probe. Members that are
+paused or down answer nothing until they come back, so the log stays
+degraded while live peers could follow it: 29 s in swarm 4564, where its
+members paused and then crashed. As with the skew above, writes go on at the
+bucket's latency and nothing is lost. In 100,000 swarm seeds this held 7
+logs degraded (8 with validation compiled out). A fix would let an answer
+from any peer, such as a lease read that shows peers renewing, lift the
+suspicion.
 
 In 100,000 swarm seeds, 11,798 failed in a debug build: 10,233 on the
 invariants (3,170 of them on live transports, 2,626 on alarms firing while
@@ -639,6 +647,21 @@ and every one that newly failed on liveness or `alarm-not-fired` a wedged
 walk-down (299), a late fold (26) or the capacity livelock (11). One seed
 (swarm 98934) acknowledged a write late: a replacement resumed a cell in
 place after a peer had taken it over, the slow clean reload above.
+
+Recovery then got its claim and ran step by step, and a boot started
+waiting out its predecessor's lease, as production's does. In 10,000 swarm
+seeds, 17,097 recoveries ran: 1,113 waited behind another node's claim,
+and 11 took a stale claim over. In 100,000 swarm seeds no failure kind is
+new: 11,125 failing seeds in a debug build and 2,042 with validation
+compiled out. Late acknowledgements went from 1 to 8 and from 1 to 9,
+every one the slow clean reload: a replacement waits for its predecessor's
+lease to expire when that predecessor left its log open, and peers take
+its cells over meanwhile. Lost writes went from 213 to 219 and from 252 to
+266; every seed that newly lost writes followed a failed fold (77), a
+failed bucket read (1), a clock fault (1), the slow clean reload (1) or a
+drain that released a swapped cell (1). Every new liveness or
+`alarm-not-fired` seed had a wedged walk-down (275), a late fold (32) or
+the capacity livelock (3).
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

@@ -666,6 +666,10 @@ pub struct Stats {
     pub fleet_proofs: u64,
     pub log_recoveries: u64,
     pub fleet_losses: u64,
+    /// Recoveries that waited behind another node's live claim, and claims
+    /// taken over once their heartbeat went stale.
+    pub recovery_waits: u64,
+    pub recovery_takeovers: u64,
     /// Epoch prefixes epoch GC deleted.
     pub epochs_deleted: u64,
     /// Compaction rounds that folded bundle rows into a prefix, and

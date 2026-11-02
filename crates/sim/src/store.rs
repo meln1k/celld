@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use celld_logic::drain::DrainToken;
 use celld_logic::epoch_gc::ListedEpoch;
-use celld_logic::log_tier::LogState;
+use celld_logic::log_tier::{self, LogRecord, LogState};
 use celld_logic::wake::{waker_may_claim, AlarmSnapshot, PublicationId, Retirement};
 use celld_logic::{
     format::BUCKET_FORMAT, CapacityPeer, CasGuard, CasOutcome, Epoch, LeaseCasOutcome,
@@ -95,12 +95,30 @@ impl Prefix {
     }
 }
 
+/// What a recovery's claim step found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// The log is sealed, or the lease no longer names the session.
+    Done,
+    /// This node holds the claim now: it held it already, or claimed an
+    /// open log.
+    Held,
+    /// This node took over the stale claim of the node named.
+    TookOver(String),
+    /// Another node holds a live claim.
+    Live(String),
+}
+
 #[derive(Default)]
 pub struct Store {
     /// A planted bug in the bucket itself, if any.
     mutation: Option<Mutation>,
     next_etag: u64,
     leases: BTreeMap<String, (NodeLeaseRecord, u64, Load)>,
+    /// The recovery claim folded into each lease body while its log is
+    /// `Recovering`: the claimant node and its last heartbeat, its own wall
+    /// clock ms.
+    claims: BTreeMap<String, (String, u64)>,
     /// Cell → (owner node, epoch, etag).
     owners: BTreeMap<String, (Option<String>, Epoch, u64)>,
     /// One prefix per cell epoch. A deleted prefix keeps its entry, empty and
@@ -171,6 +189,7 @@ impl Store {
         let etag = self.etag();
         self.leases
             .insert(record.node.clone(), (record.clone(), etag, load));
+        self.claims.remove(&record.node);
         LeaseCasOutcome::Applied {
             etag: etag.to_string(),
         }
@@ -190,7 +209,124 @@ impl Store {
         }
         record.log_state = Some(LogState::Sealed);
         *current = etag;
+        self.claims.remove(node);
         true
+    }
+
+    /// `recover_serial`'s first step on `node`'s lease body, if it still
+    /// names session `generation`: claim the recovery, keep a claim this
+    /// node already holds, or take over one whose heartbeat is older than
+    /// `stale_ms` by `now_ms`. The decisions are `log_tier`'s. Every write
+    /// moves the etag, so it fences the session's own renewals too.
+    pub fn claim_recovery(
+        &mut self,
+        node: &str,
+        generation: &str,
+        claimant: &str,
+        now_ms: u64,
+        stale_ms: u64,
+    ) -> Claim {
+        let Some(record) = self.log_record(node, generation) else {
+            return Claim::Done;
+        };
+        let (claimed, outcome) = match record.state {
+            LogState::Sealed => return Claim::Done,
+            LogState::Open => (
+                log_tier::start_recovery(&record, claimant, now_ms),
+                Claim::Held,
+            ),
+            LogState::Recovering if log_tier::recovery_claimed_by(&record, claimant) => {
+                return Claim::Held
+            }
+            LogState::Recovering if log_tier::recovery_claim_live(&record, now_ms, stale_ms) => {
+                return Claim::Live(record.claimant.unwrap_or_default())
+            }
+            LogState::Recovering => (
+                log_tier::take_over_recovery(&record, claimant, now_ms, stale_ms),
+                Claim::TookOver(record.claimant.clone().unwrap_or_default()),
+            ),
+        };
+        let claimed = claimed.expect("log_tier allows the claim it was asked for");
+        self.write_log_record(node, &claimed);
+        outcome
+    }
+
+    /// The claimant's heartbeat (`beat_claim`). False when the claim is no
+    /// longer `claimant`'s: another node took it over, or the log sealed.
+    pub fn beat_recovery(
+        &mut self,
+        node: &str,
+        generation: &str,
+        claimant: &str,
+        now_ms: u64,
+    ) -> bool {
+        let Some(record) = self.log_record(node, generation) else {
+            return true;
+        };
+        match log_tier::refresh_recovery(&record, claimant, now_ms) {
+            Some(refreshed) => {
+                self.write_log_record(node, &refreshed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Recovery's last step: seal the log, only while `claimant` still holds
+    /// the claim. Ok when it sealed, or the log was sealed or replaced
+    /// already; an error when another node took the claim over.
+    pub fn finish_recovery(
+        &mut self,
+        node: &str,
+        generation: &str,
+        claimant: &str,
+    ) -> Result<(), ()> {
+        let Some(record) = self.log_record(node, generation) else {
+            return Ok(());
+        };
+        if record.state == LogState::Sealed {
+            return Ok(());
+        }
+        if !log_tier::recovery_claimed_by(&record, claimant) {
+            return Err(());
+        }
+        let done = log_tier::finish_recovery(&record, 0).expect("a recovering log seals");
+        self.write_log_record(node, &done);
+        Ok(())
+    }
+
+    /// The log fields of `node`'s lease body as `log_tier` reads them, while
+    /// the lease names session `generation` and has a log. The sim carries
+    /// no epoch, ensemble or tiered offset in the record.
+    fn log_record(&self, node: &str, generation: &str) -> Option<LogRecord> {
+        let (lease, _, _) = self.leases.get(node)?;
+        if lease.generation != generation {
+            return None;
+        }
+        let claim = self.claims.get(node);
+        Some(LogRecord {
+            epoch: 0,
+            ensemble: BTreeSet::new(),
+            tiered: 0,
+            state: lease.log_state?,
+            claimant: claim.map(|(claimant, _)| claimant.clone()),
+            claimed_ms: claim.map(|(_, at)| *at),
+        })
+    }
+
+    fn write_log_record(&mut self, node: &str, record: &LogRecord) {
+        let etag = self.etag();
+        let (lease, current, _) = self.leases.get_mut(node).expect("read just now");
+        lease.log_state = Some(record.state);
+        *current = etag;
+        match (&record.claimant, record.claimed_ms) {
+            (Some(claimant), Some(at)) => {
+                self.claims.insert(node.to_string(), (claimant.clone(), at));
+            }
+            _ => {
+                self.claims.remove(node);
+            }
+        }
     }
 
     /// Every node's lease with its load, scanned at this instant. Production

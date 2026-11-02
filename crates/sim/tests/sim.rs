@@ -510,10 +510,23 @@ fn every_planted_bug_is_caught_by_its_check() {
             | Mutation::FollowerIgnoresSeal
             | Mutation::FollowerCorrupts
             | Mutation::LossWithoutWaiting
-            | Mutation::CreditBeforeActivation
             | Mutation::GcUncovered => SimConfig {
                 fleet: true,
                 ..crashing_and_pausing()
+            },
+            // An early credit is read only if its leader dies before the
+            // activation's lease write applies: slow bucket calls hold
+            // that write open, and crashes end leaders.
+            Mutation::CreditBeforeActivation => SimConfig {
+                fleet: true,
+                websocket_probability: 0.0,
+                faults: Faults {
+                    crashes: 10.0,
+                    store_spike_probability: 0.3,
+                    store_spike_ms: 3_000,
+                    ..SimConfig::crashing(6.0).faults
+                },
+                ..SimConfig::crashing(6.0)
             },
             // Only a shipper whose follower is cut off reopens its log, and
             // the rows below the new fragments are lost only if the leader

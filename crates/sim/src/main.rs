@@ -217,7 +217,8 @@ fn main() {
          databases resumed {}, websockets {}\n\
          handler calls released {}, worker requests {} ({} on a resident), deploys {}\n\
          alarms set {}, alarms fired {} ({} proven), wake hints {}\n\
-         fleet proofs {}, logs recovered {}, writes lost to a declared loss {}, \
+         fleet proofs {}, logs recovered {} ({} waited behind a claim, {} took one over), \
+         writes lost to a declared loss {}, \
          epochs deleted {}, compactions {}, bundles deleted {}\n\
          load samples shedding on memory {}",
         stats.evictions,
@@ -237,6 +238,8 @@ fn main() {
         stats.wake_hints,
         stats.fleet_proofs,
         stats.log_recoveries,
+        stats.recovery_waits,
+        stats.recovery_takeovers,
         stats.fleet_losses,
         stats.epochs_deleted,
         stats.compactions,

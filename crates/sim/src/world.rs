@@ -78,7 +78,7 @@ use gates::Gate;
 use gc::GcWork;
 use handoff::{Adoption, HandoffWork, Offer};
 use liveness::Goal;
-use node_log::{Log, LogWork, Session};
+use node_log::{Log, LogWork, Recovery, RecoveryStep, Session};
 use operator::{Act, OperatorWork};
 use replicator::{Disk, Replica, ReplicaWork, Tail};
 use shell::Slot;
@@ -152,6 +152,8 @@ enum Item {
         boot: u64,
         recovered: bool,
     },
+    /// The next step of a log recovery under way.
+    Recovery { id: u64, step: RecoveryStep },
     /// A paused process runs again.
     Resume { node: usize, inc: u64 },
     /// A node's network comes back.
@@ -482,6 +484,8 @@ pub struct World {
     surge_rng: Rng,
     /// Which bucket restores page their cell, and how long each fill takes.
     page_rng: Rng,
+    /// How long each log recovery's gather takes.
+    recovery_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -492,6 +496,9 @@ pub struct World {
     quiet_from: Time,
     /// Every log session that opened, by its lease generation.
     sessions: BTreeMap<String, Session>,
+    /// Log recoveries under way.
+    recoveries: BTreeMap<u64, Recovery>,
+    next_recovery: u64,
     /// The phase transitions the cores took, and every cell's name.
     coverage: Coverage,
     cell_names: Vec<String>,
@@ -512,6 +519,7 @@ impl World {
         let stop_rng = master.fork();
         let surge_rng = master.fork();
         let page_rng = master.fork();
+        let recovery_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -544,6 +552,7 @@ impl World {
             stop_rng,
             surge_rng,
             page_rng,
+            recovery_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),
@@ -554,6 +563,8 @@ impl World {
             goals: Vec::new(),
             quiet_from: 0,
             sessions: BTreeMap::new(),
+            recoveries: BTreeMap::new(),
+            next_recovery: 0,
             panic: None,
         }
     }
@@ -698,6 +709,7 @@ impl World {
                 boot,
                 recovered,
             } => self.booted(node, boot, recovered),
+            Item::Recovery { id, step } => self.recovery_step(id, step),
             Item::Resume { node, inc } => self.resume(node, inc),
             Item::Heal { node, partition } => self.heal(node, partition),
             Item::Probe => self.probe(),

@@ -354,7 +354,7 @@ impl World {
         }
     }
 
-    fn latency(&mut self) -> u64 {
+    pub(in crate::world) fn latency(&mut self) -> u64 {
         let (lo, hi) = self.config.store_latency_ms;
         self.net_rng.range(lo, hi)
     }
