@@ -739,6 +739,14 @@ impl World {
             undecided: false,
         };
         let entry = self.session(session);
+        // What the bucket has of each cell epoch below a fragment: its
+        // per-cell prefix, or this session's bundles, which the fold and
+        // the recovery upload first.
+        let bundles = self.store.bundle_rows(session, cell);
+        let bucket = |c: &str, epoch: Epoch| {
+            let bundled = bundles.get(&(c.to_string(), epoch)).map_or(0, Vec::len);
+            self.store.percell_len(c, epoch).max(bundled)
+        };
         for &member in &entry.ensemble {
             let m = &self.machines[member];
             if !m.serves_follower_disk() {
@@ -759,9 +767,7 @@ impl World {
                 }
                 // A fragment that starts past what the bucket holds leaves
                 // a hole: its rows cannot be restored.
-                // The bucket's rows below the fragment, in the oracle's
-                // terms: a prefix or a bundle a recovery can drain.
-                if self.checker.held(c, *epoch).len() < copy.from {
+                if bucket(c, *epoch) < copy.from {
                     continue;
                 }
                 let longest = gathered.copies.entry((c.clone(), *epoch)).or_default();
