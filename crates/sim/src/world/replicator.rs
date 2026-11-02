@@ -20,7 +20,8 @@ use celld_logic::{
 
 use super::node_log::{FollowerDisk, Upload};
 use super::shell::StoreReq;
-use super::{AgendaKey, Work, World, OPERATION_DEADLINE_MS};
+use super::stop::Stop;
+use super::{AgendaKey, Work, World};
 use crate::store::Row;
 use crate::{Mutation, WriteId};
 
@@ -103,54 +104,11 @@ pub(super) struct Replica {
     /// Each waiter's pending deadline, cancelled once it is answered.
     deadlines: BTreeMap<OpId, AgendaKey>,
     /// A clean stop under way.
-    stop: Option<Stop>,
+    pub(super) stop: Option<Stop>,
     /// Opened paged and still filling in the background: it reads the
     /// chain it restored, so epoch GC leaves the cell alone
     /// (`pinned_reads`).
     filling: bool,
-}
-
-/// `CELL_RELEASE_RETRY_BASE_MS`: the pause before a failed stop tries again.
-const RELEASE_RETRY_MS: u64 = 50;
-/// How long one attempt of a clean stop waits for its final upload: an
-/// eviction's `CELLD_LTX_DURABILITY_TIMEOUT_SECS`, and a cleanup's
-/// `final_durability_barrier`, 10 s each.
-const STOP_ATTEMPT_MS: u64 = 10_000;
-/// The longest an eviction's capture of its handoff snapshot takes.
-const MAX_CAPTURE_MS: u64 = 300;
-
-/// A clean stop (an eviction or a cleanup), as
-/// `report_stopped_when_released` runs it: attempt after attempt until one
-/// lets the cell go. An eviction's attempt first captures its handoff
-/// snapshot, and an abandonment (`EvictionAbandon`) takes effect only
-/// before that capture ends; past it the attempt publishes, and nothing
-/// takes it back. An attempt fails when its final upload does not land in
-/// time, and only then does a bounded stop read its deadline.
-pub(super) struct Stop {
-    op: OpId,
-    /// An eviction captures a snapshot before it publishes; a cleanup
-    /// does not.
-    evict: bool,
-    /// Whether the closed database stays on the node as an eviction
-    /// snapshot.
-    snapshot: bool,
-    /// A bounded stop's deadline, on the process's monotonic clock.
-    deadline_mono: Option<u64>,
-    /// A request reached the cell (`AbandonEvictionStop`).
-    abandon: bool,
-    phase: StopPhase,
-    /// The attempt under way, so a stale step of an earlier one is ignored.
-    attempt: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StopPhase {
-    /// Capturing the handoff snapshot; an abandonment still takes effect.
-    Capturing,
-    /// Publishing: the final upload, past the point of abandoning.
-    Publishing,
-    /// The pause after a failed attempt.
-    Retrying,
 }
 
 /// A durability proof someone is waiting on.
@@ -236,14 +194,6 @@ pub(super) enum ReplicaWork {
     },
     /// A paged cell's background fill completed.
     Filled { cell: String, epoch: Epoch },
-    /// A stop's capture ended, its attempt ran out of time, or its retry
-    /// pause did.
-    StopStep {
-        cell: String,
-        epoch: Epoch,
-        op: OpId,
-        attempt: u32,
-    },
 }
 
 impl World {
@@ -278,12 +228,6 @@ impl World {
                     Work::Replica(ReplicaWork::Filled { cell, epoch }),
                 );
             }
-            ReplicaWork::StopStep {
-                cell,
-                epoch,
-                op,
-                attempt,
-            } => self.stop_step(node, &cell, epoch, op, attempt),
             ReplicaWork::Filled { cell, epoch } => {
                 let p = self.machines[node].proc_mut();
                 if let Some(replica) = p.replicas.get_mut(&(cell, epoch)) {
@@ -334,20 +278,10 @@ impl World {
             // A clean stop uploads everything first, then closes. All but a
             // rebalance keep the closed database as an eviction snapshot
             // (`preserve_local: !rebalance`; a cleanup is `release`).
-            let deadline_mono = bounded.then(|| self.mono(node) + OPERATION_DEADLINE_MS);
-            let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
+            if !self.machines[node].proc().replicas.contains_key(&key) {
                 return self.deliver(node, 1, Event::RuntimeStopped { op });
-            };
-            replica.stop = Some(Stop {
-                op,
-                evict: matches!(cause, StopCause::Evict { .. }),
-                snapshot: cause != (StopCause::Evict { rebalance: true }),
-                deadline_mono,
-                abandon: false,
-                phase: StopPhase::Retrying,
-                attempt: 0,
-            });
-            return self.attempt_stop(node, &key.0, epoch);
+            }
+            return self.begin_stop(node, op, &key.0, epoch, cause, bounded);
         }
         if cause == StopCause::Swap {
             // The runtime leaves its isolate; its database stays open, and
@@ -363,6 +297,9 @@ impl World {
             }
             for deadline in replica.deadlines.values() {
                 self.cancel(*deadline);
+            }
+            if let Some(step) = replica.stop.as_ref().and_then(|stop| stop.step) {
+                self.cancel(step);
             }
             // What the log shipped or a bundle covers may be acknowledged
             // and is not in the per-cell layout yet: keep it as a tail
@@ -642,111 +579,6 @@ impl World {
         self.wait_for_upload(node, cell, epoch, Waiter::Evict { op, position });
     }
 
-    /// `AbandonEvictionStop`: only a bounded eviction carries the signal,
-    /// and it only sets the bit. The stop reads it where it can still act
-    /// on it.
-    pub(super) fn abandon_stop(&mut self, node: usize, op: OpId) {
-        let stop = (self.machines[node].proc_mut().replicas.values_mut())
-            .find_map(|replica| replica.stop.as_mut().filter(|stop| stop.op == op));
-        if let Some(stop) = stop.filter(|stop| stop.evict && stop.deadline_mono.is_some()) {
-            stop.abandon = true;
-        }
-    }
-
-    fn stop_mut(&mut self, node: usize, cell: &str, epoch: Epoch) -> Option<&mut Stop> {
-        let replicas = &mut self.machines[node].proc_mut().replicas;
-        replicas.get_mut(&(cell.to_string(), epoch))?.stop.as_mut()
-    }
-
-    /// The step of attempt `attempt` of stop `op`: the capture ended, the
-    /// attempt ran out of time, or the retry pause ended.
-    fn stop_step(&mut self, node: usize, cell: &str, epoch: Epoch, op: OpId, attempt: u32) {
-        let Some(stop) = self.stop_mut(node, cell, epoch) else {
-            return;
-        };
-        if stop.op != op || stop.attempt != attempt {
-            return;
-        }
-        match stop.phase {
-            StopPhase::Capturing if stop.abandon => self.abandoned(node, cell, epoch),
-            StopPhase::Capturing => self.publish_stop(node, cell, epoch),
-            StopPhase::Publishing => self.stop_attempt_failed(node, cell, epoch),
-            StopPhase::Retrying => self.attempt_stop(node, cell, epoch),
-        }
-    }
-
-    /// One attempt of `report_stopped_when_released`'s loop.
-    fn attempt_stop(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        let capture_ms = self.stop_rng.range(1, MAX_CAPTURE_MS);
-        let stop = self.stop_mut(node, cell, epoch).expect("a stop");
-        if stop.abandon {
-            return self.abandoned(node, cell, epoch);
-        }
-        stop.attempt += 1;
-        stop.phase = StopPhase::Capturing;
-        if !stop.evict {
-            return self.publish_stop(node, cell, epoch);
-        }
-        let (op, attempt) = (stop.op, stop.attempt);
-        let (cell, epoch) = (cell.to_string(), epoch);
-        let step = ReplicaWork::StopStep {
-            cell,
-            epoch,
-            op,
-            attempt,
-        };
-        self.work(node, capture_ms, Work::Replica(step));
-    }
-
-    /// Publish: upload what the bucket lacks, and give the attempt its
-    /// time.
-    fn publish_stop(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        let stop = self.stop_mut(node, cell, epoch).expect("a stop");
-        stop.phase = StopPhase::Publishing;
-        let step = ReplicaWork::StopStep {
-            cell: cell.to_string(),
-            epoch,
-            op: stop.op,
-            attempt: stop.attempt,
-        };
-        let delay = self.agenda_ms(STOP_ATTEMPT_MS);
-        self.work(node, delay, Work::Replica(step));
-        self.settle_proofs(node, cell, epoch);
-        self.upload(node, cell, epoch);
-    }
-
-    /// The attempt did not let the cell go. A bounded stop past its
-    /// deadline gives up: the core restarts the cell on the database it
-    /// kept open. Any other stop tries again after a pause.
-    fn stop_attempt_failed(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        let mono = self.mono(node);
-        let replica = self.replica_mut(node, cell, epoch);
-        let stop = replica.stop.as_mut().expect("a stop");
-        let op = stop.op;
-        if stop.deadline_mono.is_some_and(|deadline| mono >= deadline) {
-            replica.stop = None;
-            return self.deliver(node, 1, Event::RuntimeStopFailed { op });
-        }
-        stop.phase = StopPhase::Retrying;
-        let step = ReplicaWork::StopStep {
-            cell: cell.to_string(),
-            epoch,
-            op,
-            attempt: stop.attempt,
-        };
-        self.stats.stop_retries += 1;
-        self.work(node, RELEASE_RETRY_MS, Work::Replica(step));
-    }
-
-    /// `EvictionAbandoned`: the cell stays open at its epoch, and the core
-    /// starts it again in place.
-    fn abandoned(&mut self, node: usize, cell: &str, epoch: Epoch) {
-        let stop = self.replica_mut(node, cell, epoch).stop.take();
-        let op = stop.expect("a stop").op;
-        self.stats.stops_abandoned += 1;
-        self.deliver(node, 1, Event::RuntimeStopCancelled { op });
-    }
-
     fn wait_for_upload(&mut self, node: usize, cell: &str, epoch: Epoch, waiter: Waiter) {
         let evict = matches!(waiter, Waiter::Evict { .. });
         let kick = self.upload_due(node, Upload::Wait { evict });
@@ -1009,7 +841,7 @@ impl World {
 
     /// The open database of `cell` at `epoch`, which the caller knows is
     /// there.
-    fn replica_mut(&mut self, node: usize, cell: &str, epoch: Epoch) -> &mut Replica {
+    pub(super) fn replica_mut(&mut self, node: usize, cell: &str, epoch: Epoch) -> &mut Replica {
         let key = (cell.to_string(), epoch);
         self.machines[node]
             .proc_mut()
@@ -1021,7 +853,7 @@ impl World {
     /// Answer every proof the bucket now covers, and finish a stop whose
     /// final upload landed. Answers are scheduled, not driven, because this
     /// can run inside `execute`.
-    fn settle_proofs(&mut self, node: usize, cell: &str, epoch: Epoch) {
+    pub(super) fn settle_proofs(&mut self, node: usize, cell: &str, epoch: Epoch) {
         let key = (cell.to_string(), epoch);
         let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
             return;
@@ -1054,9 +886,11 @@ impl World {
             return;
         };
         let published = (replica.stop.as_ref())
-            .filter(|stop| stop.phase == StopPhase::Publishing)
-            .filter(|_| uploaded >= replica.content.len() as u64);
-        if let Some(&Stop { op, snapshot, .. }) = published {
+            .filter(|stop| stop.publishing())
+            .filter(|_| uploaded >= replica.content.len() as u64)
+            .map(|stop| (stop.op, stop.snapshot, stop.step));
+        if let Some((op, snapshot, step)) = published {
+            settled.extend(step);
             let replica = self.machines[node]
                 .proc_mut()
                 .replicas

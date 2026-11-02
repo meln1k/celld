@@ -49,6 +49,7 @@ mod replicator;
 mod shell;
 mod shutdown;
 mod sockets;
+mod stop;
 mod waker;
 mod workers;
 
@@ -195,6 +196,7 @@ enum Work {
     Gc(GcWork),
     Waker(WakerWork),
     Drain(drain::DrainWork),
+    Stop(stop::StopWork),
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -717,6 +719,7 @@ impl World {
             Work::Gc(work) => self.gc_work(node, work),
             Work::Waker(work) => self.waker_work(node, work),
             Work::Drain(work) => self.drain_work(node, work),
+            Work::Stop(work) => self.stop_work(node, work),
         }
     }
 
