@@ -465,9 +465,11 @@ impl Store {
     /// exactly at that span's cut, and stop at the first span that opens at
     /// the first position. Linking on anything but the exact cut would take
     /// a fenced owner's late object for the base and lose what lies between
-    /// it and the cut (`BreakLinkByOrder`). Empty when nothing is listed,
-    /// `NoBase` when objects are but no span opens at the first position
-    /// (`TxNotAvailable`).
+    /// it and the cut (`BreakLinkByOrder`). Empty when nothing is listed
+    /// (production's `TxNotAvailable`), `NoBase` when objects are but no
+    /// span opens at the first position: production builds that chain and
+    /// fails later, when its restore plan finds no first position
+    /// (`calc_restore_plan`).
     ///
     /// Production's marker takes a transaction of its own, after the cut;
     /// here it takes none, so a paged epoch's first write follows the cut.
@@ -550,9 +552,10 @@ impl Store {
     }
 
     /// The cell's newest database in the per-cell layout, as its restore
-    /// chain holds it. `None` when nothing restores.
-    pub fn newest(&self, cell: &str) -> Option<Vec<WriteId>> {
-        self.chain_below(cell, Epoch::MAX).ok().flatten()
+    /// chain holds it. `None` when nothing is listed, `NoBase` when the
+    /// chain is broken.
+    pub fn newest(&self, cell: &str) -> Result<Option<Vec<WriteId>>, NoBase> {
+        self.chain_below(cell, Epoch::MAX)
     }
 
     /// `WakeFlusher::publish`: write the wake entry of an armed alarm.

@@ -606,8 +606,9 @@ impl Checker {
         }
     }
 
-    /// Watched: **every cell with objects restores.** A restore listed
-    /// objects for `cell` but found no chain down to its first position:
+    /// Watched: **every cell with objects restores.** A restore, or bundle
+    /// GC judging a deleted bundle, listed objects for `cell` but found no
+    /// chain down to its first position:
     /// something deleted the base the epochs above continue, or never
     /// wrote it. The core then never serves the cell again.
     pub fn unrestorable(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch) {
@@ -615,7 +616,7 @@ impl Checker {
             t,
             "unrestorable",
             format!("{cell}/{epoch}"),
-            format!("{who} found no chain to the first position restoring {cell} at epoch {epoch}"),
+            format!("{who} found no chain to the first position for {cell} at epoch {epoch}"),
         );
     }
 

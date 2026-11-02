@@ -513,8 +513,10 @@ impl World {
                     chain: match self.store.used_since(&cell, epoch) {
                         true => Err(Failure::Definite),
                         false => self.store.read_chain(&cell, epoch).map_err(|NoBase| {
-                            // The restore fails, as `EpochChain::build`'s
-                            // `TxNotAvailable` fails the activation.
+                            // The restore fails. Production builds such a
+                            // chain, then fails the activation when its
+                            // restore plan finds no first position
+                            // (`calc_restore_plan`).
                             self.checker.unrestorable(self.t, &name, &cell, epoch);
                             Failure::Definite
                         }),
