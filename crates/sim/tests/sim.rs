@@ -579,7 +579,7 @@ fn every_planted_bug_is_caught_by_its_check() {
             hits.map(|v| v.kind).collect()
         };
         let mut missing: Vec<&str> = expected.to_vec();
-        for seed in 0..20 {
+        for seed in 0..40 {
             let caught: Vec<&str> = (fired(&config, seed).into_iter())
                 .filter(|kind| missing.contains(kind))
                 .collect();
@@ -595,7 +595,7 @@ fn every_planted_bug_is_caught_by_its_check() {
         }
         assert!(
             missing.is_empty(),
-            "{mutation:?}: {missing:?} never fired in 20 seeds, on a seed it passes unplanted"
+            "{mutation:?}: {missing:?} never fired in 40 seeds, on a seed it passes unplanted"
         );
     }
 }

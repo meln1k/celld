@@ -327,6 +327,12 @@ pub struct Faults {
     /// Chance per hop of a latency spike of up to `store_spike_ms`.
     pub store_spike_probability: f64,
     pub store_spike_ms: u64,
+    /// A machine's follower disk turns slow for a while, up to
+    /// `max_gray_ms`: each append or probe it answers waits up to
+    /// `gray_latency_ms` longer, as behind a dying disk's fsync.
+    pub gray_followers: f64,
+    pub max_gray_ms: u64,
+    pub gray_latency_ms: u64,
 }
 
 impl SimConfig {
@@ -407,6 +413,7 @@ impl SimConfig {
                 store_lost_response: 0.01,
                 store_spike_probability: 0.02,
                 store_spike_ms: 3_000,
+                ..Faults::default()
             },
             cancel_probability: 0.05,
             error_probability: 0.05,
@@ -435,7 +442,15 @@ impl SimConfig {
         let mut rng = Rng::new(seed ^ 0x5357_4152_4d00_0000);
         let r = &mut rng;
         let ttl_ms = *r.pick(&[2_000, 3_000, 5_000, 10_000]).unwrap();
-        let faults = Faults::draw(r, ttl_ms);
+        let mut faults = Faults::draw(r, ttl_ms);
+        // Drawn from a stream of their own, so that every other draw of a
+        // seed stays what it was before slow followers were modelled.
+        let mut gray = Rng::new(seed ^ 0x4752_4159_0000_0000);
+        if gray.chance(0.5) {
+            faults.gray_followers = gray.range(1, 6) as f64;
+            faults.max_gray_ms = gray.range(2_000, 15_000);
+            faults.gray_latency_ms = gray.range(30, 1_200);
+        }
         Self {
             nodes: r.range(2, 5) as usize,
             cells: r.range(2, 10) as usize,
@@ -496,6 +511,9 @@ impl Faults {
             store_lost_response: either(r, 0.03),
             store_spike_probability: either(r, 0.02),
             store_spike_ms: r.range(500, 4_000),
+            gray_followers: 0.0,
+            max_gray_ms: 0,
+            gray_latency_ms: 0,
         }
     }
 }

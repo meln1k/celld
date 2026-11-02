@@ -18,8 +18,9 @@
 use super::super::replicator::Tail;
 use super::super::shell::StoreReq;
 use super::super::{Work, World};
-use super::{Activation, LogWork, Posture, FOLLOWERS};
+use super::{Activation, LogWork, Posture, APPEND_DEADLINE_MS, FOLLOWERS};
 use crate::Mutation;
+use celld_logic::log_evict::{EvictionPolicy, Verdict};
 use celld_logic::log_tier::LogState;
 use celld_logic::Epoch;
 
@@ -28,6 +29,8 @@ pub(super) const WATCH_MS: u64 = 250;
 /// How often the maintenance loop runs `maintain`, healthy or not
 /// (`LOG_MAINTENANCE_TICK_MS`).
 pub(super) const TICK_MS: u64 = 30_000;
+/// How long a member must be quiet before it owes an idle probe.
+const PROBE_QUIET_MS: u64 = 2_000;
 /// The repair cadence while degraded, and its cap.
 pub(super) const REPAIR_MS: u64 = 1_000;
 const REPAIR_MAX_MS: u64 = 10_000;
@@ -47,6 +50,23 @@ impl World {
         let Some(confirmers) = log.pending.remove(&frame) else {
             return;
         };
+        // The lanes that never answered give up: a failed append.
+        let late: Vec<(usize, u64)> = (log.sent.iter())
+            .filter(|((f, _), _)| *f == frame)
+            .map(|((_, member), started)| (*member, *started))
+            .collect();
+        let mono = self.mono(node);
+        for (member, started) in late {
+            let name = self.machines[member].name.clone();
+            let log = self.machines[node]
+                .proc_mut()
+                .log
+                .as_mut()
+                .expect("checked");
+            log.sent.remove(&(frame, member));
+            log.health.append_completed(&name, mono, mono - started);
+        }
+        let log = self.machines[node].proc().log.as_ref().expect("checked");
         let session = log.session.clone();
         if confirmers.len() < self.session(&session).ensemble.len() {
             self.degrade(node, &format!("frame {frame} unconfirmed"));
@@ -73,6 +93,8 @@ impl World {
     /// left it degraded.
     pub(super) fn watch(&mut self, node: usize) {
         self.work(node, WATCH_MS, Work::Log(LogWork::Watch));
+        self.probe_followers(node);
+        self.evict_gray_followers(node);
         let t = self.t;
         let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
@@ -97,6 +119,11 @@ impl World {
         };
         let width = self.session(&log.session).ensemble.len();
         if log.pass.is_some() || (log.posture == Posture::Shipping && width >= FOLLOWERS) {
+            return;
+        }
+        // Self-suspicion parks recruitment: opening epochs into our own
+        // partition proves nothing.
+        if log.suspect_self {
             return;
         }
         let log = self.machines[node]
@@ -154,6 +181,105 @@ impl World {
             ensemble: members,
         };
         self.store_call(node, req);
+    }
+
+    /// `probe_followers`: an idle probe to each member with nothing in
+    /// flight and no answer in the last 2 s, degraded or not.
+    fn probe_followers(&mut self, node: usize) {
+        let mono = self.mono(node);
+        let leader = (node, self.machines[node].inc);
+        let Some(log) = self.machines[node].proc().log.as_ref() else {
+            return;
+        };
+        let members = self.session(&log.session).ensemble.clone();
+        for member in members {
+            let name = self.machines[member].name.clone();
+            let log = self.machines[node]
+                .proc_mut()
+                .log
+                .as_mut()
+                .expect("checked");
+            if !log.health.probe_due(&name, mono, PROBE_QUIET_MS) {
+                continue;
+            }
+            log.health.append_started(&name, mono);
+            log.sent.insert((0, member), mono);
+            let work = Work::Log(LogWork::Probe {
+                leader,
+                started: mono,
+            });
+            self.peer_send(node, member, None, work);
+            let deadline = Work::Log(LogWork::ProbeDeadline {
+                follower: member,
+                started: mono,
+            });
+            self.work(node, APPEND_DEADLINE_MS, deadline);
+        }
+    }
+
+    /// A probe's answer: proof this node is not cut off.
+    pub(super) fn probed(&mut self, node: usize, follower: usize, started: u64) {
+        if self.probe_settled(node, follower, started) {
+            let log = self.machines[node]
+                .proc_mut()
+                .log
+                .as_mut()
+                .expect("settled");
+            log.suspect_self = false;
+        }
+    }
+
+    /// A probe answered or ran out its lane deadline, whichever came
+    /// first: the lane records the sample. Returns whether this settled it.
+    pub(super) fn probe_settled(&mut self, node: usize, follower: usize, started: u64) -> bool {
+        let mono = self.mono(node);
+        let name = self.machines[follower].name.clone();
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return false;
+        };
+        if log.sent.get(&(0, follower)) != Some(&started) {
+            return false;
+        }
+        log.sent.remove(&(0, follower));
+        log.health
+            .append_completed(&name, mono, mono.saturating_sub(started));
+        true
+    }
+
+    /// `evict_gray_followers`: on a shipping log, every member stalled past
+    /// the backstop at once is our own fault, so degrade and suspect
+    /// ourselves; otherwise, at most once per swap interval, degrade on the
+    /// first member `log_evict` judges gray.
+    fn evict_gray_followers(&mut self, node: usize) {
+        let mono = self.mono(node);
+        let Some(log) = self.machines[node].proc().log.as_ref() else {
+            return;
+        };
+        if log.posture != Posture::Shipping {
+            return;
+        }
+        let members: Vec<String> = (self.session(&log.session).ensemble.iter())
+            .map(|&m| self.machines[m].name.clone())
+            .collect();
+        let policy = EvictionPolicy::default();
+        let log = self.machines[node]
+            .proc_mut()
+            .log
+            .as_mut()
+            .expect("checked");
+        if log.health.correlated_stall(&policy, &members, mono) {
+            log.suspect_self = true;
+            return self.degrade(node, "correlated member stall; suspecting ourselves");
+        }
+        if !log.health.swap_allowed(&policy, mono) {
+            return;
+        }
+        for member in &members {
+            if log.health.verdict(&policy, member, &members, mono) == Verdict::Evict {
+                log.health.evicted(&policy, member, mono);
+                return self.degrade(node, &format!("gray follower {member} evicted"));
+            }
+        }
     }
 
     /// A maintain pass ended. The repair cadence resets while healthy, and
@@ -232,6 +358,8 @@ impl World {
         };
         log.epoch = epoch;
         log.published = log.published.max(epoch);
+        log.health.reset();
+        log.sent.clear();
         log.posture = Posture::Shipping;
         log.activation = Activation::Idle;
         log.confirmed.clear();

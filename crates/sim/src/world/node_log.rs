@@ -47,14 +47,21 @@
 //!   follower drops what it held of an earlier epoch when it adopts a new
 //!   one. Fold and recovery read the current epoch's members only.
 //!
-//! Not modelled: gray-failure eviction (`log_evict`'s latency verdicts and
-//! quarantine), the swap rate cap, recruitment at startup (a process opens
+//! - Gray followers (`Faults::gray_followers`) answer appends and probes
+//!   late. The posture watch probes idle members and runs `log_evict`'s
+//!   verdicts, its swap rate cap and its correlated-stall test, as
+//!   production's `evict_gray_followers` does: a correlated stall suspects
+//!   the leader itself, and only a member's answer lifts that.
+//!
+//! Not modelled: the incapable-peer quarantine (every simulated peer can
+//! follow), recruitment at startup (a process opens
 //! its log with the machines it finds, and a process that starts alone
 //! never opens one), compaction of bundle rows into per-cell objects, and
 //! bundle GC (bundles are never deleted).
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use celld_logic::log_evict::FollowerHealth;
 use celld_logic::log_tier::LogState;
 use celld_logic::{Epoch, Event, Failure, OpId};
 
@@ -74,9 +81,10 @@ const PEER_MS: (u64, u64) = (1, 5);
 /// How long an activation waits for a lease write to carry it before the
 /// session counts as fenced (`OwnLog::write`).
 const ACTIVATION_MS: u64 = 10_000;
-/// How long an append may stay unconfirmed before its member counts as
-/// failed and the shipper degrades (`log_evict`'s backstop).
-const APPEND_BACKSTOP_MS: u64 = 1_500;
+/// How long an append may stay unconfirmed before it fails and the
+/// shipper degrades ("member append failed"): the lane's deadline,
+/// `log_evict`'s backstop plus 100 ms.
+pub(super) const APPEND_DEADLINE_MS: u64 = 1_600;
 /// The log a process leads.
 pub(super) struct Log {
     session: String,
@@ -101,6 +109,15 @@ pub(super) struct Log {
     bundling: bool,
     /// Whether this log epoch's record says it may have fleet acks.
     activation: Activation,
+    /// The members' append latencies and outstanding appends, as the lanes
+    /// record them, and the eviction watch judges them (`log_evict`).
+    health: FollowerHealth,
+    /// When each member's append of each frame of this log epoch went out,
+    /// on this process's monotonic clock; frame 0 is an idle probe.
+    sent: BTreeMap<(u64, usize), u64>,
+    /// Every member stalled at once: the fault is likely ours, so
+    /// recruitment parks until a member answers a probe.
+    suspect_self: bool,
     /// A maintain pass is in flight, begun at this log epoch.
     pass: Option<u64>,
     /// When the posture watch last tried a repair, and how long it waits
@@ -221,7 +238,9 @@ pub(super) enum Flushed {
 
 pub(super) enum LogWork {
     /// A leader asks this follower to join its session.
-    Join { session: String },
+    Join {
+        session: String,
+    },
     /// A leader ships a cell epoch's database to this follower.
     Append {
         session: String,
@@ -247,15 +266,37 @@ pub(super) enum LogWork {
     /// A lease write carrying `Open` applied: the log is open, and the core
     /// hears of the write. With `acks`, the body also carried that log
     /// epoch's record with `may_have_fleet_acks` set.
-    LeaseApplied { event: Event, acks: Option<u64> },
+    LeaseApplied {
+        event: Event,
+        acks: Option<u64>,
+    },
+    /// An idle probe of a follower (an empty append), and its answer.
+    Probe {
+        leader: (usize, u64),
+        started: u64,
+    },
+    ProbeAnswered {
+        follower: usize,
+        started: u64,
+    },
+    /// A probe's lane deadline: unanswered, it failed.
+    ProbeDeadline {
+        follower: usize,
+        started: u64,
+    },
     /// An activation at `log_epoch` ran out of time.
-    ActivationTimeout { log_epoch: u64 },
+    ActivationTimeout {
+        log_epoch: u64,
+    },
     /// The bundle loop's tick.
     Flush,
     /// A bundle flush ended.
     Bundled(Flushed),
     /// A frame's backstop ran out: every member must have confirmed it.
-    Backstop { log_epoch: u64, frame: u64 },
+    Backstop {
+        log_epoch: u64,
+        frame: u64,
+    },
     /// The posture watch's poll.
     Watch,
     /// The maintenance loop's tick.
@@ -305,6 +346,18 @@ impl World {
             } => self.confirmed(node, follower, (log_epoch, frame), cell, epoch, len),
             LogWork::Backstop { log_epoch, frame } => self.backstop(node, log_epoch, frame),
             LogWork::Watch => self.watch(node),
+            LogWork::Probe { leader, started } => {
+                let work = Work::Log(LogWork::ProbeAnswered {
+                    follower: node,
+                    started,
+                });
+                let fsync = self.gray_delay(node);
+                self.peer_send_after(node, leader.0, Some(leader.1), work, fsync);
+            }
+            LogWork::ProbeAnswered { follower, started } => self.probed(node, follower, started),
+            LogWork::ProbeDeadline { follower, started } => {
+                self.probe_settled(node, follower, started);
+            }
             LogWork::Tick => {
                 self.work(node, ensemble::TICK_MS, Work::Log(LogWork::Tick));
                 self.maintain(node);
@@ -426,6 +479,9 @@ impl World {
             bundling: false,
             activation: Activation::Idle,
             published: 1,
+            health: FollowerHealth::default(),
+            sent: BTreeMap::new(),
+            suspect_self: false,
             pass: None,
             repair_tried: 0,
             repair_ms: ensemble::REPAIR_MS,
@@ -554,10 +610,22 @@ impl World {
     /// default whichever runs there now. A partition on either side loses
     /// it: the sender's when it sends, the receiver's when it arrives.
     fn peer_send(&mut self, from: usize, to: usize, inc: Option<u64>, work: Work) {
+        self.peer_send_after(from, to, inc, work, 0);
+    }
+
+    /// `peer_send`, after `extra` ms the sender spends first.
+    fn peer_send_after(
+        &mut self,
+        from: usize,
+        to: usize,
+        inc: Option<u64>,
+        work: Work,
+        extra: u64,
+    ) {
         if self.machines[from].partition.is_some() {
             return;
         }
-        let delay = self.net_rng.range(PEER_MS.0, PEER_MS.1);
+        let delay = extra + self.net_rng.range(PEER_MS.0, PEER_MS.1);
         let inc = inc.unwrap_or(self.machines[to].inc);
         self.after(
             delay,
@@ -590,14 +658,23 @@ impl World {
         entry.frames += 1;
         let (frame, ensemble) = (entry.frames, entry.ensemble.clone());
         let backstop = Work::Log(LogWork::Backstop { log_epoch, frame });
-        self.work(node, APPEND_BACKSTOP_MS, backstop);
+        self.work(node, APPEND_DEADLINE_MS, backstop);
         let log = self.machines[node]
             .proc_mut()
             .log
             .as_mut()
             .expect("checked");
         log.pending.insert(frame, BTreeSet::new());
+        let mono = self.mono(node);
         for follower in ensemble {
+            let name = self.machines[follower].name.clone();
+            let log = self.machines[node]
+                .proc_mut()
+                .log
+                .as_mut()
+                .expect("checked");
+            log.health.append_started(&name, mono);
+            log.sent.insert((frame, follower), mono);
             let work = Work::Log(LogWork::Append {
                 session: session.clone(),
                 leader,
@@ -676,7 +753,8 @@ impl World {
             epoch,
             len,
         });
-        self.peer_send(node, leader.0, Some(leader.1), work);
+        let fsync = self.gray_delay(node);
+        self.peer_send_after(node, leader.0, Some(leader.1), work, fsync);
     }
 
     /// A follower's confirmation reaches its leader. Once every follower
@@ -693,11 +771,17 @@ impl World {
         epoch: Epoch,
         len: usize,
     ) {
+        let mono = self.mono(node);
+        let name = self.machines[follower].name.clone();
         let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
             return;
         };
         if log.epoch != log_epoch {
             return;
+        }
+        // The lane records every answer, late or not.
+        if let Some(started) = log.sent.remove(&(frame, follower)) {
+            log.health.append_completed(&name, mono, mono - started);
         }
         let Some(confirmers) = log.pending.get_mut(&frame) else {
             return;

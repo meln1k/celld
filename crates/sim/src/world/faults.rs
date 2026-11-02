@@ -40,6 +40,42 @@ impl World {
                 self.after(gap, Item::Fault(fault));
             }
         }
+        if self.config.faults.gray_followers > 0.0 {
+            let gap = self.gray_gap();
+            self.after(gap, Item::Gray);
+        }
+    }
+
+    fn gray_gap(&mut self) -> u64 {
+        let mean = (60_000.0 / self.config.faults.gray_followers) as u64;
+        self.gray_rng.range(1, 2 * mean.max(1))
+    }
+
+    /// A machine's follower disk turns slow for a while. Its process keeps
+    /// running and answering; only what it fsyncs for a leader waits.
+    pub(super) fn gray(&mut self) {
+        if self.t >= self.config.chaos_ms {
+            return;
+        }
+        let node = self.gray_rng.below(self.machines.len() as u64) as usize;
+        let max = self.config.faults.max_gray_ms.max(100);
+        let duration = self.gray_rng.range(100, max);
+        let latency = self.config.faults.gray_latency_ms;
+        self.machines[node].gray = Some((self.t + duration, latency));
+        self.note(|| {
+            format!("n{node}'s follower disk slows by up to {latency} ms for {duration} ms")
+        });
+        self.disturbed_until(self.t + duration);
+        let gap = self.gray_gap();
+        self.after(gap, Item::Gray);
+    }
+
+    /// How much longer this machine's follower disk takes to answer now.
+    pub(super) fn gray_delay(&mut self, node: usize) -> u64 {
+        match self.machines[node].gray {
+            Some((until, latency)) if self.t < until => self.gray_rng.range(latency / 2, latency),
+            _ => 0,
+        }
     }
 
     fn rate(&self, fault: Fault) -> f64 {
