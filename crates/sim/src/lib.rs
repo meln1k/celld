@@ -252,10 +252,16 @@ pub enum Mutation {
     /// could when no epoch continued a chain, and deletes what a paged
     /// epoch continues. Caught by `unrestorable`.
     GcChainHead,
+    /// A donor claims the drain token over another's live claim. Caught by
+    /// `donors-overlap`.
+    IgnoreDrainToken,
+    /// The readiness gate reads another node's released claim as live.
+    /// Caught by `ready-stuck`.
+    GateReadsReleasedClaim,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 31] = [
+    pub const ALL: [Mutation; 33] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -287,6 +293,8 @@ impl Mutation {
         Mutation::GcUncovered,
         Mutation::NewestBase,
         Mutation::GcChainHead,
+        Mutation::IgnoreDrainToken,
+        Mutation::GateReadsReleasedClaim,
     ];
 }
 
@@ -616,6 +624,11 @@ pub struct Stats {
     pub stops_abandoned: u64,
     /// Memory surges a process took.
     pub surges: u64,
+    /// Drains that claimed the drain token, drains that gave up waiting
+    /// for it, and processes whose readiness opened.
+    pub drain_claims: u64,
+    pub drain_bypasses: u64,
+    pub ready: u64,
     /// Databases opened from an eviction snapshot instead of the bucket.
     pub reused: u64,
     /// Evictions an operator asked for, and those that evicted.

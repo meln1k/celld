@@ -12,7 +12,8 @@
 //!   before the old one expires, its core resumes each database where it
 //!   is, at the same epoch, without reading the bucket.
 //!
-//! Either way, the shutdown has a deadline. A process that reaches it exits
+//! A drain first claims the fleet drain token (`drain.rs`), so donors hand
+//! off one at a time. Either way, the shutdown has a deadline. A process that reaches it exits
 //! as it stands, and its cells recover as a crashed node's do.
 
 use celld_logic::Event;
@@ -101,7 +102,9 @@ impl World {
             Mode::Drain => {
                 self.stats.drains += 1;
                 self.note(|| format!("drain {who}"));
-                self.drive(node, Event::ReleaseAll);
+                // Claim the drain token first, for up to three quarters of
+                // the budget (`drain_token_wait_ms`).
+                self.claim_token(node, SHUTDOWN_DEADLINE_MS / 4 * 3);
             }
             Mode::Preserve => {
                 self.stats.preserves += 1;
@@ -128,7 +131,7 @@ impl World {
                     && s.evicting() == 0
                     && s.releasing() == 0
                     && s.adopting() == 0;
-                if drained {
+                if drained && self.token_decided(node) {
                     return self.exit(node, None);
                 }
             }
@@ -178,6 +181,8 @@ impl World {
         }
         let clean = marker.is_some();
         self.note(|| format!("exit {who} (clean reload: {clean})"));
+        // Release the drain token whether or not the drain completed.
+        self.release_token(node);
         // The graceful drain point: seal the log if the bucket has it all.
         self.seal_own_log(node);
         self.machines[node].reload = marker;

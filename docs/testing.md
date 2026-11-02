@@ -90,7 +90,13 @@ requests borrow idle resident isolates. Some clients give up before they hear
 back, an operator evicts cells by hand and shuts nodes down, a balancer gives
 idle cells away, and the log tier nudges node leases. A node that shuts
 down or gives a cell away offers it to its peers until one acquires it, as
-`AdoptReleased` and the peer's handoff endpoint do in production. A node can
+`AdoptReleased` and the peer's handoff endpoint do in production. A drain
+first claims the fleet drain token, one bucket object written under its
+ETag, so that donors hand off one at a time: it retries every second for up
+to three quarters of its shutdown budget, then hands off unserialized, and it
+releases its claim on the way out. In seeds with a balancer, a fresh process
+runs the first-readiness gate (`drain::fleet_status`) over the token and the
+node leases every second, and balances only once it is ready. A node can
 also be replaced in place: its process preserves its cells and exits, and the
 replacement resumes each database at the same epoch without the bucket. An
 idle eviction or a cleanup keeps the closed database on its node as an
@@ -330,15 +336,21 @@ core, not to the simulator or to the property itself.
   having no fleet acks at a log epoch at which the fleet proved writes.
 - **bundle-deleted-uncovered**: bundle GC deleted a bundle holding an
   acknowledged write that no per-cell prefix holds.
+- **donors-overlap**: two processes began handing cells off, each under a
+  claim on the drain token of its own.
+- **ready-stuck**: in a quiet fleet, a process stayed unready for over 10 s
+  although the token and leases it read, judged at the true time, show the
+  fleet settled. A peer short of memory or an ownership skew keeps the gate
+  shut by design, and does not count.
 
-**deploy-stuck**, **idle-not-evicted**, **memory-not-relieved** and
-**reopen-stuck** judge only
+**deploy-stuck**, **idle-not-evicted**, **memory-not-relieved**,
+**reopen-stuck** and **ready-stuck** judge only
 once the fleet is quiet, 15 s after the faults end, so that a bucket call lost
 just before the end has timed out. The others judge at the moment their fact
 arrives. **unclaimed-handoff**, **base-deleted**, **unjustified-loss**,
 **bundle-credit-unheld**, **fleet-proof-unbacked**,
-**credit-before-activation**, **bundle-deleted-uncovered** and
-**unrestorable** have never
+**credit-before-activation**, **bundle-deleted-uncovered**,
+**unrestorable**, **donors-overlap** and **ready-stuck** have never
 fired on the
 current simulator, and **alarm-undiscoverable** fires only after a known
 bug lost the write behind it, so each has a planted bug that the test suite
@@ -349,10 +361,18 @@ that it can. In 100,000 swarm seeds:
 - 406 seeds kept an idle cell resident, 364 of them in a run where a
   walk-down had wedged: the core evicts idle cells only while it is not
   shedding.
-- 293 seeds claimed during a preserve or the close that follows it, never
-  during a drain. An eviction already in flight finishes, or an owner read
-  lands, and the core claims the cell, though `begin_preserve` retires cold
-  work.
+- About 300 seeds claimed during a preserve or the close that follows it.
+  An eviction already in flight finishes, or an owner read lands, and the
+  core claims the cell, though `begin_preserve` retires cold work. Since the
+  drain token is modelled, far more claim during a drain (2,039 seeds in
+  all, 2,315 with validation compiled out), all while the donor waits for
+  the token: its core hears `ReleaseAll` only once the token is decided, so
+  until then it is not draining, advertises itself in its lease as a
+  landing place, and takes cells over from wake hints and forwarded
+  requests, which it hands off again moments later. Production waits the
+  same way, for up to 30 s, behind a crashed donor's claim that lives for
+  120 s (swarm 91: n1 crashed mid-drain holding the token, and n0, waiting
+  15 s for it, took over a cell n1's next process released).
 - 49 seeds (54 with validation compiled out) resumed a superseded epoch:
   after faulty clocks, the slow clean reload below, or a claim during a
   preserve. Fewer seeds reload cleanly than before: a node that has evicted a
@@ -583,6 +603,18 @@ Memory surges changed only the seeds that surge with memory modelled, and
 nothing new failed: 11,516 and 1,977 failing seeds, 203 and 253 on lost
 writes, every new one after a failed fold. A surge makes a node shed in
 about a quarter of the seeds that surge.
+
+The drain token changed every seed that drains, and with a balancer every
+seed, since a fresh process now balances only once its readiness opens. No
+failure kind is new: 11,175 failing seeds in a debug build, one of them on
+the known `queued twice` invariant, and 2,027 with validation compiled out.
+Lost writes went from 203 to 202 and from 253 to 243, and liveness from 905
+to 954 and from 1,041 to 1,095. Every seed that newly failed either traces
+to a known class: a failed fold, a failed bucket read or a clock fault for
+lost writes, and a wedged walk-down, a late fold or the capacity livelock
+for liveness. Of the drains, nine in ten claim the token, and a few in a
+hundred wait out their bound behind a crashed holder's claim and hand off
+unserialized. **donors-overlap** and **ready-stuck** never fired.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

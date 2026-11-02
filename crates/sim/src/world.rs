@@ -35,6 +35,7 @@
 
 mod alarms;
 mod clients;
+mod drain;
 mod faults;
 mod gates;
 mod gc;
@@ -193,6 +194,7 @@ enum Work {
     Log(LogWork),
     Gc(GcWork),
     Waker(WakerWork),
+    Drain(drain::DrainWork),
 }
 
 /// One machine of the fleet: what outlives its process. Its disk, its
@@ -316,6 +318,8 @@ struct Process {
     memory: u64,
     /// Memory no cell holds, in bytes, and when it passes.
     surge: Option<(u64, Time)>,
+    /// Its readiness and its claim on the drain token.
+    drain: drain::ProcDrain,
 }
 
 impl Process {
@@ -344,6 +348,7 @@ impl Process {
             log: None,
             memory: 0,
             surge: None,
+            drain: drain::ProcDrain::default(),
         }
     }
 }
@@ -711,6 +716,7 @@ impl World {
             Work::Log(work) => self.log_work(node, work),
             Work::Gc(work) => self.gc_work(node, work),
             Work::Waker(work) => self.waker_work(node, work),
+            Work::Drain(work) => self.drain_work(node, work),
         }
     }
 
@@ -768,6 +774,7 @@ impl World {
         self.work(node, delay, Work::LoadSample);
         self.start_wake_loops(node);
         self.start_epoch_gc(node);
+        self.start_ready_gate(node);
     }
 
     /// Production's periodic sampler.

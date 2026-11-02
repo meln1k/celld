@@ -136,6 +136,28 @@ impl Checker {
         }
     }
 
+    /// Watched: **donors hand off one at a time.** Two processes began
+    /// handing cells off, each under a claim on the drain token of its own.
+    pub fn donors_overlap(&mut self, t: u64, who: &str, other: &str) {
+        self.watch(
+            t,
+            "donors-overlap",
+            format!("{who} {other}"),
+            format!("{who} began handing off under the drain token while {other} still was"),
+        );
+    }
+
+    /// Watched: **a fresh node becomes ready.** In a quiet fleet whose
+    /// drain token no other node holds, the readiness gate stayed shut.
+    pub fn ready_stuck(&mut self, t: u64, who: &str, waited_ms: u64, why: &str) {
+        self.watch(
+            t,
+            "ready-stuck",
+            who.to_string(),
+            format!("{who} has waited {waited_ms} ms for readiness: {why}"),
+        );
+    }
+
     /// The handler of `write` of `cell` answered its client that it
     /// succeeded: not a `fetch()` it made, and not an error.
     pub fn answer_acknowledged(&mut self, cell: &str, write: WriteId) {

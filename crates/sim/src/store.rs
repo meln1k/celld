@@ -15,13 +15,15 @@
 //! - wake entries, `wake/<minute>/<cell>/<id>`: one per alarm installation
 //!   that some node must wake its cell for, each cell's retirement
 //!   certificate, `wake/retired/<cell>.json`, and the waker role,
-//!   `wake/waker.json`.
+//!   `wake/waker.json`;
+//! - the fleet drain token, `drain/token.json`.
 //!
 //! What the bucket ever held, deleted since or not, is the oracle's
 //! (`Checker::held`), not the bucket's.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use celld_logic::drain::DrainToken;
 use celld_logic::epoch_gc::ListedEpoch;
 use celld_logic::log_tier::LogState;
 use celld_logic::wake::{waker_may_claim, AlarmSnapshot, PublicationId, Retirement};
@@ -62,6 +64,9 @@ pub struct Load {
     pub memory: u64,
     pub pressured: bool,
     pub memory_headroom: bool,
+    /// Cold activations waiting or running, and whether it is draining.
+    pub restoring: u64,
+    pub draining: bool,
 }
 
 #[derive(Default)]
@@ -109,6 +114,8 @@ pub struct Store {
     retirements: BTreeMap<String, Retirement>,
     /// The waker role, `wake/waker.json`: its holder and when it expires.
     waker: Option<(String, i64)>,
+    /// The fleet drain token, `drain/token.json`, and its ETag.
+    drain: Option<(DrainToken, u64)>,
 }
 
 impl Store {
@@ -190,12 +197,28 @@ impl Store {
                 in_use_bytes: Some(load.memory),
                 pressured: load.pressured,
                 memory_headroom: Some(load.memory_headroom),
-                restoring: 0,
+                restoring: load.restoring,
                 paced_handoff: true,
                 rebalance_paused: false,
-                draining: false,
+                draining: load.draining,
             })
             .collect()
+    }
+
+    /// The drain token and its ETag, if the object exists.
+    pub fn drain_token(&self) -> Option<&(DrainToken, u64)> {
+        self.drain.as_ref()
+    }
+
+    /// Write the drain token if its ETag is still `guard` (`None`: only if
+    /// absent). Returns the new ETag, or `None` when the guard lost.
+    pub fn cas_drain_token(&mut self, guard: Option<u64>, token: DrainToken) -> Option<u64> {
+        if self.drain.as_ref().map(|(_, etag)| *etag) != guard {
+            return None;
+        }
+        let etag = self.etag();
+        self.drain = Some((token, etag));
+        Some(etag)
     }
 
     pub fn read_owner(&self, cell: &str) -> Option<OwnerRecord> {

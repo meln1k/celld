@@ -483,6 +483,8 @@ fn every_planted_bug_is_caught_by_its_check() {
             Mutation::GcUncovered => &["bundle-deleted-uncovered"],
             Mutation::NewestBase => &["lost-write"],
             Mutation::GcChainHead => &["unrestorable"],
+            Mutation::IgnoreDrainToken => &["donors-overlap"],
+            Mutation::GateReadsReleasedClaim => &["ready-stuck"],
         };
         let base = match mutation {
             // Only a drain closes a socket and then evicts its cell.
@@ -565,6 +567,25 @@ fn every_planted_bug_is_caught_by_its_check() {
                 epoch_gc_grace_ms: Some(0),
                 sticky_eviction: true,
                 max_resident: 2,
+                ..crashing_and_pausing()
+            },
+            // Only drains that overlap contend for the token.
+            Mutation::IgnoreDrainToken => SimConfig {
+                nodes: 4,
+                operator: Operator {
+                    drains: 12.0,
+                    ..SimConfig::calm().operator
+                },
+                ..SimConfig::calm()
+            },
+            // Only a fleet with a balancer runs the readiness gate, and only
+            // a process that starts after another's drain reads its claim.
+            Mutation::GateReadsReleasedClaim => SimConfig {
+                operator: Operator {
+                    drains: 6.0,
+                    rebalances: 6.0,
+                    ..SimConfig::calm().operator
+                },
                 ..crashing_and_pausing()
             },
             // Only a paged restore continues a chain.

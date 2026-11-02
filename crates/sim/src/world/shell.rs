@@ -11,6 +11,7 @@ use celld_logic::{
 };
 
 use super::alarms::{AlarmWork, Waiter};
+use super::drain::DrainReq;
 use super::faults::Partition;
 use super::gc::GcReq;
 use super::node_log::{Flushed, LogWork};
@@ -171,6 +172,8 @@ pub(super) enum StoreReq {
     Gc(GcReq),
     /// One step of a wake loop.
     Waker(WakerReq),
+    /// The drain token, or the readiness gate's read of it.
+    Drain(DrainReq),
     /// Publish the wake entry of the cell's alarm. With `retire`, then
     /// retire the entries it makes obsolete, as `maintain_wake_entry` does.
     Wake {
@@ -222,6 +225,8 @@ impl World {
                     memory: p.memory,
                     pressured: p.state.shedding(),
                     memory_headroom: p.state.memory_headroom(),
+                    restoring: p.state.activation_backlog() as u64,
+                    draining: p.state.draining(),
                 };
                 // A renewal must come back while authority remains, so the
                 // shell bounds it to half of what is left, as production
@@ -670,6 +675,7 @@ impl World {
             StoreReq::DeleteBundles { .. } => Work::Nothing,
             StoreReq::ReadPeers => Work::Log(LogWork::PeersRead(None)),
             StoreReq::Waker(req) => World::waker_failed(req),
+            StoreReq::Drain(req) => World::drain_failed(req),
         }
     }
 
@@ -883,6 +889,7 @@ impl World {
                 self.apply_reopen(&name, &session, from, ensemble),
             )),
             StoreReq::Waker(req) => self.waker_apply(node, req),
+            StoreReq::Drain(req) => self.drain_apply(req),
             StoreReq::Wake {
                 cell,
                 alarm,

@@ -52,6 +52,9 @@ impl World {
             // A preserving actor ignores the balancer, and refuses evictions.
             OperatorWork::Rebalance { .. } | OperatorWork::Evict { .. }
                 if self.preserving(node) => {}
+            // The balancer runs only once the node is ready, and not while
+            // it drains (`main.rs`).
+            OperatorWork::Rebalance { .. } if !self.may_rebalance(node) => {}
             OperatorWork::Evict { cell } => self.evict(node, cell),
             OperatorWork::Nudge => {
                 let event = Event::NudgeNodeLease {
