@@ -597,6 +597,10 @@ pub struct Stats {
     pub restored: u64,
     /// Of those, the ones that paged their cell.
     pub paged: u64,
+    /// Clean stop attempts that failed and tried again, and evictions a
+    /// request took back before they published.
+    pub stop_retries: u64,
+    pub stops_abandoned: u64,
     /// Databases opened from an eviction snapshot instead of the bucket.
     pub reused: u64,
     /// Evictions an operator asked for, and those that evicted.

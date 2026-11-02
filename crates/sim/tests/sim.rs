@@ -559,10 +559,12 @@ fn every_planted_bug_is_caught_by_its_check() {
             },
             // Only a fleet that runs epoch GC deletes prefixes, and only an
             // epoch that has uploaded nothing yet is not its chain's base:
-            // one a snapshot or a restore opened, with no write since.
+            // one a snapshot or a restore opened, with no write since. A
+            // full node evicts often, so cells reopen often.
             Mutation::GcUnlisted => SimConfig {
                 epoch_gc_grace_ms: Some(0),
                 sticky_eviction: true,
+                max_resident: 2,
                 ..crashing_and_pausing()
             },
             // Only a paged restore continues a chain.

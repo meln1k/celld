@@ -461,6 +461,8 @@ pub struct World {
     /// How long each write a slow disk takes: apart from `gray_rng`, so
     /// that traffic does not move which disk turns slow, or when.
     disk_rng: Rng,
+    /// How long each eviction's snapshot capture takes.
+    stop_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -488,6 +490,7 @@ impl World {
         let op_rng = master.fork();
         let gray_rng = master.fork();
         let disk_rng = master.fork();
+        let stop_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -517,6 +520,7 @@ impl World {
             op_rng,
             gray_rng,
             disk_rng,
+            stop_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),

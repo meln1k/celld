@@ -195,14 +195,17 @@ fn main() {
     );
     println!(
         "crashes {}, pauses {}, partitions {}, bucket failures {}, restores from the bucket {} \
-         ({} paged), from an eviction snapshot {}",
+         ({} paged), from an eviction snapshot {}\n\
+         clean stop retries {}, evictions abandoned {}",
         stats.crashes,
         stats.pauses,
         stats.partitions,
         stats.store_failures,
         stats.restored,
         stats.paged,
-        stats.reused
+        stats.reused,
+        stats.stop_retries,
+        stats.stops_abandoned
     );
     println!(
         "evictions asked {}, evicted {}, drains {}, cells handed off {}, preserves {}, \

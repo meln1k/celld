@@ -95,7 +95,13 @@ also be replaced in place: its process preserves its cells and exits, and the
 replacement resumes each database at the same epoch without the bucket. An
 idle eviction or a cleanup keeps the closed database on its node as an
 eviction snapshot, and the node's next activation of the cell opens it
-instead of reading the bucket, unless that activation took the cell over. In
+instead of reading the bucket, unless that activation took the cell over.
+An eviction or a cleanup stops its cell as `report_stopped_when_released`
+does, attempt after attempt: an eviction first captures its handoff
+snapshot, and a request that reaches the cell can take the eviction back
+only until that capture ends; then the final upload has 10 s, a failed
+attempt retries after 50 ms, and only a failed attempt reads a bounded
+stop's deadline. In
 half of the swarm seeds, owners also run epoch GC every 5 s: list the cell's
 epochs, plan with `epoch_gc::plan`, read the owner record, then delete each
 epoch prefix below the restore chain's base, one bucket call per step. In
@@ -561,6 +567,15 @@ Across both modes, every seed that newly lost writes followed a failed fold (86)
 bucket read (7) or a superseded replacement (swarm 19158),
 and no restore found its chain broken (**unrestorable** and
 **torn-restore** never fired).
+
+Modelling the clean stop's retry loop moved timing in every seed that
+evicts. In 100,000 swarm seeds, 11,502 failed in a debug build and 1,978
+with validation compiled out; no failure kind is new, and late
+acknowledgements no longer occur. Lost writes went from 186 to 207, and
+from 229 to 254; every seed that newly lost writes followed a failed fold
+(180), a failed bucket read (11) or a clock step in the fleet posture
+(swarm 87144). A request takes an eviction back in about half the seeds; a
+final upload outlasts its 10 s attempt only rarely, under a long partition.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
