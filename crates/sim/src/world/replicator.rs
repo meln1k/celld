@@ -775,7 +775,7 @@ impl World {
             false
         });
         if fleet_proved {
-            self.fleet_proved(node);
+            self.fleet_proved();
         }
         let Some(replica) = self.machines[node].proc_mut().replicas.get_mut(&key) else {
             return;

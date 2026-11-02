@@ -336,6 +336,30 @@ impl Checker {
         }
     }
 
+    /// Watched: **the activation fence.** `who`'s log credited a fleet
+    /// proof of a cell epoch at `log_epoch` while the bucket's record did
+    /// not yet say that log epoch may have fleet acks. A recovery that read
+    /// it then would seal what it gathered as if nothing had been
+    /// acknowledged (`LiveLogTransitions::activate`).
+    pub fn credit_unactivated(
+        &mut self,
+        t: u64,
+        who: &str,
+        cell: &str,
+        epoch: Epoch,
+        log_epoch: u64,
+    ) {
+        self.watch(
+            t,
+            "credit-before-activation",
+            format!("{who} {log_epoch}"),
+            format!(
+                "{who} credited a fleet proof of {cell} epoch {epoch} at log epoch {log_epoch} \
+                 before its record said it may have fleet acks"
+            ),
+        );
+    }
+
     /// Watched: **a bundle credits only what the bucket holds.** `who`
     /// credited `len` writes of a cell epoch to a bundle: the bucket must
     /// hold them, in a prefix or a bundle a recovery can still drain. One

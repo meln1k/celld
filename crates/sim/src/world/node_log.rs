@@ -16,6 +16,12 @@
 //!   (`bundle_credit_allowed`), and otherwise degrades its shipper: a
 //!   fenced leader's late bundle proves nothing. No restore reads bundles; a stop's final upload, a fold and a
 //!   recovery copy their rows into the per-cell prefixes.
+//! - The first fleet proof of each log epoch waits for the activation
+//!   fence: the shell publishes the record with `may_have_fleet_acks` and
+//!   nudges the core into renewing (`NudgeNodeLease`), and credits the
+//!   proofs only once an applied lease write carried it. That flag is what
+//!   recovery and folds read. Without one within 10 s, the shipper
+//!   degrades and the proofs never credit.
 //! - When a node takes over a cell from a dead owner whose lease says its
 //!   log is not sealed, the core asks for `RecoverNodeLog` first. Recovery
 //!   seals every follower it can reach, so the dead leader can never again
@@ -65,6 +71,9 @@ const FLUSH_MS: u64 = 2_000;
 const FOLLOWERS: usize = 2;
 /// One-way latency between two nodes.
 const PEER_MS: (u64, u64) = (1, 5);
+/// How long an activation waits for a lease write to carry it before the
+/// session counts as fenced (`OwnLog::write`).
+const ACTIVATION_MS: u64 = 10_000;
 /// How long an append may stay unconfirmed before its member counts as
 /// failed and the shipper degrades (`log_evict`'s backstop).
 const APPEND_BACKSTOP_MS: u64 = 1_500;
@@ -90,6 +99,28 @@ pub(super) struct Log {
     floor: BTreeMap<(String, Epoch), usize>,
     /// A bundle flush is in flight: the loop awaits it before its next.
     bundling: bool,
+    /// Whether this log epoch's record says it may have fleet acks.
+    activation: Activation,
+    /// The newest log epoch whose record this process published: a reopen
+    /// publishes the next one before its lease write, and from then on
+    /// no activation of an earlier one applies (`activate` compares the
+    /// published record with its own).
+    published: u64,
+}
+
+/// The activation fence (`LiveLogTransitions::activate`): before the first
+/// fleet credit of a log epoch, a lease write must carry its record with
+/// `may_have_fleet_acks` set, so that a recovery that reads the record
+/// knows the fleet may hold acknowledged writes.
+enum Activation {
+    /// No fleet proof yet at this log epoch.
+    Idle,
+    /// The record is published in memory and the core nudged to renew; the
+    /// proofs made meanwhile wait for an applied lease write to carry it:
+    /// each a cell epoch and how many of its writes the fleet holds.
+    Waiting(Vec<(String, Epoch, usize)>),
+    /// A lease write carrying it applied, and its answer came back.
+    Done,
 }
 
 /// Whether a log ships to its ensemble.
@@ -208,8 +239,11 @@ pub(super) enum LogWork {
         len: usize,
     },
     /// A lease write carrying `Open` applied: the log is open, and the core
-    /// hears of the write.
-    LeaseOpened(Event),
+    /// hears of the write. With `acks`, the body also carried that log
+    /// epoch's record with `may_have_fleet_acks` set.
+    LeaseApplied { event: Event, acks: Option<u64> },
+    /// An activation at `log_epoch` ran out of time.
+    ActivationTimeout { log_epoch: u64 },
     /// The bundle loop's tick.
     Flush,
     /// A bundle flush ended.
@@ -261,9 +295,23 @@ impl World {
             LogWork::Backstop { log_epoch, frame } => self.backstop(node, log_epoch, frame),
             LogWork::Maintain => self.maintain(node),
             LogWork::Reopened(record) => self.reopened(node, record),
-            LogWork::LeaseOpened(event) => {
+            LogWork::LeaseApplied { event, acks } => {
                 self.log_opened(node);
+                if let Some(log_epoch) = acks {
+                    self.activated(node, log_epoch);
+                }
                 self.drive(node, event);
+            }
+            LogWork::ActivationTimeout { log_epoch } => {
+                let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+                    return;
+                };
+                if log.epoch == log_epoch && matches!(log.activation, Activation::Waiting(_)) {
+                    // The proofs waiting on it never credit; the next one
+                    // tries again (`activated` stays false).
+                    log.activation = Activation::Idle;
+                    self.degrade(node, "activation transition not applied");
+                }
             }
             LogWork::Flush => {
                 self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
@@ -360,6 +408,8 @@ impl World {
             shipped: BTreeMap::new(),
             floor: BTreeMap::new(),
             bundling: false,
+            activation: Activation::Idle,
+            published: 1,
         });
         self.work(node, FLUSH_MS, Work::Log(LogWork::Flush));
     }
@@ -385,14 +435,71 @@ impl World {
             .unwrap_or(0)
     }
 
-    /// The fleet just proved a write for this process: its session may
-    /// have fleet acks from now on.
-    pub(super) fn fleet_proved(&mut self, node: usize) {
+    /// The fleet just proved a write for this process.
+    pub(super) fn fleet_proved(&mut self) {
         self.stats.fleet_proofs += 1;
-        if let Some(log) = self.machines[node].proc().log.as_ref() {
-            let session = log.session.clone();
-            self.session_mut(&session).proved = true;
+    }
+
+    /// The log epoch a lease write's body marks as maybe having fleet acks:
+    /// the current one, once its activation began.
+    pub(super) fn activation_stamp(&self, node: usize) -> Option<u64> {
+        let log = self.machines[node].proc().log.as_ref()?;
+        let current = log.published == log.epoch;
+        (current && !matches!(log.activation, Activation::Idle)).then_some(log.epoch)
+    }
+
+    /// A lease write carrying `log_epoch`'s record with
+    /// `may_have_fleet_acks` applies: a recovery reads it from now on, if
+    /// the record is still at that epoch.
+    pub(super) fn apply_activation(&mut self, session: &str, log_epoch: u64) {
+        if let Some(entry) = self.sessions.get_mut(session) {
+            if entry.epoch == log_epoch {
+                entry.proved = true;
+            }
         }
+    }
+
+    /// The answer to a lease write that carried the activation came back:
+    /// credit every proof that waited on it.
+    fn activated(&mut self, node: usize, log_epoch: u64) {
+        let Some(log) = self.machines[node].proc_mut().log.as_mut() else {
+            return;
+        };
+        if log.epoch != log_epoch || !matches!(log.activation, Activation::Waiting(_)) {
+            return;
+        }
+        if log.published != log_epoch {
+            log.activation = Activation::Idle;
+            return self.degrade(node, "activation transition not applied");
+        }
+        let Activation::Waiting(held) = std::mem::replace(&mut log.activation, Activation::Done)
+        else {
+            unreachable!("checked");
+        };
+        for (cell, epoch, fleet) in held {
+            self.fleet_credit(node, &cell, epoch, fleet);
+        }
+    }
+
+    /// The fleet holds `fleet` writes of a cell epoch, and the record says
+    /// it may have fleet acks: credit them to the gate.
+    fn fleet_credit(&mut self, node: usize, cell: &str, epoch: Epoch, fleet: usize) {
+        let who = self.who(node);
+        if let Some(content) = self.seen(node, cell, epoch) {
+            let proved = content[..fleet.min(content.len())].to_vec();
+            self.checker.fleet_proof(self.t, &who, cell, epoch, &proved);
+        }
+        let log = self.machines[node]
+            .proc()
+            .log
+            .as_ref()
+            .expect("a log credits");
+        let (session, log_epoch) = (log.session.clone(), log.epoch);
+        if !self.session(&session).proved {
+            self.checker
+                .credit_unactivated(self.t, &who, cell, epoch, log_epoch);
+        }
+        self.fleet_reached(node, cell, epoch, fleet);
     }
 
     fn session(&self, session: &str) -> &Session {
@@ -588,13 +695,35 @@ impl World {
             })
             .min()
             .unwrap_or(0);
-        if let Some(content) = self.seen(node, &cell, epoch).filter(|_| fleet > 0) {
-            let proved = content[..fleet.min(content.len())].to_vec();
-            let who = self.who(node);
-            self.checker
-                .fleet_proof(self.t, &who, &cell, epoch, &proved);
+        if fleet == 0 {
+            return;
         }
-        self.fleet_reached(node, &cell, epoch, fleet);
+        let early = self.config.mutation == Some(Mutation::CreditBeforeActivation);
+        let log = self.machines[node]
+            .proc_mut()
+            .log
+            .as_mut()
+            .expect("checked");
+        let log_epoch = log.epoch;
+        match &mut log.activation {
+            Activation::Done => return self.fleet_credit(node, &cell, epoch, fleet),
+            Activation::Waiting(held) => held.push((cell.clone(), epoch, fleet)),
+            Activation::Idle => {
+                // Publish the record with the flag and nudge the core into
+                // renewing now; the next applied lease write carries it.
+                log.activation = Activation::Waiting(vec![(cell.clone(), epoch, fleet)]);
+                let timeout = Work::Log(LogWork::ActivationTimeout { log_epoch });
+                self.work(node, ACTIVATION_MS, timeout);
+                let nudge = Event::NudgeNodeLease {
+                    now_ms: 0,
+                    now_mono_ms: 0,
+                };
+                self.deliver(node, 1, nudge);
+            }
+        }
+        if early {
+            self.fleet_credit(node, &cell, epoch, fleet);
+        }
     }
 
     /// A bundle's PUT applies, and its rows are in the bucket whatever

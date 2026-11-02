@@ -13,7 +13,7 @@
 use super::super::replicator::Tail;
 use super::super::shell::StoreReq;
 use super::super::{Work, World};
-use super::{LogWork, Posture, FOLLOWERS};
+use super::{Activation, LogWork, Posture, FOLLOWERS};
 use crate::Mutation;
 use celld_logic::log_tier::LogState;
 use celld_logic::Epoch;
@@ -98,6 +98,7 @@ impl World {
             .as_mut()
             .expect("checked");
         log.posture = Posture::Reopening;
+        log.published = log.epoch + 1;
         let req = StoreReq::Reopen {
             session: log.session.clone(),
             from: log.epoch,
@@ -164,7 +165,9 @@ impl World {
             return;
         };
         log.epoch = epoch;
+        log.published = log.published.max(epoch);
         log.posture = Posture::Shipping;
+        log.activation = Activation::Idle;
         log.confirmed.clear();
         log.floor = log.shipped.clone();
         let session = log.session.clone();

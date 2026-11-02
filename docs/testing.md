@@ -286,13 +286,16 @@ core, not to the simulator or to the property itself.
   not hold, neither in a prefix nor in a bundle a recovery can still drain.
 - **fleet-proof-unbacked**: a fleet proof covered writes that a follower of
   the log's newest ensemble never fsynced.
+- **credit-before-activation**: a fleet proof credited the gate at a log
+  epoch whose record in the bucket did not yet say it may have fleet acks.
 
 **deploy-stuck**, **idle-not-evicted**, **memory-not-relieved** and
 **reopen-stuck** judge only
 once the fleet is quiet, 15 s after the faults end, so that a bucket call lost
 just before the end has timed out. The others judge at the moment their fact
 arrives. **unclaimed-handoff**, **base-deleted**, **unjustified-loss**,
-**bundle-credit-unheld** and **fleet-proof-unbacked** have never fired on the
+**bundle-credit-unheld**, **fleet-proof-unbacked** and
+**credit-before-activation** have never fired on the
 current simulator, and **alarm-undiscoverable** fires only after a known
 bug lost the write behind it, so each has a planted bug that the test suite
 requires it to catch, as it does for an enforced check. The sweep below is the evidence that the others can
@@ -370,7 +373,8 @@ The core on `main` fails some seeds.
   only its node's followers and bundles hold, and only that node's tail
   names. When the cell next activates there, `fold_cell` finds no complete
   follower (the one that has every frame is down) and fails the
-  activation, as it must, or the restore's bucket read fails. The core then
+  activation, as it must, or the restore's bucket read fails, or a drain
+  stops the activation before its restore runs (swarm 89631). The core then
   gives the cell away, by rebalance or release, and the peer that adopts
   it restores from the bucket alone: nothing folds the first node's tail
   for it, so the acknowledged writes are gone (swarm 92204, 32015).

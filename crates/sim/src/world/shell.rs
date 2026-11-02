@@ -77,6 +77,9 @@ pub(super) enum StoreReq {
         guard: CasGuard,
         record: NodeLeaseRecord,
         load: Load,
+        /// The log epoch whose record the body carries with
+        /// `may_have_fleet_acks` set, once an activation asked for it.
+        acks: Option<u64>,
     },
     /// The fleet's leases, to place an unowned cell on a peer with room.
     ReadCapacityPeers {
@@ -203,11 +206,13 @@ impl World {
                     let remaining = expires_ms.saturating_sub(self.wall(node));
                     (remaining / 2).clamp(250, 2_500)
                 });
+                let acks = self.activation_stamp(node);
                 let req = StoreReq::CasLease {
                     op,
                     guard,
                     record,
                     load,
+                    acks,
                 };
                 self.store_call_within(node, req, timeout)
             }
@@ -663,10 +668,15 @@ impl World {
                 guard,
                 record,
                 load,
+                acks,
             } => {
                 let result = self.store.cas_lease(&guard, &record, load);
                 let opened = matches!(result, LeaseCasOutcome::Applied { .. })
                     && record.log_state == Some(LogState::Open);
+                let acks = acks.filter(|_| opened);
+                if let Some(log_epoch) = acks {
+                    self.apply_activation(&record.generation, log_epoch);
+                }
                 let event = Event::NodeLeaseCasCompleted {
                     op,
                     now_mono_ms: 0,
@@ -674,7 +684,7 @@ impl World {
                     stamped_log_state: record.log_state,
                 };
                 match opened {
-                    true => Work::Log(LogWork::LeaseOpened(event)),
+                    true => Work::Log(LogWork::LeaseApplied { event, acks }),
                     false => core(event),
                 }
             }

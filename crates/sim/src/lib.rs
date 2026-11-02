@@ -232,10 +232,14 @@ pub enum Mutation {
     /// that might come back, forgiving writes their disks still hold.
     /// Caught by `unjustified-loss`.
     LossWithoutWaiting,
+    /// A fleet proof credits the gate as soon as the followers confirm,
+    /// without waiting for the lease write that marks the record as maybe
+    /// having fleet acks. Caught by `credit-before-activation`.
+    CreditBeforeActivation,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 27] = [
+    pub const ALL: [Mutation; 28] = [
         Mutation::IgnoreCasGuard,
         Mutation::PhantomClaim,
         Mutation::SkipPublish,
@@ -263,6 +267,7 @@ impl Mutation {
         Mutation::CreditAfterSeal,
         Mutation::ReopenUntiered,
         Mutation::LossWithoutWaiting,
+        Mutation::CreditBeforeActivation,
     ];
 }
 
