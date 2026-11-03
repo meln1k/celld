@@ -315,7 +315,7 @@ second apart, longer than a run. The other six (`StartTimedOut`,
 `AlarmTimerDroppedFenced`, `AlarmCancelledEviction`) are branches no
 simulated schedule reaches yet. A fix to any of them needs a schedule that
 takes it first. Some are taken rarely: a swap stop on a draining node (the
-lost-write bug below) in 4 seeds, a dormant cell released with sockets
+lost-write fix below) in 4 seeds, a dormant cell released with sockets
 parked on it in 3.
 
 Each check has a planted bug (`Mutation` in `crates/sim/src/lib.rs`) in the
@@ -519,16 +519,6 @@ The core on `main` fails some seeds.
   none, so the owner goes on acknowledging writes the claim then restores
   without (swarm 38836, after a 0.9 s step against a 5 s lease). A VM
   suspend does the same (swarm 40737).
-- **A drain releases a cell it stopped for a generation swap**
-  (**lost-write**). A swap stop is the first half of moving a cell to a new
-  isolate: it runs no durability barrier and leaves the database open
-  (`StopCause::Swap` in `crates/celld/actor.rs`), because the same epoch
-  starts again at once. If the node begins draining between the two
-  halves, `runtime_stopped` parks the cell `Dormant`, and the drain releases
-  its owner record like any other dormant cell's. Nothing uploaded the
-  writes that only the log or a bundle proved, so the peer that takes the
-  cell restores from the bucket without them (swarm 90585). Compaction
-  narrows this to the rows a bundle covered since the last round.
 - **A degraded log waits forever on a tail** (**liveness**,
   **alarm-not-fired**). A leader whose follower missed a frame degrades,
   and reopens its log only once the bucket holds every row it shipped
@@ -742,6 +732,26 @@ nearly all of them seeds that lost writes before, and 22 and 27 a wedged
 walk-down. Two seeds that lost writes before (swarm 515, 6074) now stop on
 the known release-ceiling invariant instead, in a debug build only. No
 failure kind is new.
+
+A drain used to release a cell it had stopped for a generation swap. A
+swap stop is the first half of moving a cell to a new isolate: it runs no
+durability barrier and leaves the database open, because the same epoch
+starts again at once. When the node began draining between the two
+halves, `runtime_stopped` parked the cell dormant, and the drain released
+its owner record with no proof, as it does for a dormant cell an eviction
+already proved. The writes that only the log and bundles held were gone
+when a peer claimed the cell (swarm 81438: a deploy stopped c0 and c3 on
+n0 for a swap, the drain began in between, c3 restarted, was proved and
+evicted, and c0 was released, so n1 opened epoch 4 without write 543).
+Now the swap's second half runs on a draining node too: the cell restarts
+at the same epoch, and the drain proves and evicts it like any other
+resident (probe `SwapStopWhileDraining`). In 100,000 swarm seeds lost
+writes went from 2 to 1 in a debug build and from 3 to 1 with validation
+compiled out, leaving the slow clean reload (swarm 28200). Swarm 91139,
+blamed on a clock fault above, was this bug: its swap stop on n1 also
+ended after the drain began. Nothing else changed in either mode. With
+drains and deploys raised in every seed of a scratch build, lost writes
+in 10,000 seeds went from 7 to 1, the 1 a superseded resume.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

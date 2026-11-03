@@ -279,7 +279,7 @@ const KNOWN_CORE_PANICS: [&str; 11] = [
 ///   which faulty clocks (a skew, a step, a suspend) or a slow clean reload
 ///   break; or a restore lost an acknowledged write, and reads miss it.
 /// - `lost-write` and `late-ack`, in the fleet posture: after a slow clean
-///   reload, a clock fault, or a drain that releases a swapped cell.
+///   reload or a clock fault.
 /// - `liveness` and `alarm-not-fired`: a node whose memory walk-down wedged
 ///   refuses every new cell, and a fleet at its residency cap evicts nothing
 ///   to make room.

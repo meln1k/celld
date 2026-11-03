@@ -5221,22 +5221,23 @@ impl State {
                 // claim epoch+1 before reusing the preserved SQLite image.
                 self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
             }
-            // The node began leaving while the cell was between isolates.
-            // Started again it would only be one more resident for the
-            // drain to evict; dormant, the drain releases its record like
-            // any other.
-            StopCause::Swap if self.draining => {
-                self.probe(Probe::SwapStopWhileDraining);
-                set_phase(&mut self.occupied, &mut cell, Phase::Dormant { epoch });
-                self.finish_requests(&id, &mut cell, Err(RequestError::PublishFailed), effects);
-            }
             // The swap's second half: the same epoch, the same owner record,
             // the same replica, a new isolate. `Starting` without `Restore`
             // is deliberate — the database is open on disk and the LTX
             // handle never closed — and without `CasOwner`, because nothing
             // about ownership changed. Requests queued while the cell
             // quiesced release when it publishes.
+            //
+            // A drain that began between the halves restarts it too. A swap
+            // stop proves nothing, so the cell's last writes may live only in
+            // its log and bundles. Parked dormant, the drain released its
+            // record with no proof and the next owner restored without them
+            // (swarm 81438). Resident again, the drain evicts it through
+            // `EnsureDurable` like any other.
             StopCause::Swap => {
+                if self.draining {
+                    self.probe(Probe::SwapStopWhileDraining);
+                }
                 let op = self.cell_op(&id);
                 set_phase(&mut self.occupied, &mut cell, Phase::Starting { op, epoch });
                 effects.push(Effect::StartRuntime {

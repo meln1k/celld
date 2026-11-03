@@ -119,8 +119,8 @@ probes! {
     ReconcileDeadline,
 
     // Stops and handoffs.
-    /// A swap stop ended on a draining node: the cell parks dormant at the
-    /// same epoch, for the drain to release.
+    /// A swap stop ended on a draining node: the cell starts again at the
+    /// same epoch, for the drain to prove and evict.
     SwapStopWhileDraining,
     /// A request arrived mid-eviction, so the cell activates again.
     EvictionTurnedAround,
