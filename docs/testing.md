@@ -826,6 +826,21 @@ validation compiled out (2). So did every seed whose line in
 replacement no longer counts as its predecessor's writer, so **two-writers**
 now holds a clean reload to one writer per epoch too.
 
+A drain released a cell whose claim here never restored. A node's claim
+can land and park its cell dormant at the claimed epoch with no restore,
+when its demand goes away while the CAS is out. The restore is what folds
+the tail the node's earlier epoch left in its log, so that tail was still
+unfolded, and a drain or the balancer then released the record: the peer
+that adopted it restored from the bucket alone (swarm 138032: n4 reset c3
+at epoch 1, then its claim of epoch 2 hung and came back ambiguous 15 s
+later, after it had applied; the drain released epoch 2 and n0 opened epoch
+3 without a write n4 had acknowledged with a fleet proof). Now such a cell
+keeps its record as one whose restore failed does (`Cell::keeps_record`,
+probe `DormantKeptUnrestored`) until a restore here succeeds. The branch is
+rare: 1 seed in 100,000 swarm seeds takes it besides 138032, and in both
+modes every failing line of those 100,000 is the same as the parent's. The
+suite runs swarm 138032.
+
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
 failing seed of the suite's configurations and of swarm seeds 0..10000, in

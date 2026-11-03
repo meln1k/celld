@@ -526,6 +526,18 @@ struct Cell {
     local_request_count: u64,
 }
 
+impl Cell {
+    /// Whether a drain or the balancer must keep this dormant cell's record
+    /// rather than release it: this node may hold a tail no restore here has
+    /// folded, because the last restore failed or a claim landed without one.
+    /// A peer that adopted a released record would restore from the bucket
+    /// alone and lose those writes; one that takes the cell over from this
+    /// node recovers this node's log first.
+    fn keeps_record(&self) -> bool {
+        self.restore_failed || self.unrestored_claim
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AlarmState {
     Armed {
@@ -5765,7 +5777,7 @@ impl State {
             .iter()
             .filter_map(|(id, cell)| match cell.phase {
                 Phase::Dormant { epoch }
-                    if cell.releasing.is_none() && !cell.restore_failed && is_queue_broker(id) =>
+                    if cell.releasing.is_none() && !cell.keeps_record() && is_queue_broker(id) =>
                 {
                     Some((id.clone(), epoch))
                 }
@@ -5866,16 +5878,24 @@ impl State {
             .cells
             .iter()
             .filter_map(|(id, cell)| match cell.phase {
-                Phase::Dormant { epoch } if cell.releasing.is_none() && !cell.restore_failed => {
+                Phase::Dormant { epoch } if cell.releasing.is_none() && !cell.keeps_record() => {
                     Some((id.clone(), epoch))
                 }
                 _ => None,
             })
             .collect();
         if (self.cells.values())
-            .any(|cell| cell.restore_failed && matches!(cell.phase, Phase::Dormant { .. }))
+            .any(|cell| cell.keeps_record() && matches!(cell.phase, Phase::Dormant { .. }))
         {
             self.probe(Probe::DormantKeptUnfolded);
+        }
+        if (self.cells.values()).any(|cell| {
+            cell.unrestored_claim
+                && !cell.restore_failed
+                && cell.releasing.is_none()
+                && matches!(cell.phase, Phase::Dormant { .. })
+        }) {
+            self.probe(Probe::DormantKeptUnrestored);
         }
         for (id, epoch) in dormant {
             if in_flight >= self.config.max_releases {
@@ -5890,9 +5910,6 @@ impl State {
     /// already stopped, so this is the record write alone.
     fn release_dormant(&mut self, id: &str, epoch: Epoch, effects: &mut Vec<Effect>) {
         self.probe(Probe::DormantReleased);
-        if self.cells.get(id).is_some_and(|cell| cell.unrestored_claim) {
-            self.probe(Probe::DormantReleasedUnrestored);
-        }
         if self
             .cells
             .get(id)
@@ -5955,7 +5972,7 @@ impl State {
             .filter_map(|(id, cell)| match cell.phase {
                 Phase::Dormant { epoch }
                     if cell.releasing.is_none()
-                        && !cell.restore_failed
+                        && !cell.keeps_record()
                         && cell.requests.is_empty()
                         && !self.alarm_is_imminent(cell) =>
                 {
@@ -5965,9 +5982,19 @@ impl State {
             })
             .collect();
         if (self.cells.values())
-            .any(|cell| cell.restore_failed && matches!(cell.phase, Phase::Dormant { .. }))
+            .any(|cell| cell.keeps_record() && matches!(cell.phase, Phase::Dormant { .. }))
         {
             self.probe(Probe::DormantKeptUnfolded);
+        }
+        if (self.cells.values()).any(|cell| {
+            cell.unrestored_claim
+                && !cell.restore_failed
+                && cell.releasing.is_none()
+                && cell.requests.is_empty()
+                && !self.alarm_is_imminent(cell)
+                && matches!(cell.phase, Phase::Dormant { .. })
+        }) {
+            self.probe(Probe::DormantKeptUnrestored);
         }
         dormant.sort_by(|left, right| (left.2, &left.0).cmp(&(right.2, &right.0)));
         for (id, epoch, _) in dormant.into_iter().take(budget) {

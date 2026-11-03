@@ -143,13 +143,13 @@ probes! {
     DormantReleased,
     /// A dormant cell with WebSockets parked on it was released.
     DormantReleasedWithSockets,
-    /// A drain or the balancer kept a dormant cell whose last restore
-    /// failed, rather than release a record a peer would restore without
-    /// the tail this node failed to fold.
+    /// A drain or the balancer kept a dormant cell whose tail no restore
+    /// here has folded, rather than release a record a peer would restore
+    /// without it.
     DormantKeptUnfolded,
-    /// A dormant cell's record was released though its last claim here was
-    /// never followed by a restore, which would have folded this node's tail.
-    DormantReleasedUnrestored,
+    /// Of those, a cell whose claim here landed with no restore, so the
+    /// tail an earlier epoch left in this node's log stays unfolded.
+    DormantKeptUnrestored,
     /// An owner record release outlived its deadline.
     ReleaseDeadline,
     /// A successor's adoption outlived its deadline.

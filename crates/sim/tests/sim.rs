@@ -123,6 +123,19 @@ fn a_restore_links_only_the_epoch_a_paged_epoch_continued() {
 }
 
 #[test]
+fn a_drain_keeps_a_cell_whose_claim_here_never_restored() {
+    // A draining node's claim of c3 hangs and comes back ambiguous after it
+    // applied, with no demand left, so the cell parks dormant at the claimed
+    // epoch unrestored: the tail its reset epoch left in this node's log is
+    // unfolded. Releasing that record let a peer restore without it.
+    let seed = 138_032;
+    let outcome = run(seed, &SimConfig::swarm(seed));
+    assert!(outcome.passed(), "{:?}", outcome.violations);
+    let kept = outcome.probes[celld_logic::Probe::DormantKeptUnrestored as usize];
+    assert!(kept > 0, "the seed no longer reaches the unrestored claim");
+}
+
+#[test]
 fn a_bucket_slower_than_the_lease_never_grants_authority() {
     // A lease write that takes longer than the TTL lands already expired.
     // The core must notice and keep retrying, never believing it holds a
