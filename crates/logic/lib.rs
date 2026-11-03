@@ -4925,6 +4925,9 @@ impl State {
                 });
             }
             Err(_) => {
+                if cell.swapping {
+                    self.probe(Probe::SwapRestartFailed);
+                }
                 set_phase(&mut self.occupied, &mut cell, Phase::Dormant { epoch });
                 self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
                 resume_failed = cell.resume_demand;

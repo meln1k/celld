@@ -122,6 +122,9 @@ probes! {
     /// A swap stop ended on a draining node: the cell starts again at the
     /// same epoch, for the drain to prove and evict.
     SwapStopWhileDraining,
+    /// A swap's restart failed: the runtime is gone, and its database is
+    /// still open at the epoch the swap stopped without a proof.
+    SwapRestartFailed,
     /// A request arrived mid-eviction, so the cell activates again.
     EvictionTurnedAround,
     /// An eviction made for room released the cell's owner record.
