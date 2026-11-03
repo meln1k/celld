@@ -35,9 +35,9 @@ pub enum Step {
     /// Not part of the chain: nothing listed below the cut, or what is
     /// listed does not end at it.
     Skip,
-    /// Part of the chain, serving from `lo`. `base` when it opens at txid
-    /// 1: the walk is over.
-    Link { lo: Txid, base: bool },
+    /// Part of the chain, serving `lo` through `hi`. `base` when it opens
+    /// at txid 1: the walk is over.
+    Link { lo: Txid, hi: Txid, base: bool },
 }
 
 /// The walk down one cell's epochs, newest first.
@@ -67,11 +67,16 @@ impl Walk {
         self.source = Some(source);
     }
 
-    /// Decide on `epoch`, the next one down, given the txids its kept
-    /// objects span (`None` when it kept none). A span may end one short of
-    /// where it starts: an epoch that holds only an opener that takes no
+    /// Decide on `epoch`, the next one down, given the txid range
+    /// `(min, max)` of each of its objects. The walk clips them (`keeps`)
+    /// and links the epoch when what remains ends exactly at the cut. An
+    /// object may end one short of where it starts: an opener that takes no
     /// txid.
-    pub fn visit(&mut self, epoch: Epoch, span: Option<(Txid, Txid)>) -> Step {
+    pub fn visit(&mut self, epoch: Epoch, files: impl IntoIterator<Item = (Txid, Txid)>) -> Step {
+        let kept = files.into_iter().filter(|(_, max)| self.keeps(*max));
+        let span = kept.fold(None, |span: Option<(Txid, Txid)>, (min, max)| {
+            Some(span.map_or((min, max), |(lo, hi)| (lo.min(min), hi.max(max))))
+        });
         let Some((lo, hi)) = span else {
             return Step::Skip;
         };
@@ -86,6 +91,10 @@ impl Walk {
         }
         self.above = Some(lo);
         self.source = None;
-        Step::Link { lo, base: lo == 1 }
+        Step::Link {
+            lo,
+            hi,
+            base: lo == 1,
+        }
     }
 }

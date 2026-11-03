@@ -53,9 +53,9 @@ impl<C: ReplicaClient> EpochChain<C> {
             for files in &mut levels {
                 files.retain(|f| walk.keeps(f.max_txid.0));
             }
-            let lo = levels.iter().flatten().map(|f| f.min_txid.0).min();
-            let hi = levels.iter().flatten().map(|f| f.max_txid.0).max();
-            let Step::Link { lo, base } = walk.visit(epoch, lo.zip(hi)) else {
+            let files = levels.iter().flatten();
+            let ranges = files.map(|f| (f.min_txid.0, f.max_txid.0));
+            let Step::Link { lo, base, .. } = walk.visit(epoch, ranges) else {
                 continue;
             };
             // A continuation's first txid is its marker, which names the

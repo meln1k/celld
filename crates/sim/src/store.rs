@@ -632,23 +632,18 @@ impl Store {
             if !prefix.listed() {
                 continue;
             }
+            // One object per position above the cut, and the marker, which
+            // takes none: it spans nothing, just above the cut.
             let lo = prefix.cut as u64 + 1;
-            // The objects' positions, clipped below the span above.
-            let hi = (lo..=prefix.writes.len() as u64)
-                .rev()
-                .find(|position| walk.keeps(*position));
-            let span = match hi {
-                Some(hi) => Some((lo, hi)),
-                None if prefix.marker && walk.keeps(lo - 1) => Some((lo, lo - 1)),
-                None => None,
-            };
-            let Step::Link { base, .. } = walk.visit(key.1, span) else {
+            let positions = (lo..=prefix.writes.len() as u64).map(|position| (position, position));
+            let marker = prefix.marker.then_some((lo, lo - 1));
+            let files = positions.chain(marker);
+            let Step::Link { hi: ends, base, .. } = walk.visit(key.1, files) else {
                 continue;
             };
             if let Some(source) = prefix.source {
                 walk.continues_from(source);
             }
-            let (_, ends) = span.expect("a linked epoch has a span");
             spans.push(Span {
                 epoch: key.1,
                 cut: prefix.cut,
