@@ -15,7 +15,7 @@ use super::node_log::{Flushed, LogWork};
 use super::replicator::ReplicaWork;
 use super::waker::WakerReq;
 use super::{Item, Work, World, WALL_EPOCH_MS};
-use crate::store::{Load, NoBase, Row};
+use crate::store::{Chain, Load, NoBase, Row};
 use crate::{Mutation, WriteId};
 
 /// The bucket client's timeout for one attempt (`crates/celld/bucket.rs`).
@@ -92,14 +92,13 @@ pub(super) enum StoreReq {
         content: Vec<WriteId>,
     },
     /// A paged activation's marker (`seed_continuation`): the epoch
-    /// continues the chain it restored, whose `head` it names and follows,
+    /// continues the chain it restored, whose head it names and follows,
     /// and the cell serves only once the marker is in the bucket.
     PutMarker {
         op: OpId,
         cell: String,
         epoch: Epoch,
-        content: Vec<WriteId>,
-        head: Option<(Epoch, u64)>,
+        chain: Chain,
     },
     /// A restore reads the newest chain below its epoch, after folding the
     /// cell's tail into the bucket when an epoch here left one
@@ -482,18 +481,18 @@ impl World {
                 op,
                 cell,
                 epoch,
-                content,
-                head,
+                chain,
             } => {
                 self.checker.upload_applied(self.t, &sender, &cell, epoch);
-                (self.store).put_marker(&cell, epoch, &content, head, WALL_EPOCH_MS + self.t);
-                self.checker.bucket_holds(self.t, &cell, epoch, &content);
+                (self.store).put_marker(&cell, epoch, &chain, WALL_EPOCH_MS + self.t);
+                self.checker
+                    .bucket_holds(self.t, &cell, epoch, &chain.writes);
                 self.judge_discoverable(&cell);
                 Work::Replica(ReplicaWork::Marked {
                     op,
                     cell,
                     epoch,
-                    content,
+                    content: chain.writes,
                 })
             }
             StoreReq::ReadChain {
@@ -511,7 +510,6 @@ impl World {
                 // claim was superseded before its restore got here.
                 _ => Work::Replica(ReplicaWork::ChainRead {
                     op,
-                    head: self.store.chain_head(&cell, epoch),
                     chain: match self.store.used_since(&cell, epoch) {
                         true => Err(Failure::Definite),
                         false => {

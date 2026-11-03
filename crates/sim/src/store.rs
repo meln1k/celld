@@ -88,30 +88,46 @@ struct Prefix {
     /// position.
     cut: usize,
     marker: bool,
-    /// The epoch the paged activation continued, as its marker names it.
-    source: Option<Epoch>,
-    /// The marker's txid, one past the chain's last (`seed_continuation`):
-    /// a marker takes a transaction of its own, so a paged epoch's writes
-    /// follow it, and txids run ahead of positions by one per paged epoch
-    /// in the chain. 0 for an epoch that opens at txid 1.
-    marker_txid: u64,
+    /// What a paged epoch's marker records. `None` for an epoch that opens
+    /// at txid 1.
+    continues: Option<Continuation>,
+}
+
+/// A paged epoch's marker (`seed_continuation`): the epoch it continued,
+/// and the marker's own txid, one past that chain's last. A marker takes a
+/// transaction of its own, so a paged epoch's writes follow it, and txids
+/// run ahead of positions by one per paged epoch in the chain.
+#[derive(Clone, Copy, Debug)]
+struct Continuation {
+    source: Epoch,
+    txid: u64,
+}
+
+/// A chain a restore read: its writes, base first, and its newest epoch
+/// and last txid (`EpochChain::spans`, `max_txid`), which a paged
+/// activation's marker names and follows.
+#[derive(Clone, Debug)]
+pub struct Chain {
+    pub writes: Vec<WriteId>,
+    pub newest: Epoch,
+    pub hi: u64,
 }
 
 impl Prefix {
     /// The txid of the write at `position` (from 1), above the cut.
     fn txid(&self, position: usize) -> u64 {
-        match self.marker_txid {
-            0 => position as u64,
-            marker => marker + (position - self.cut) as u64,
+        match self.continues {
+            None => position as u64,
+            Some(marker) => marker.txid + (position - self.cut) as u64,
         }
     }
 
     /// The position of the write at `txid`, the inverse of `txid`; the
     /// marker's txid is the cut.
     fn position(&self, txid: u64) -> usize {
-        match self.marker_txid {
-            0 => txid as usize,
-            marker => self.cut + (txid - marker) as usize,
+        match self.continues {
+            None => txid as usize,
+            Some(marker) => self.cut + (txid - marker.txid) as usize,
         }
     }
 
@@ -570,47 +586,32 @@ impl Store {
     }
 
     /// A paged activation's marker (`seed_continuation`): `epoch` continues
-    /// the chain it restored, `content`, from its last position. Uploaded
-    /// before the cell serves, and it counts as covering that position
-    /// (`note_covered`). `head` is the chain's newest epoch and last txid
-    /// (`chain_head`): the marker names that epoch, and takes the next txid.
-    pub fn put_marker(
-        &mut self,
-        cell: &str,
-        epoch: Epoch,
-        content: &[WriteId],
-        head: Option<(Epoch, u64)>,
-        at_ms: u64,
-    ) {
+    /// the chain it restored from its last position. Uploaded before the
+    /// cell serves, and it counts as covering that position
+    /// (`note_covered`). The marker names the chain's newest epoch, and
+    /// takes the txid after its last.
+    pub fn put_marker(&mut self, cell: &str, epoch: Epoch, chain: &Chain, at_ms: u64) {
         let prefix = self.prefixes.entry((cell.to_string(), epoch)).or_default();
-        prefix.cut = content.len();
+        prefix.cut = chain.writes.len();
         prefix.marker = true;
-        prefix.source = head.map(|(source, _)| source);
-        // A planted bug can restore content no chain holds; its marker
-        // follows the content.
-        prefix.marker_txid = head.map_or(content.len() as u64, |(_, hi)| hi) + 1;
-        self.put(cell, epoch, content, at_ms);
-    }
-
-    /// The newest epoch of the chain a restore at `epoch` reads, and the
-    /// chain's last txid (`EpochChain::spans`, `max_txid`): what a paged
-    /// activation's marker names and follows.
-    pub fn chain_head(&self, cell: &str, epoch: Epoch) -> Option<(Epoch, u64)> {
-        let spans = self.spans(cell, epoch).ok()?;
-        spans.first().map(|span| (span.epoch, span.hi))
+        prefix.continues = Some(Continuation {
+            source: chain.newest,
+            txid: chain.hi + 1,
+        });
+        self.put(cell, epoch, &chain.writes, at_ms);
     }
 
     /// What a restore at `epoch` reads: the chain below it. `None` when no
     /// epoch below holds objects.
-    pub fn read_chain(&mut self, cell: &str, epoch: Epoch) -> Result<Option<Vec<WriteId>>, NoBase> {
+    pub fn read_chain(&mut self, cell: &str, epoch: Epoch) -> Result<Option<Chain>, NoBase> {
         let chain = self.chain(cell, epoch)?;
-        let len = chain.as_ref().map_or(0, Vec::len);
+        let len = chain.as_ref().map_or(0, |chain| chain.writes.len());
         let base = self.bases.entry((cell.to_string(), epoch)).or_default();
         *base = (*base).max(len);
         Ok(chain)
     }
 
-    fn chain(&self, cell: &str, epoch: Epoch) -> Result<Option<Vec<WriteId>>, NoBase> {
+    fn chain(&self, cell: &str, epoch: Epoch) -> Result<Option<Chain>, NoBase> {
         let epoch = match self.mutation {
             // The planted bug skips the previous epoch's prefix, the usual
             // source.
@@ -621,14 +622,21 @@ impl Store {
                 let range = (cell.to_string(), 0)..(cell.to_string(), epoch);
                 return Ok((self.prefixes.range(range).rev())
                     .find(|(_, prefix)| prefix.cut == 0 && !prefix.writes.is_empty())
-                    .map(|(_, prefix)| prefix.writes.clone()));
+                    .map(|(key, prefix)| Chain {
+                        writes: prefix.writes.clone(),
+                        newest: key.1,
+                        hi: prefix.txid(prefix.writes.len()),
+                    }));
             }
             _ => epoch,
         };
         let chain = self.chain_below(cell, epoch)?;
         Ok(match (self.mutation, chain) {
-            (Some(Mutation::TornRestore), Some(chain)) if chain.len() >= 2 => {
-                Some(chain[1..].to_vec())
+            // The planted bug drops the chain's first write; the marker of an
+            // epoch paged from it still follows the chain's head.
+            (Some(Mutation::TornRestore), Some(mut chain)) if chain.writes.len() >= 2 => {
+                chain.writes.remove(0);
+                Some(chain)
             }
             (_, chain) => chain,
         })
@@ -637,9 +645,13 @@ impl Store {
     /// The database the chain below `epoch` restores, as the bucket truly
     /// holds it. The oracle reads this, so a planted bug never bends its
     /// view.
-    fn chain_below(&self, cell: &str, epoch: Epoch) -> Result<Option<Vec<WriteId>>, NoBase> {
+    fn chain_below(&self, cell: &str, epoch: Epoch) -> Result<Option<Chain>, NoBase> {
         let spans = self.spans(cell, epoch)?;
-        Ok((!spans.is_empty()).then(|| self.assemble(cell, &spans)))
+        Ok(spans.first().map(|head| Chain {
+            writes: self.assemble(cell, &spans),
+            newest: head.epoch,
+            hi: head.hi,
+        }))
     }
 
     /// `EpochChain::build` over the epochs below `below`, newest first, with
@@ -683,7 +695,8 @@ impl Store {
             // txid.
             let writes =
                 (prefix.cut + 1..=prefix.writes.len()).map(|position| prefix.txid(position));
-            let marker = prefix.marker.then_some(prefix.marker_txid);
+            let continues = prefix.continues.filter(|_| prefix.marker);
+            let marker = continues.map(|marker| marker.txid);
             let files = writes.chain(marker).map(|txid| (txid, txid));
             let Step::Link {
                 lo,
@@ -696,8 +709,8 @@ impl Store {
             };
             // The object at `lo` is the marker only if it is still listed;
             // a write there names nothing, as production reads it.
-            if let (true, Some(source)) = (at_lo && marker == Some(lo), prefix.source) {
-                walk.continues_from(source);
+            if let Some(marker) = continues.filter(|marker| at_lo && marker.txid == lo) {
+                walk.continues_from(marker.source);
             }
             spans.push(Span {
                 epoch: key.1,
@@ -760,7 +773,8 @@ impl Store {
     /// chain holds it. `None` when nothing is listed, `NoBase` when the
     /// chain is broken.
     pub fn newest(&self, cell: &str) -> Result<Option<Vec<WriteId>>, NoBase> {
-        self.chain_below(cell, Epoch::MAX)
+        let chain = self.chain_below(cell, Epoch::MAX)?;
+        Ok(chain.map(|chain| chain.writes))
     }
 
     /// `WakeFlusher::publish`: write the wake entry of an armed alarm.

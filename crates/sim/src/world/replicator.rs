@@ -22,7 +22,7 @@ use super::bucket::StoreReq;
 use super::node_log::{FollowerDisk, Upload};
 use super::stop::Stop;
 use super::{AgendaKey, Work, World};
-use crate::store::Row;
+use crate::store::{Chain, Row};
 use crate::{Mutation, WriteId};
 
 /// The budget for one durability proof (`DEFAULT_DURABILITY_TIMEOUT_SECS`
@@ -183,10 +183,7 @@ pub(super) enum ReplicaWork {
         op: OpId,
         cell: String,
         epoch: Epoch,
-        chain: Result<Option<Vec<WriteId>>, Failure>,
-        /// The chain's newest epoch and last txid, which a paged
-        /// activation's marker names and follows.
-        head: Option<(Epoch, u64)>,
+        chain: Result<Option<Chain>, Failure>,
     },
     /// A paged activation's marker landed: the cell may serve `content`.
     Marked {
@@ -213,8 +210,7 @@ impl World {
                 cell,
                 epoch,
                 chain,
-                head,
-            } => self.chain_read(node, op, cell, epoch, chain, head),
+            } => self.chain_read(node, op, cell, epoch, chain),
             ReplicaWork::Marked {
                 op,
                 cell,
@@ -409,8 +405,7 @@ impl World {
         op: OpId,
         cell: String,
         epoch: Epoch,
-        chain: Result<Option<Vec<WriteId>>, Failure>,
-        head: Option<(Epoch, u64)>,
+        chain: Result<Option<Chain>, Failure>,
     ) {
         // The fold applied with the read: the cell's tails are gone, as
         // `fold_cell`'s success clears its `dirty_tails` entry before
@@ -427,19 +422,19 @@ impl World {
         // demand, and its epoch continues the chain from the cut instead of
         // opening at the first position. Its marker lands before it serves.
         // Its marker names the epoch it continues, the chain's newest.
-        if let Some(content) = chain.clone().filter(|content| !content.is_empty()) {
+        if let Some(paged) = chain.as_ref().filter(|chain| !chain.writes.is_empty()) {
             if self.config.paged > 0.0 && self.page_rng.chance(self.config.paged) {
                 let req = StoreReq::PutMarker {
                     op,
                     cell,
                     epoch,
-                    content,
-                    head,
+                    chain: paged.clone(),
                 };
                 return self.store_call(node, req);
             }
         }
-        self.open_restored(node, op, cell, epoch, chain, false);
+        let content = chain.map(|chain| chain.writes);
+        self.open_restored(node, op, cell, epoch, content, false);
     }
 
     /// Open a database the bucket restored, `None` when it held nothing,
