@@ -135,8 +135,9 @@ pub struct ActivationOptions<'a> {
     /// has written the cell since we evicted it and our preserved local
     /// state is authoritative.
     pub took_over: bool,
-    /// Open the exact existing local epoch after a certified node-level
-    /// handoff. This path performs no remote discovery or restore.
+    /// A clean reload's claim: reuse the database the predecessor process
+    /// proved and closed at `epoch - 1` as this epoch's base, as an eviction
+    /// snapshot is; restore remotely when it is gone.
     pub resume_local: bool,
     /// The owner a takeover displaced, from the record version the acquire
     /// consumed. The node-log takeover interlock recovers that node's log

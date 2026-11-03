@@ -2349,9 +2349,13 @@ impl LtxRepl {
         // epoch's baseline. Eviction removes the LTX metadata, so reopening
         // that SQLite image starts a new writer generation at TXID 1. Pairing
         // it with the same remote epoch would mix that new lineage with the
-        // old tail (#158). A clean process reload is the separate
-        // `resume_local` path: it retains both the live database and its LTX
-        // metadata, so it can safely continue the existing epoch.
+        // old tail (#158). A clean process reload's claim (`resume_local`)
+        // reuses its predecessor's database the same way: that process proved
+        // it durable and closed it in place at the previous epoch, as an
+        // eviction closes its database, so the database becomes that epoch's
+        // eviction snapshot here, and its LTX metadata goes with the rename.
+        // The core claims this epoch from the record that named this node at
+        // the previous one, so no other node has written the cell since.
         // `.evicted` is the current name; `.hibernated` is what releases
         // before 2026-08-05 wrote. Accept both, so an upgrade reuses the
         // snapshots already on disk instead of restoring every cell from the
@@ -2371,27 +2375,25 @@ impl LtxRepl {
                 Some(legacy(&path)).filter(is_file)
             }
         };
-        let local_snapshot = (!fresh && !resume_local)
-            .then(|| previous.and_then(first_present))
-            .flatten();
+        if resume_local && previous.is_some() && is_file(&self.db_path(cell, epoch - 1)) {
+            self.finish_remove_local(cell, epoch - 1, true, Ok(()));
+            info!(
+                cell,
+                epoch, "resuming clean local replica as the previous epoch's snapshot"
+            );
+        }
+        let local_snapshot = (!fresh).then(|| previous.and_then(first_present)).flatten();
 
         // Sample before a restore can replace the path. A non-certified live
         // database can contain rows which a crash or self-fence staged but did
         // not upload, so its local position needs a remote bound.
         let dst_existed = is_file(&dst);
-        let mut restored = resume_local;
+        let mut restored = false;
         let mut remote_restore = None;
         let mut paged_vfs_name: Option<String> = None;
         let mut registration = PagedRegistration(None);
         let mut continuation: Option<Continuation> = None;
-        if resume_local {
-            anyhow::ensure!(
-                is_file(&dst),
-                "clean reload database is missing: {}",
-                dst.display()
-            );
-            info!(cell, epoch, "resumed clean local replica");
-        } else if let Some(snapshot) = local_snapshot {
+        if let Some(snapshot) = local_snapshot {
             self.ltx_host.rename(&snapshot, &dst)?;
             self.preserved
                 .lock()
@@ -2766,9 +2768,8 @@ impl LtxRepl {
         // recreate a post-owner persistence resource. A failed release also
         // keeps its key in the stopped map, so the same gate prevents a second
         // managed handle from installing on the path before owner cleanup.
-        // Keep the on-disk image: a `resume_local` activation owns the clean-reload
-        // baseline, and a restored activation can own LTX metadata that this
-        // losing path cannot safely classify for deletion.
+        // Keep the on-disk image: a restored activation can own LTX metadata
+        // that this losing path cannot safely classify for deletion.
         let (admitted, close_incomplete) = {
             let _close_gate = self.replica_close_gate.lock().unwrap();
             let mut cells = self.cells.lock().unwrap();

@@ -331,25 +331,20 @@ impl World {
 
     pub(super) fn restore(&mut self, node: usize, op: OpId, cell: String, spec: RestoreSpec) {
         if spec.resume_local {
-            // A clean reload: open the predecessor's file where it is.
-            let file = self.machines[node]
-                .disk
-                .live
-                .remove(&(cell.clone(), spec.epoch));
-            let delay = self.net_rng.range(1, 5);
-            let Some(content) = file else {
-                let result = Err(Failure::Definite);
-                return self.deliver(node, delay, Event::RestoreCompleted { op, result });
-            };
-            self.stats.resumed += 1;
-            self.judge_resume(node, &cell, spec.epoch);
-            self.open_replica(node, cell.clone(), spec.epoch, content, true);
-            let event = self.restore_completed(node, op, &cell, spec.epoch, false);
-            return self.deliver(node, delay, event);
+            // A clean reload's claim (`activate_with`): the file the
+            // predecessor proved and closed at the epoch below becomes that
+            // epoch's eviction snapshot, which the restore below reuses. Gone,
+            // the restore reads the bucket.
+            let below = (cell.clone(), spec.epoch - 1);
+            if let Some(content) = self.machines[node].disk.live.remove(&below) {
+                self.stats.resumed += 1;
+                self.judge_resume(node, &cell, spec.epoch);
+                self.machines[node].disk.evicted.insert(below, content);
+            }
         }
         if spec.fresh {
             // Epoch one of a new cell: there is nothing to restore.
-            self.open_replica(node, cell.clone(), spec.epoch, Vec::new(), false);
+            self.open_replica(node, cell.clone(), spec.epoch, Vec::new());
             let delay = self.net_rng.range(1, 5);
             let event = self.restore_completed(node, op, &cell, spec.epoch, false);
             self.deliver(node, delay, event);
@@ -358,7 +353,7 @@ impl World {
             // database: renamed into place, with no bucket read and no fold.
             self.stats.reused += 1;
             self.store.reused(&cell, spec.epoch, content.len());
-            self.open_replica(node, cell.clone(), spec.epoch, content, false);
+            self.open_replica(node, cell.clone(), spec.epoch, content);
             let delay = self.net_rng.range(1, 5);
             let event = self.restore_completed(node, op, &cell, spec.epoch, true);
             self.deliver(node, delay, event);
@@ -452,28 +447,21 @@ impl World {
         let restored = chain.is_some();
         self.stats.restored += 1;
         let chain = chain.unwrap_or_default();
-        self.open_replica(node, cell.clone(), epoch, chain, false);
+        self.open_replica(node, cell.clone(), epoch, chain);
         self.replica_mut(node, &cell, epoch).filling = filling;
         let event = self.restore_completed(node, op, &cell, epoch, restored);
         self.drive(node, event);
     }
 
-    /// Open `cell` at `epoch` with `content`: read from the bucket, or
-    /// `resumed` from the predecessor's file by a clean reload.
-    fn open_replica(
-        &mut self,
-        node: usize,
-        cell: String,
-        epoch: Epoch,
-        content: Vec<WriteId>,
-        resumed: bool,
-    ) {
+    /// Open `cell` at `epoch` with `content`: read from the bucket, or a
+    /// local snapshot.
+    fn open_replica(&mut self, node: usize, cell: String, epoch: Epoch, content: Vec<WriteId>) {
         // Opening an epoch replaces any file a dead process left for it.
         self.machines[node].disk.live.remove(&(cell.clone(), epoch));
         let name = self.machines[node].name.clone();
         let lineage = self
             .checker
-            .replica_opened(self.t, &name, &cell, epoch, &content, resumed);
+            .replica_opened(self.t, &name, &cell, epoch, &content);
         let len = content.len();
         let replica = Replica {
             content,

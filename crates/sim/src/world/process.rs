@@ -38,12 +38,6 @@ impl World {
         let inc = m.inc;
         let resume_generation = m.reload.take();
         self.note(|| format!("start n{node}#{inc} (resuming {resume_generation:?})"));
-        if resume_generation.is_some() {
-            // The predecessor handed its epochs over: they are this
-            // process's to run and to upload into now.
-            let (old, new) = (self.who_at(node, inc - 1), self.who(node));
-            self.checker.reloaded(&old, &new);
-        }
         self.open_log(node);
         let spec = NodeLeaseSpec {
             addr: self.machines[node].name.clone(),

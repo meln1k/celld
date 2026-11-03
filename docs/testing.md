@@ -101,8 +101,10 @@ unserialized, and it releases its claim on the way out. In seeds with a
 balancer, a fresh process runs the first-readiness gate
 (`drain::fleet_status`) over the token and the node leases every second, and
 balances only once it is ready. A node can also be replaced in place: its
-process preserves its cells and exits, and the replacement resumes each
-database at the same epoch without the bucket. An idle eviction or a cleanup
+process preserves its cells and exits, and the replacement reads each
+cell's owner record and, where it still names the node at the database's
+epoch, claims the next epoch and reuses the database as that epoch's
+eviction snapshot. An idle eviction or a cleanup
 keeps the closed database on its node as an eviction snapshot, and the
 node's next activation of the cell opens it instead of reading the bucket,
 unless that activation took the cell over. An eviction or a cleanup stops
@@ -335,8 +337,8 @@ Some properties are only watched. A hit is printed (`WATCH`) but never fails a
 run. A property is enforced only once every hit a sweep finds traces to the
 core, not to the simulator or to the property itself.
 
-- **resumed-superseded**: a clean reload resumed a database while the owner
-  record named another node or a newer epoch.
+- **resumed-superseded**: a clean reload reused a database while the owner
+  record named another node or another epoch.
 - **audit-alarm-not-fired**: when the audit ends, a cell's newest durable
   database still holds an alarm that came due more than 10 s earlier.
 - **claim-during-shutdown**: a claim sent while its node was draining or
@@ -442,8 +444,8 @@ never fired, so nothing yet shows that it can. In 100,000 swarm seeds:
   120 s (swarm 91: n1 crashed mid-drain holding the token, and n0, waiting
   15 s for it, took over a cell n1's next process released).
 - 49 seeds (54 with validation compiled out) resumed a superseded epoch:
-  after faulty clocks, the slow clean reload below, or a claim during a
-  preserve. Fewer seeds reload cleanly than before: a node that has evicted a
+  after faulty clocks, the slow clean reload (since fixed, below), or a
+  claim during a preserve. Fewer seeds reload cleanly than before: a node that has evicted a
   cell to a snapshot never does (the shell bug below).
 - 1,601 seeds (1,830 with validation compiled out) fired an alarm the core
   had no due report of. Both causes are in the core, and both are
@@ -468,7 +470,7 @@ never fired, so nothing yet shows that it can. In 100,000 swarm seeds:
   when the audit ended, every one in a run where a memory walk-down wedged.
 - 61 seeds lost a proven alarm handler commit (79 with validation
   compiled out), all after a failed activation handed the cell away, the
-  slow clean reload below, a clock fault, or a drain that released a
+  slow clean reload (since fixed), a clock fault, or a drain that released a
   swapped cell: the same failures that lose acknowledged writes, seen
   through an alarm.
 - 126 seeds (158 with validation compiled out) left a degraded log
@@ -509,18 +511,6 @@ The core on `main` fails some seeds.
   suspend, which `CLOCK_MONOTONIC` does not count, does the same. Writes
   stay safe. The test suite excuses a stale read only in a run with skewed,
   stepped or suspended clocks, and runs chaos with true clocks too.
-- **Stale reads after a slow clean reload.** A replacement process decides
-  to resume its databases in place when it reads its predecessor's lease
-  unexpired, not when its own lease write lands. If that write lands
-  after the old lease expired, a peer may already have taken a cell over
-  at a newer epoch, and the replacement serves reads from the old one.
-  One seed in 100,000 (swarm 77423) needs no clock fault for this; the
-  suite's seeds do not hit it, so one that did would fail. In the fleet
-  posture it loses writes too (**late-ack**, **lost-write**): a fleet proof
-  needs no read of the owner record, so the replacement acknowledges writes
-  at the superseded epoch. A peer that read the predecessor's sealed lease
-  takes the cell over without recovering the replacement's log (swarm
-  58613, 77423).
 - **Lost writes with faulty clocks in the fleet posture.** A peer whose wall
   clock has stepped ahead by most of a lease judges a live owner's lease
   expired, recovers its log and later claims the cell. With bucket proofs the
@@ -700,7 +690,8 @@ newly lost writes followed a failed fold (56) or a failed bucket read (2),
 and every one that newly failed on liveness or `alarm-not-fired` a wedged
 walk-down (299), a late fold (26) or the capacity livelock (11). One seed
 (swarm 98934) acknowledged a write late: a replacement resumed a cell in
-place after a peer had taken it over, the slow clean reload above.
+place after a peer had taken it over, the slow clean reload (since fixed,
+below).
 
 Recovery then got its claim and ran step by step, and a boot started
 waiting out its predecessor's lease, as production's does. In 10,000 swarm
@@ -804,6 +795,36 @@ where it fired and no other: of the 2,200 reference runs, the 57 whose
 hash changed all failed a swap restart, and so did every seed whose line
 in `known-failures.txt` changed (47 in a debug build, 11 with validation
 compiled out), each to another known failure.
+
+A clean reload resumed its databases on its node lease alone. The
+replacement opened each database at its predecessor's epoch with no read of
+the owner record, taking its node lease CAS, guarded on the predecessor's
+ETag, as proof that no peer had taken the cell. A takeover CASes the cell's
+record, not the node's lease, and judges the lease by its own clock, so a
+replacement whose lease write landed late, or with little of the lease left
+and a peer's clock ahead, served a cell that peer had already taken: stale
+reads, and in the fleet posture writes acknowledged at the superseded epoch
+and lost (swarm 502: 137 ms of a 5 s lease left, a peer 420 ms ahead). Now
+a resumed cell reads its record and claims the next epoch from it, as a
+wake does; only a claim from this node at the database's epoch reuses the
+database, which becomes that epoch's eviction snapshot (the probe
+`ResumeSuperseded` marks the cells a peer took, 41 seeds in 10,000). The CAS
+orders the resume and any takeover, whatever the clocks say, and every
+activation now advances the epoch. In 100,000 swarm seeds, lost writes went
+from 1 to 0 and late acknowledgements from 5 to 0 in both modes, lost proven
+alarm commits from 9 to 0, and resumes of a superseded epoch from 50 to 3
+(53 to 4 with validation compiled out). Each of those left paused or
+suspended between its claim and its restore while a peer took the cell
+over, as any activation can, and none breaks a safety check. No failure
+kind is new, and stale reads (366 to 335, 428 to 395) and liveness failures
+(961 to 927, 1,100 to 1,065) went down. Every seed that newly fails ran a
+clean reload, and fails a known way: a stale read with a clock fault or a
+suspend (17), a wedged walk-down (102), a fold that finds no complete
+follower (13), the capacity livelock (10), or `evicted-pinned` with
+validation compiled out (2). So did every seed whose line in
+`known-failures.txt` changed; swarm 502 and 2457 no longer fail. A
+replacement no longer counts as its predecessor's writer, so **two-writers**
+now holds a clean reload to one writer per epoch too.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

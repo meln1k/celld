@@ -55,7 +55,6 @@ pub struct Checker {
     uploaders: BTreeMap<(String, Epoch), String>,
     /// Each clean-reload process, and the preserved one it took over from.
     /// The two are one writer: they share the node's database files.
-    predecessors: BTreeMap<String, String>,
     /// What each cell epoch's database held when a node opened it. The
     /// newest open of an epoch wins, so a crashed epoch's reopen counts.
     opened: BTreeMap<(String, Epoch), BTreeSet<WriteId>>,
@@ -229,10 +228,9 @@ impl Checker {
         }
     }
 
-    /// Watched: **a resume never follows a takeover.** A clean reload opens
-    /// its predecessor's file without reading the owner record
-    /// (`docs/guarantees.md`). That is safe only while the record still
-    /// names this node at the file's epoch.
+    /// Watched: **a resume never follows a takeover.** A clean reload reuses
+    /// its predecessor's file only through its own claim of the next epoch,
+    /// so when it opens, the record names this node at that epoch.
     pub fn resumed(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch, owner: String) {
         self.watch(
             t,
@@ -696,8 +694,7 @@ impl Checker {
     /// would be two histories of the cell under one name, and a restore
     /// would read whichever it found.
     pub fn runtime_started(&mut self, t: u64, node: &str, who: &str, cell: &str, epoch: Epoch) {
-        let writer = self.writer(who);
-        if let Some(first) = first_writer(&mut self.runtimes, &writer, cell, epoch) {
+        if let Some(first) = first_writer(&mut self.runtimes, who, cell, epoch) {
             self.violation(
                 t,
                 "two-writers",
@@ -747,8 +744,7 @@ impl Checker {
     /// when it is sent, because a node that lost the cell can still have an
     /// upload on the wire.
     pub fn upload_applied(&mut self, t: u64, who: &str, cell: &str, epoch: Epoch) {
-        let writer = self.writer(who);
-        if let Some(first) = first_writer(&mut self.uploaders, &writer, cell, epoch) {
+        if let Some(first) = first_writer(&mut self.uploaders, who, cell, epoch) {
             self.violation(
                 t,
                 "two-writers",
@@ -767,23 +763,6 @@ impl Checker {
                 format!("{who} reported {cell} evicted with its runtime still published"),
             );
         }
-    }
-
-    /// A preserved process `old` handed its epochs to its replacement
-    /// `new`, which resumes them in place. The two count as one writer, so
-    /// `new` may run and upload into `old`'s epochs, and an upload `old` left
-    /// on the wire may still land.
-    pub fn reloaded(&mut self, old: &str, new: &str) {
-        self.predecessors.insert(new.to_string(), old.to_string());
-    }
-
-    /// The first process of `who`'s chain of clean reloads.
-    fn writer(&self, who: &str) -> String {
-        let mut who = who;
-        while let Some(old) = self.predecessors.get(who) {
-            who = old;
-        }
-        who.to_string()
     }
 
     /// **An open transport pins its cell.** A regular or outbound WebSocket
@@ -983,9 +962,7 @@ impl Checker {
     ///
     /// **A restore is a real state.** What it opens with must be a state
     /// some database of an earlier epoch actually held: a prefix of one of
-    /// its lineages. A hole, a reordering or a foreign write is not. Only a
-    /// clean reload, which `resumed` the predecessor's file, may open with a
-    /// state of this same epoch.
+    /// its lineages. A hole, a reordering or a foreign write is not.
     ///
     /// Returns the lineage this database starts, for `committed`.
     pub fn replica_opened(
@@ -995,13 +972,11 @@ impl Checker {
         cell: &str,
         epoch: Epoch,
         content: &[WriteId],
-        resumed: bool,
     ) -> usize {
-        let below = epoch + u64::from(resumed);
         let real = content.is_empty()
             || self
                 .lineages
-                .range((cell.to_string(), 0)..(cell.to_string(), below))
+                .range((cell.to_string(), 0)..(cell.to_string(), epoch))
                 .flat_map(|(_, lineages)| lineages)
                 .any(|lineage| lineage.starts_with(content));
         if !real {

@@ -97,6 +97,9 @@ probes! {
     RestoreFailed,
     /// A restore failed for a cell a clean reload was resuming.
     ResumeFailed,
+    /// A clean reload found its cell's record no longer naming this node at
+    /// its database's epoch: a peer took it while the process restarted.
+    ResumeSuperseded,
     /// A runtime start outlived its deadline.
     StartTimedOut,
     /// A publish failed.

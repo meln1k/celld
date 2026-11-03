@@ -50,7 +50,6 @@ enum Activation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ColdStart {
     ReadOwner,
-    Restore(RestoreSpec),
 }
 
 /// What a node does for a cell that needs a residency slot it does not have.
@@ -93,8 +92,11 @@ pub struct RestoreSpec {
     /// Ownership was seized from a different node (or a released record), so
     /// a previous local eviction cache is not authoritative.
     pub took_over: bool,
-    /// The node-level lease handoff proved that this exact local epoch remains
-    /// authoritative. The adapter must not consult the remote replica.
+    /// A clean reload's claim: the record named this node at `epoch - 1`,
+    /// the epoch of the database the predecessor process proved durable and
+    /// closed in place, and the claim's CAS moved it from there. That
+    /// database is this epoch's base, as an eviction snapshot is; without
+    /// it, the adapter restores from the bucket.
     pub resume_local: bool,
     /// The owner the takeover displaced — the node named by the record
     /// version the acquire consumed — for the node-log takeover interlock.
@@ -454,6 +456,9 @@ struct Cell {
     alarm_wake: bool,
     /// Startup, rather than a request or alarm, demands this activation.
     resume_demand: bool,
+    /// A clean reload left this cell's database here at this epoch. Its
+    /// claim may reuse it (`resumes_local`).
+    resume_epoch: Option<Epoch>,
     /// The cell's last restore here failed, and none has succeeded since.
     /// A restore folds the tail an earlier epoch of this node's log left,
     /// and a failed fold leaves it unfolded: acknowledged writes that only
@@ -620,6 +625,7 @@ impl Default for Cell {
             alarm_source: None,
             alarm_wake: false,
             resume_demand: false,
+            resume_epoch: None,
             restore_failed: false,
             confirming: false,
             isolate: None,
@@ -1504,17 +1510,7 @@ impl State {
             }
         }
         for (id, cell) in &self.cells {
-            if cell.resume_demand
-                && !matches!(
-                    cell.phase,
-                    Phase::WaitingActivation
-                        | Phase::WaitingCapacity
-                        | Phase::Restoring { .. }
-                        | Phase::Starting { .. }
-                        | Phase::Publishing { .. }
-                        | Phase::Fenced
-                )
-            {
+            if cell.resume_demand && !resume_in_flight(&cell.phase) {
                 return Err(format!(
                     "cell {id:?} retains resume demand in terminal phase {:?}",
                     cell.phase
@@ -2028,13 +2024,6 @@ impl State {
                     cell: id.to_string(),
                 });
             }
-            ColdStart::Restore(spec) => self.activate_or_wait(
-                id,
-                cell,
-                Activation::Restore(spec),
-                WhenFull::ShedToAdmit,
-                effects,
-            ),
         }
     }
 
@@ -2085,14 +2074,8 @@ impl State {
                 && !cell.resume_demand
                 && !cell.confirming
             {
-                set_phase(
-                    &mut self.occupied,
-                    &mut cell,
-                    match start {
-                        ColdStart::ReadOwner => Phase::Inactive,
-                        ColdStart::Restore(spec) => Phase::Dormant { epoch: spec.epoch },
-                    },
-                );
+                let ColdStart::ReadOwner = start;
+                set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
             } else {
                 self.activation_permits.insert(id.clone());
                 self.begin_cold_route(&id, &mut cell, start, effects);
@@ -2101,9 +2084,13 @@ impl State {
         }
     }
 
-    /// Adopt the exact epochs encoded by a clean predecessor's local paths.
-    /// The node lease CAS that caused this event is the ownership proof, so
-    /// this path deliberately emits no per-cell ownership effects.
+    /// Wake every cell a clean predecessor left on disk. The node lease CAS
+    /// proves nothing about them: a peer's takeover CASes the cell's owner
+    /// record, not this node's lease, and judges the lease by its own clock.
+    /// So each cell reads its record and claims the next epoch from it, as a
+    /// wake does; only a claim from this node at the database's epoch reuses
+    /// the database (`resumes_local`). The CAS orders the resume and any
+    /// takeover, whatever the clocks say.
     fn local_cells_read(
         &mut self,
         result: Result<Vec<LocalCell>, Failure>,
@@ -2131,21 +2118,11 @@ impl State {
         for local in cells {
             let mut cell = Cell {
                 resume_demand: true,
+                resume_epoch: Some(local.epoch),
                 ..Cell::default()
             };
             self.resuming_cells.insert(local.id.clone());
-            self.admit_or_queue_activation(
-                &local.id,
-                &mut cell,
-                ColdStart::Restore(RestoreSpec {
-                    epoch: local.epoch,
-                    fresh: false,
-                    took_over: false,
-                    resume_local: true,
-                    prior: None,
-                }),
-                effects,
-            );
+            self.admit_or_queue_activation(&local.id, &mut cell, ColdStart::ReadOwner, effects);
             self.cells.insert(local.id, cell);
         }
         if self.resuming_cells.is_empty() {
@@ -2200,7 +2177,30 @@ impl State {
         }
         if let Some(cell) = self.cells.get_mut(id) {
             cell.resume_demand = false;
+            cell.resume_epoch = None;
         }
+    }
+
+    /// Retire the resume demand of every cell whose activation ended other
+    /// than by starting its runtime: its record named someone else, its
+    /// claim failed, or it settled dormant. Each path that ends one need not
+    /// know it was a resume.
+    fn settle_ended_resumes(&mut self) {
+        let ended: Vec<CellId> = (self.resuming_cells.iter())
+            .filter(|id| (self.cells.get(*id)).is_none_or(|cell| !resume_in_flight(&cell.phase)))
+            .cloned()
+            .collect();
+        for id in ended {
+            self.settle_local_resume(&id);
+        }
+    }
+
+    /// Whether a claim's restore may reuse the clean reload's database: the
+    /// claim moved a record that named this node at that database's epoch.
+    fn resumes_local(&self, cell: &Cell, claim: &Claim) -> bool {
+        !claim.takeover
+            && claim.prior.as_deref() == Some(self.node.as_str())
+            && (cell.resume_epoch).is_some_and(|epoch| epoch.checked_add(1) == Some(claim.epoch))
     }
 
     /// A leaving node can still discover a live successor, but it must not
@@ -3884,15 +3884,8 @@ impl State {
             && !cell.resume_demand
             && cell.phase == Phase::WaitingActivation
         {
-            let start = cell.waiting_activation.take();
-            set_phase(
-                &mut self.occupied,
-                cell,
-                match start {
-                    Some(ColdStart::Restore(spec)) => Phase::Dormant { epoch: spec.epoch },
-                    _ => Phase::Inactive,
-                },
-            );
+            cell.waiting_activation = None;
+            set_phase(&mut self.occupied, cell, Phase::Inactive);
             self.activation_waiters.retain(|queued| queued != &id);
         } else if cell.requests.is_empty()
             && !cell.alarm_wake
@@ -3929,10 +3922,7 @@ impl State {
         for id in ids {
             let mut cell = self.cells.remove(&id).expect("id came from map");
             let fallback = match &cell.phase {
-                Phase::WaitingActivation => match cell.waiting_activation.as_ref() {
-                    Some(ColdStart::Restore(spec)) => Some(Phase::Dormant { epoch: spec.epoch }),
-                    _ => Some(Phase::Inactive),
-                },
+                Phase::WaitingActivation => Some(Phase::Inactive),
                 Phase::ReadingOwner { .. }
                 | Phase::ReadingNodeLease { .. }
                 | Phase::RecoveringOwnerLog { .. }
@@ -4120,6 +4110,17 @@ impl State {
             Phase::ReconcilingAcquire { claim, .. } => Some(claim.clone()),
             _ => None,
         };
+        // A clean reload's record no longer names this node at its
+        // database's epoch: a peer took the cell, or it moved on. The local
+        // copy is stale; the cell resolves as any other does.
+        if let (Some(epoch), None) = (cell.resume_epoch, &reconciling_claim) {
+            let current = matches!(&result, Ok(Some(record))
+                if record.node.as_deref() == Some(self.node.as_str()) && record.epoch == epoch);
+            if !current {
+                self.probe(Probe::ResumeSuperseded);
+                cell.resume_epoch = None;
+            }
+        }
         // A reconcile re-reads and then acquires again: one attempt
         // continuing, not a new one. The count has to survive the round trip
         // or the bound below can never be reached.
@@ -4142,7 +4143,8 @@ impl State {
                     took_over: reconciling_claim
                         .as_ref()
                         .is_some_and(|claim| claim.takeover),
-                    resume_local: false,
+                    resume_local: (reconciling_claim.as_ref())
+                        .is_some_and(|claim| self.resumes_local(&cell, claim)),
                     // The ambiguous acquire applied after all, so the prior
                     // owner it displaced is the one the claim carried — the
                     // takeover interlock must see it exactly as if the CAS
@@ -4709,7 +4711,7 @@ impl State {
                     epoch: claim.epoch,
                     fresh: matches!(claim.guard, CasGuard::Absent),
                     took_over: claim.takeover,
-                    resume_local: false,
+                    resume_local: self.resumes_local(&cell, &claim),
                     prior: claim.prior.clone(),
                 };
                 self.record_acquisition(&spec);
@@ -6151,11 +6153,9 @@ impl State {
         let Some(queued) = self.cells.get_mut(cell) else {
             return;
         };
-        let start = queued.waiting_activation.take();
-        let activation = queued.waiting_for.take();
-        let dormant = match (start, activation) {
-            (Some(ColdStart::Restore(spec)), _) => Some(spec.epoch),
-            (_, Some(Activation::Restore(spec))) => Some(spec.epoch),
+        queued.waiting_activation = None;
+        let dormant = match queued.waiting_for.take() {
+            Some(Activation::Restore(spec)) => Some(spec.epoch),
             _ => None,
         };
         let settles_resume = queued.resume_demand;
@@ -7073,6 +7073,7 @@ pub fn on_event(state: &mut State, event: Event) -> Vec<Effect> {
         Event::ReleaseAll => state.release_all(&mut effects),
         Event::Rebalance { cells } => state.rebalance(cells, &mut effects),
     }
+    state.settle_ended_resumes();
     state.pump_activations(&mut effects);
     state.pump_release(&mut effects);
     state.pump_swap(&mut effects);
@@ -7081,6 +7082,24 @@ pub fn on_event(state: &mut State, event: Event) -> Vec<Effect> {
     }
     state.arm_operation_deadlines(&mut effects);
     effects
+}
+
+/// The phases a clean reload's activation passes through before its runtime
+/// starts.
+fn resume_in_flight(phase: &Phase) -> bool {
+    matches!(
+        phase,
+        Phase::WaitingActivation
+            | Phase::ReadingOwner { .. }
+            | Phase::ReadingCapacity { .. }
+            | Phase::WaitingCapacity
+            | Phase::Acquiring { .. }
+            | Phase::ReconcilingAcquire { .. }
+            | Phase::Restoring { .. }
+            | Phase::Starting { .. }
+            | Phase::Publishing { .. }
+            | Phase::Fenced
+    )
 }
 
 fn is_queue_broker(id: &str) -> bool {

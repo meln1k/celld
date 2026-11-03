@@ -93,7 +93,10 @@ Each cell has one ownership record in the bucket. It names the owner node's
 session and carries a fencing epoch. A node acquires a cell with a conditional
 create when no record exists, or a compare-and-swap on an existing record, so
 two nodes cannot acquire the same cell. Every activation, a takeover or a local
-wake, advances the epoch, so an epoch never has two writers.
+wake, advances the epoch, so an epoch never has two writers. A preserved restart
+is a local wake too: it claims each cell's next epoch from the record before it
+reuses the database its predecessor closed, so a peer that took the cell in
+between keeps it, whatever either node's clock says.
 
 The record is `cells/<cell>/own.json`. celld never deletes it, and it must stay
 in the bucket for the life of the cell. A missing record next to LTX under
@@ -113,8 +116,8 @@ write takes a bucket proof. celld detects the loss only from LTX under
 the cell empty.
 
 To restore the cell, first stop each node that served the cell with SIGTERM, not
-with `POST /shutdown?handoff=preserve`. A preserved restart resumes its cells
-without a read of the record, so the node keeps serving the cell. No peer can
+with `POST /shutdown?handoff=preserve`. A preserved restart claims its cells
+again from the record, which still names it, so the node keeps serving the cell. No peer can
 acquire the cell, so its handoff cannot complete: the stop can take the whole
 `CELLD_SHUTDOWN_TOTAL_MS` and log `shutdown_handoff_stalled`.
 
