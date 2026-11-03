@@ -128,7 +128,8 @@ production can turn the fill off, and such a cell pins epoch GC for as long
 as it stays open. Page faults themselves are not modelled: a paged cell
 holds its whole database from the start. A deploy moves a node's resident
 cells onto a new application generation, which restarts each runtime on its
-open database. A write can set or clear its cell's alarm, which lives in the
+open database; in half of the swarm seeds, some of those restarts fail
+during the chaos window, as new code that does not load would. A write can set or clear its cell's alarm, which lives in the
 database like any other write, with its installation id: opening the
 database at a new epoch moves the id into that epoch, as production's wake
 record does. Its wake entry goes to the bucket, a timer fires it on the
@@ -774,6 +775,29 @@ simulator share) links only that epoch below it. A marker written before
 names none and keeps the old rule. The bug was rare in a sweep, 3 seeds in
 3,000,000 (240955, 1744217, 2889492), because it needs a bucket restore,
 paging, and a pause or suspend at once; the suite runs those three seeds.
+
+A swap's failed restart parked its cell dormant with no proof. The swap
+stop proves nothing and leaves the database open, so when the new
+generation's runtime failed to start, the epoch's last writes lived only in
+its log and bundles, and its database stayed open with nothing to close
+it. A drain or the balancer then released the record, or the cell's next
+activation here claimed a new epoch and restored past them. The simulator
+could not reach it, since its runtimes started whenever their database was
+open; now a swap's restart fails in half of the swarm seeds (probe
+`SwapRestartFailed`). With that fault and no fix, 100,000 swarm seeds lost
+writes in 1,432 seeds in a debug build and 1,603 with validation compiled
+out, and two invariants broke that never had: a process restarted on the
+node found the swapped epoch's database still live beside the cell's
+newer one, so its residency counted twice (`occupied counter … disagrees
+with the walk`, `activation waiter … queued twice`). Now a failed swap
+restart stops the cell with a cleanup stop, which proves and closes the
+database as a failed publish does, before it parks dormant. With the fix
+and the fault, lost writes are back to 1 in both modes, the slow clean
+reload, and no failure kind is new. The fault changed the run of every seed
+where it fired and no other: of the 2,200 reference runs, the 57 whose
+hash changed all failed a swap restart, and so did every seed whose line
+in `known-failures.txt` changed (47 in a debug build, 11 with validation
+compiled out), each to another known failure.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

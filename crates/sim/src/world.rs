@@ -55,7 +55,7 @@ mod stop;
 mod waker;
 mod workers;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -293,6 +293,8 @@ struct Process {
     timers: BTreeMap<Slot, (u64, Timer, u64)>,
     next_ordinal: u64,
     replicas: BTreeMap<(String, Epoch), Replica>,
+    /// Cell epochs whose runtime a swap stopped, until it starts again.
+    swapped: BTreeSet<(String, Epoch)>,
     /// Epochs that ended without their final upload, with acknowledged
     /// writes outside the per-cell layout (`dirty_tails`). The cell's next
     /// activation here folds them into its prefix first.
@@ -340,6 +342,7 @@ impl Process {
             timers: BTreeMap::new(),
             next_ordinal: 0,
             replicas: BTreeMap::new(),
+            swapped: BTreeSet::new(),
             tails: BTreeMap::new(),
             node_proof_ms: 0,
             published: BTreeMap::new(),
@@ -488,6 +491,8 @@ pub struct World {
     recovery_rng: Rng,
     /// Which alarm handlers call a third party.
     call_rng: Rng,
+    /// Which swap restarts fail.
+    start_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -525,6 +530,7 @@ impl World {
         let page_rng = master.fork();
         let recovery_rng = master.fork();
         let call_rng = master.fork();
+        let start_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -559,6 +565,7 @@ impl World {
             page_rng,
             recovery_rng,
             call_rng,
+            start_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),

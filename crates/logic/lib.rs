@@ -4924,10 +4924,35 @@ impl State {
                     epoch,
                 });
             }
+            // The second half of a swap failed. The swap stop proved
+            // nothing, so the epoch's last writes may live only in its log
+            // and bundles, and its database is still open. Parked dormant
+            // straight away, a release or the next activation restored past
+            // them. A cleanup stop proves and closes it first, as a failed
+            // publish does.
+            Err(_) if cell.swapping => {
+                self.probe(Probe::SwapRestartFailed);
+                let next = self.cell_op(&id);
+                set_phase(
+                    &mut self.occupied,
+                    &mut cell,
+                    Phase::Cleaning {
+                        op: next,
+                        epoch,
+                        cause: StopCause::Cleanup,
+                    },
+                );
+                effects.push(Effect::StopRuntime {
+                    op: next,
+                    cell: id.clone(),
+                    epoch,
+                    cause: StopCause::Cleanup,
+                    bounded: false,
+                });
+                self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
+                resume_failed = cell.resume_demand;
+            }
             Err(_) => {
-                if cell.swapping {
-                    self.probe(Probe::SwapRestartFailed);
-                }
                 set_phase(&mut self.occupied, &mut cell, Phase::Dormant { epoch });
                 self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
                 resume_failed = cell.resume_demand;

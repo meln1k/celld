@@ -199,14 +199,17 @@ impl World {
                     .runtime_started(self.t, &name, &who, &cell, epoch);
                 let p = self.machines[node].proc_mut();
                 p.watch.generations.insert(cell.clone(), p.generation);
-                let result = if self.machines[node]
-                    .proc()
-                    .replicas
-                    .contains_key(&(cell.clone(), epoch))
-                {
-                    Ok(())
-                } else {
-                    Err(Failure::Definite)
+                let key = (cell.clone(), epoch);
+                // The second half of a swap runs the new generation's code,
+                // which may not load (`Faults::start_failures`).
+                let swap = p.swapped.remove(&key);
+                let new_code_fails = swap
+                    && self.t < self.config.chaos_ms
+                    && self.config.faults.start_failures > 0.0
+                    && (self.start_rng).chance(self.config.faults.start_failures);
+                let result = match self.machines[node].proc().replicas.contains_key(&key) {
+                    true if !new_code_fails => Ok(()),
+                    _ => Err(Failure::Definite),
                 };
                 // The generation and the heap the runtime was placed on.
                 let generation = self.machines[node].proc().generation;

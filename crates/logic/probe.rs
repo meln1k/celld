@@ -123,7 +123,8 @@ probes! {
     /// same epoch, for the drain to prove and evict.
     SwapStopWhileDraining,
     /// A swap's restart failed: the runtime is gone, and its database is
-    /// still open at the epoch the swap stopped without a proof.
+    /// still open at the epoch the swap stopped without a proof, so a
+    /// cleanup stop proves and closes it.
     SwapRestartFailed,
     /// A request arrived mid-eviction, so the cell activates again.
     EvictionTurnedAround,

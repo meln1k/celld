@@ -288,6 +288,7 @@ impl World {
         if cause == StopCause::Swap {
             // The runtime leaves its isolate; its database stays open, and
             // the core starts it again at the same epoch.
+            self.machines[node].proc_mut().swapped.insert(key);
             let delay = self.net_rng.range(1, 5);
             return self.deliver(node, delay, Event::RuntimeStopped { op });
         }

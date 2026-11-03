@@ -390,6 +390,10 @@ pub struct Faults {
     /// back. Only with `SimConfig::memory`.
     pub surges: f64,
     pub max_surge_mb: u64,
+    /// Chance that a runtime restarted on a new application generation,
+    /// the second half of a swap, fails to start: the new code does not
+    /// load. Only in the chaos window.
+    pub start_failures: f64,
 }
 
 impl SimConfig {
@@ -515,6 +519,11 @@ impl SimConfig {
             faults.surges = *surging.pick(&[3.0, 10.0]).unwrap();
             faults.max_surge_mb = *surging.pick(&[100, 400]).unwrap();
         }
+        // Failed swap restarts, likewise.
+        let mut starting = Rng::new(seed ^ 0x5354_4152_5400_0000);
+        if starting.chance(0.5) {
+            faults.start_failures = *starting.pick(&[0.1, 0.5]).unwrap();
+        }
         // Paging, likewise.
         let mut paging = Rng::new(seed ^ 0x5041_4745_0000_0000);
         let paged = match paging.chance(0.5) {
@@ -587,6 +596,7 @@ impl Faults {
             gray_latency_ms: 0,
             surges: 0.0,
             max_surge_mb: 0,
+            start_failures: 0.0,
         }
     }
 }
