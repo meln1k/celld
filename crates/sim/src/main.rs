@@ -210,7 +210,7 @@ fn main() {
     );
     println!(
         "crashes {}, pauses {}, partitions {}, bucket failures {}, restores from the bucket {} \
-         ({} paged), from an eviction snapshot {}\n\
+         ({} paged, {} epochs passed by a marker's source), from an eviction snapshot {}\n\
          clean stop retries {}, evictions abandoned {}, memory surges {}\n\
          drain token claims {}, bypassed {}, processes ready {}",
         stats.crashes,
@@ -219,6 +219,7 @@ fn main() {
         stats.store_failures,
         stats.restored,
         stats.paged,
+        stats.passed_by_source,
         stats.reused,
         stats.stop_retries,
         stats.stops_abandoned,

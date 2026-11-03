@@ -113,6 +113,12 @@ fn a_restore_links_only_the_epoch_a_paged_epoch_continued() {
         let outcome = run(seed, &SimConfig::swarm(seed));
         assert!(outcome.passed(), "seed {seed}: {:?}", outcome.violations);
         assert!(outcome.stats.paged > 0, "seed {seed} paged no restore");
+        // The seed still reaches the case: a restore passes the stale epoch
+        // by its marker's source, rather than missing it some other way.
+        assert!(
+            outcome.stats.passed_by_source > 0,
+            "seed {seed} passed no epoch by source"
+        );
     }
 }
 

@@ -652,6 +652,9 @@ pub struct Stats {
     pub restored: u64,
     /// Of those, the ones that paged their cell.
     pub paged: u64,
+    /// Epochs holding objects that restores' chain walks passed over,
+    /// because a paged epoch's marker named an older source.
+    pub passed_by_source: u64,
     /// Clean stop attempts that failed and tried again, and evictions a
     /// request took back before they published.
     pub stop_retries: u64,

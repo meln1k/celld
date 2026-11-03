@@ -652,13 +652,28 @@ impl Store {
     /// fails later, when its restore plan finds no first position
     /// (`calc_restore_plan`).
     fn spans(&self, cell: &str, below: Epoch) -> Result<Vec<Span>, NoBase> {
+        self.walk(cell, below).map(|(spans, _)| spans)
+    }
+
+    /// How many epochs below `below` that hold objects the chain walk passed
+    /// over because a marker named an older source.
+    pub fn passed_by_source(&self, cell: &str, below: Epoch) -> u64 {
+        self.walk(cell, below).map_or(0, |(_, passed)| passed)
+    }
+
+    /// `spans`, and how many listed epochs the walk passed.
+    fn walk(&self, cell: &str, below: Epoch) -> Result<(Vec<Span>, u64), NoBase> {
         let mut spans: Vec<Span> = Vec::new();
+        let mut passed = 0;
         let mut walk = Walk::new();
         let range = (cell.to_string(), 0)..(cell.to_string(), below);
         for (key, prefix) in self.prefixes.range(range).rev() {
             match walk.wants(key.1) {
                 Wants::List => {}
-                Wants::Pass => continue,
+                Wants::Pass => {
+                    passed += u64::from(prefix.listed());
+                    continue;
+                }
                 Wants::Done => break,
             }
             if !prefix.listed() {
@@ -691,11 +706,11 @@ impl Store {
                 hi,
             });
             if base {
-                return Ok(spans);
+                return Ok((spans, passed));
             }
         }
         match spans.is_empty() {
-            true => Ok(spans),
+            true => Ok((spans, passed)),
             false => Err(NoBase),
         }
     }

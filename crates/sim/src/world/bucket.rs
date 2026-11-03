@@ -514,7 +514,12 @@ impl World {
                     head: self.store.chain_head(&cell, epoch),
                     chain: match self.store.used_since(&cell, epoch) {
                         true => Err(Failure::Definite),
-                        false => self.store.read_chain(&cell, epoch).map_err(|NoBase| {
+                        false => {
+                            self.stats.passed_by_source +=
+                                self.store.passed_by_source(&cell, epoch);
+                            self.store.read_chain(&cell, epoch)
+                        }
+                        .map_err(|NoBase| {
                             // The restore fails. Production builds such a
                             // chain, then fails the activation when its
                             // restore plan finds no first position
