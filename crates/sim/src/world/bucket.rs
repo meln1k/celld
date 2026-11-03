@@ -92,14 +92,14 @@ pub(super) enum StoreReq {
         content: Vec<WriteId>,
     },
     /// A paged activation's marker (`seed_continuation`): the epoch
-    /// continues the chain it restored, from `source`, and the cell serves
-    /// only once the marker is in the bucket.
+    /// continues the chain it restored, whose `head` it names and follows,
+    /// and the cell serves only once the marker is in the bucket.
     PutMarker {
         op: OpId,
         cell: String,
         epoch: Epoch,
         content: Vec<WriteId>,
-        source: Option<Epoch>,
+        head: Option<(Epoch, u64)>,
     },
     /// A restore reads the newest chain below its epoch, after folding the
     /// cell's tail into the bucket when an epoch here left one
@@ -483,10 +483,10 @@ impl World {
                 cell,
                 epoch,
                 content,
-                source,
+                head,
             } => {
                 self.checker.upload_applied(self.t, &sender, &cell, epoch);
-                (self.store).put_marker(&cell, epoch, &content, source, WALL_EPOCH_MS + self.t);
+                (self.store).put_marker(&cell, epoch, &content, head, WALL_EPOCH_MS + self.t);
                 self.checker.bucket_holds(self.t, &cell, epoch, &content);
                 self.judge_discoverable(&cell);
                 Work::Replica(ReplicaWork::Marked {
@@ -511,7 +511,7 @@ impl World {
                 // claim was superseded before its restore got here.
                 _ => Work::Replica(ReplicaWork::ChainRead {
                     op,
-                    source: self.store.chain_source(&cell, epoch),
+                    head: self.store.chain_head(&cell, epoch),
                     chain: match self.store.used_since(&cell, epoch) {
                         true => Err(Failure::Definite),
                         false => self.store.read_chain(&cell, epoch).map_err(|NoBase| {

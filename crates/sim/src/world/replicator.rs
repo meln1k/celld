@@ -184,8 +184,9 @@ pub(super) enum ReplicaWork {
         cell: String,
         epoch: Epoch,
         chain: Result<Option<Vec<WriteId>>, Failure>,
-        /// The chain's newest epoch, which a paged activation continues.
-        source: Option<Epoch>,
+        /// The chain's newest epoch and last txid, which a paged
+        /// activation's marker names and follows.
+        head: Option<(Epoch, u64)>,
     },
     /// A paged activation's marker landed: the cell may serve `content`.
     Marked {
@@ -212,8 +213,8 @@ impl World {
                 cell,
                 epoch,
                 chain,
-                source,
-            } => self.chain_read(node, op, cell, epoch, chain, source),
+                head,
+            } => self.chain_read(node, op, cell, epoch, chain, head),
             ReplicaWork::Marked {
                 op,
                 cell,
@@ -408,7 +409,7 @@ impl World {
         cell: String,
         epoch: Epoch,
         chain: Result<Option<Vec<WriteId>>, Failure>,
-        source: Option<Epoch>,
+        head: Option<(Epoch, u64)>,
     ) {
         // The fold applied with the read: the cell's tails are gone, as
         // `fold_cell`'s success clears its `dirty_tails` entry before
@@ -432,7 +433,7 @@ impl World {
                     cell,
                     epoch,
                     content,
-                    source,
+                    head,
                 };
                 return self.store_call(node, req);
             }

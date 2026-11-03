@@ -46,11 +46,13 @@ pub type RowLen = (String, Epoch, usize);
 #[derive(Debug)]
 pub struct NoBase;
 
-/// One epoch of a restore chain: the positions above `cut` up to `ends`.
+/// One epoch of a restore chain: the positions above `cut` up to `ends`,
+/// the last of them at txid `hi`.
 struct Span {
     epoch: Epoch,
     cut: usize,
     ends: usize,
+    hi: u64,
 }
 
 /// The load a node reports in its lease body, sampled when it writes it.
@@ -88,9 +90,31 @@ struct Prefix {
     marker: bool,
     /// The epoch the paged activation continued, as its marker names it.
     source: Option<Epoch>,
+    /// The marker's txid, one past the chain's last (`seed_continuation`):
+    /// a marker takes a transaction of its own, so a paged epoch's writes
+    /// follow it, and txids run ahead of positions by one per paged epoch
+    /// in the chain. 0 for an epoch that opens at txid 1.
+    marker_txid: u64,
 }
 
 impl Prefix {
+    /// The txid of the write at `position` (from 1), above the cut.
+    fn txid(&self, position: usize) -> u64 {
+        match self.marker_txid {
+            0 => position as u64,
+            marker => marker + (position - self.cut) as u64,
+        }
+    }
+
+    /// The position of the write at `txid`, the inverse of `txid`; the
+    /// marker's txid is the cut.
+    fn position(&self, txid: u64) -> usize {
+        match self.marker_txid {
+            0 => txid as usize,
+            marker => self.cut + (txid - marker) as usize,
+        }
+    }
+
     /// Whether a listing finds objects in the prefix: its marker, or a
     /// position above its cut.
     fn listed(&self) -> bool {
@@ -548,28 +572,32 @@ impl Store {
     /// A paged activation's marker (`seed_continuation`): `epoch` continues
     /// the chain it restored, `content`, from its last position. Uploaded
     /// before the cell serves, and it counts as covering that position
-    /// (`note_covered`). It names `source`, the epoch whose chain it
-    /// continues.
+    /// (`note_covered`). `head` is the chain's newest epoch and last txid
+    /// (`chain_head`): the marker names that epoch, and takes the next txid.
     pub fn put_marker(
         &mut self,
         cell: &str,
         epoch: Epoch,
         content: &[WriteId],
-        source: Option<Epoch>,
+        head: Option<(Epoch, u64)>,
         at_ms: u64,
     ) {
         let prefix = self.prefixes.entry((cell.to_string(), epoch)).or_default();
         prefix.cut = content.len();
         prefix.marker = true;
-        prefix.source = source;
+        prefix.source = head.map(|(source, _)| source);
+        // A planted bug can restore content no chain holds; its marker
+        // follows the content.
+        prefix.marker_txid = head.map_or(content.len() as u64, |(_, hi)| hi) + 1;
         self.put(cell, epoch, content, at_ms);
     }
 
-    /// The newest epoch of the chain a restore at `epoch` reads: the one a
-    /// paged activation's marker names (`EpochChain::spans`).
-    pub fn chain_source(&self, cell: &str, epoch: Epoch) -> Option<Epoch> {
+    /// The newest epoch of the chain a restore at `epoch` reads, and the
+    /// chain's last txid (`EpochChain::spans`, `max_txid`): what a paged
+    /// activation's marker names and follows.
+    pub fn chain_head(&self, cell: &str, epoch: Epoch) -> Option<(Epoch, u64)> {
         let spans = self.spans(cell, epoch).ok()?;
-        spans.first().map(|span| span.epoch)
+        spans.first().map(|span| (span.epoch, span.hi))
     }
 
     /// What a restore at `epoch` reads: the chain below it. `None` when no
@@ -615,11 +643,10 @@ impl Store {
     }
 
     /// `EpochChain::build` over the epochs below `below`, newest first, with
-    /// production's walk (`celld_logic::epoch_chain::Walk`). Positions are
-    /// txids from 1: an epoch's objects hold the positions above its cut,
-    /// and its marker holds none (production's takes a transaction of its
-    /// own, after the cut), so an epoch holding only its marker serves the
-    /// empty span just above its cut. Empty when nothing is listed
+    /// production's walk (`celld_logic::epoch_chain::Walk`), over the
+    /// objects' txids (`Prefix::txid`): an epoch's objects hold the writes
+    /// above its cut, and a paged epoch's marker has a txid of its own just
+    /// below them, as production's does. Empty when nothing is listed
     /// (production's `TxNotAvailable`), `NoBase` when objects are but no
     /// span opens at the first position: production builds that chain and
     /// fails later, when its restore plan finds no first position
@@ -632,13 +659,13 @@ impl Store {
             if !prefix.listed() {
                 continue;
             }
-            // One object per position above the cut, and the marker, which
-            // takes none: it spans nothing, just above the cut.
-            let lo = prefix.cut as u64 + 1;
-            let positions = (lo..=prefix.writes.len() as u64).map(|position| (position, position));
-            let marker = prefix.marker.then_some((lo, lo - 1));
-            let files = positions.chain(marker);
-            let Step::Link { hi: ends, base, .. } = walk.visit(key.1, files) else {
+            // One object per write above the cut, and the marker at its own
+            // txid.
+            let writes =
+                (prefix.cut + 1..=prefix.writes.len()).map(|position| prefix.txid(position));
+            let marker = (prefix.marker && prefix.marker_txid > 0).then_some(prefix.marker_txid);
+            let files = writes.chain(marker).map(|txid| (txid, txid));
+            let Step::Link { hi, base, .. } = walk.visit(key.1, files) else {
                 continue;
             };
             if let Some(source) = prefix.source {
@@ -647,7 +674,8 @@ impl Store {
             spans.push(Span {
                 epoch: key.1,
                 cut: prefix.cut,
-                ends: ends as usize,
+                ends: prefix.position(hi),
+                hi,
             });
             if base {
                 return Ok(spans);

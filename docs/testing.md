@@ -115,7 +115,8 @@ also run epoch GC every 5 s: list the cell's epochs, plan with
 `epoch_gc::plan`, read the owner record, then delete each epoch prefix below
 the restore chain's base, one bucket call per step. In half of the swarm
 seeds, some or all bucket restores page their cell (`CELLD_LTX_PAGED`): the
-epoch's marker lands before the cell serves, and the epoch then continues
+epoch's marker lands before the cell serves, names the epoch it continues
+and takes a txid of its own, as production's does, and the epoch then continues
 the chain below it from the restored position instead of opening at the
 first one. A restore walks the chain with production's own rule
 (`celld_logic::epoch_chain::Walk`, which `EpochChain::build` calls too):

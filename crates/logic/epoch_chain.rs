@@ -69,9 +69,7 @@ impl Walk {
 
     /// Decide on `epoch`, the next one down, given the txid range
     /// `(min, max)` of each of its objects. The walk clips them (`keeps`)
-    /// and links the epoch when what remains ends exactly at the cut. An
-    /// object may end one short of where it starts: an opener that takes no
-    /// txid.
+    /// and links the epoch when what remains ends exactly at the cut.
     pub fn visit(&mut self, epoch: Epoch, files: impl IntoIterator<Item = (Txid, Txid)>) -> Step {
         let kept = files.into_iter().filter(|(_, max)| self.keeps(*max));
         let span = kept.fold(None, |span: Option<(Txid, Txid)>, (min, max)| {
