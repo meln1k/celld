@@ -51,10 +51,12 @@ pub struct Plan {
 /// stream's current retired mark. `pinned_reads` is true while the owner's
 /// own activation still reads objects by the chain it built at activation:
 /// a paged cell faults pages from those objects until its background fill
-/// completes. The chain can gain a later base in the meantime (a fenced
-/// owner's late snapshot that ends exactly at the cut links in above the old
-/// base), and deleting below the new base would remove objects the fill
-/// still reads. An epoch is deleted only when it is below the
+/// completes. The chain can gain a later base in the meantime, and deleting
+/// below the new base would remove objects the fill still reads: a fenced
+/// owner of the chain's own source epoch can land a late snapshot there that
+/// ends exactly at the cut, and under a marker that names no source
+/// (written before markers did) so can one in any epoch between
+/// (`epoch_chain`). An epoch is deleted only when it is below the
 /// base, is neither the owner's epoch nor the one before it, and its newest
 /// object is at least `grace_ms` old. The previous-epoch rule is a margin
 /// against a lagging listing, not the safety argument.

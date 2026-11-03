@@ -11,6 +11,7 @@
 //! run over it unchanged.
 use crate::client::ReplicaClient;
 use crate::compaction_level::SNAPSHOT_LEVEL;
+use crate::db::continued_epoch;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ltx::FileInfo;
@@ -19,6 +20,7 @@ use crate::TXID;
 use async_trait::async_trait;
 use celld_logic::epoch_chain::Step;
 use celld_logic::epoch_chain::Walk;
+use celld_logic::epoch_chain::Wants;
 use futures_util::stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -41,34 +43,44 @@ pub struct EpochChain<C> {
 
 impl<C: ReplicaClient> EpochChain<C> {
     /// Walks `epochs` (ascending) down from the newest until an epoch that
-    /// opens with a snapshot, listing every level of each visited epoch.
-    /// Which epochs link is `celld_logic::epoch_chain::Walk`'s decision; the
-    /// simulator walks with the same type. An epoch without objects
-    /// contributes nothing; no chain at all is `TxNotAvailable`.
+    /// opens with a snapshot, listing every level of each epoch the walk
+    /// wants. Which epochs link is `celld_logic::epoch_chain::Walk`'s
+    /// decision, the simulator's too; this lists, and reads the markers it
+    /// names. An epoch without objects contributes nothing; no chain at all
+    /// is `TxNotAvailable`.
     pub async fn build(mut epochs: Vec<(u64, C)>) -> Result<Self> {
         let mut spans: Vec<Span<C>> = Vec::new();
         let mut walk = Walk::new();
         while let Some((epoch, client)) = epochs.pop() {
-            let mut levels = list_levels(&client).await?;
-            for files in &mut levels {
-                files.retain(|f| walk.keeps(f.max_txid.0));
+            match walk.wants(epoch) {
+                Wants::List => {}
+                Wants::Pass => continue,
+                Wants::Done => break,
             }
+            let mut levels = list_levels(&client).await?;
             let files = levels.iter().flatten();
             let ranges = files.map(|f| (f.min_txid.0, f.max_txid.0));
-            let Step::Link { lo, base, .. } = walk.visit(epoch, ranges) else {
+            let Step::Link {
+                lo,
+                hi,
+                base,
+                marker,
+            } = walk.visit(epoch, ranges)
+            else {
                 continue;
             };
-            // A continuation's first txid is its marker, which names the
-            // epoch it continued (`Db::seed_continuation`). A marker from
-            // before markers did names none.
+            for files in &mut levels {
+                files.retain(|f| f.max_txid.0 <= hi);
+            }
+            // The marker is the level-0 object `Db::seed_continuation` wrote;
+            // a compacted copy names nothing.
             let marker = (levels.first().into_iter().flatten())
-                .find(|f| f.min_txid.0 == lo && f.max_txid.0 == lo);
-            if let (false, Some(marker)) = (base, marker) {
+                .find(|f| marker && f.min_txid.0 == lo && f.max_txid.0 == lo);
+            if let Some(marker) = marker {
                 let bytes = client
                     .open_ltx_file(0, marker.min_txid, marker.max_txid)
                     .await?;
-                let source = Header::parse(&bytes)?.node_id;
-                if source != 0 {
+                if let Some(source) = continued_epoch(&Header::parse(&bytes)?) {
                     walk.continues_from(source);
                 }
             }

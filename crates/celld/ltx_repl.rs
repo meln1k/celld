@@ -78,6 +78,17 @@ fn sync_concurrency() -> usize {
 /// multiplying the bound by the activation count.
 const RESTORE_DOWNLOAD_CONCURRENCY: usize = 64;
 
+/// Where a paged activation continues its chain from the cut
+/// (`Db::seed_continuation`): its marker's txid, one past the chain's last,
+/// the page count at the cut, and the chain's newest epoch, which the
+/// marker names.
+#[derive(Clone, Copy)]
+struct Continuation {
+    txid: TXID,
+    commit: u32,
+    source: std::num::NonZeroU64,
+}
+
 /// A cheap clone of one cell-epoch client. Without the wrapper, the replica,
 /// uploader, and compactor each retain a full copy of the immutable string
 /// configuration. Keep this wrapper private instead of adding a blanket
@@ -2372,9 +2383,7 @@ impl LtxRepl {
         let mut remote_restore = None;
         let mut paged_vfs_name: Option<String> = None;
         let mut registration = PagedRegistration(None);
-        // A paged activation continues its chain from the cut: (last txid of
-        // the chain, page count at the cut).
-        let mut continuation: Option<(TXID, u32, u64)> = None;
+        let mut continuation: Option<Continuation> = None;
         if resume_local {
             anyhow::ensure!(
                 is_file(&dst),
@@ -2492,7 +2501,12 @@ impl LtxRepl {
                     // the eviction barrier, and a fenced owner's late
                     // snapshot in a lower epoch would outrank its chain
                     // (CelldPersistencePaged.tla, `BreakNoMarker`).
-                    continuation = Some((TXID(chain.max_txid().0 + 1), map.commit, from));
+                    continuation = Some(Continuation {
+                        txid: TXID(chain.max_txid().0 + 1),
+                        commit: map.commit,
+                        source: std::num::NonZeroU64::new(from)
+                            .ok_or_else(|| anyhow!("paged chain of {cell} names epoch 0"))?,
+                    });
                     let reader = celld_ltx::paged::EpochChainReader::new(readers);
                     let source = celld_ltx::paged::PageSource::new(map, Box::new(reader));
                     let name = celld_ltx::paged_vfs::next_registration_name();
@@ -2602,9 +2616,11 @@ impl LtxRepl {
                 db.truncate_page_n = pages;
             }
             let marker = match continuation {
-                Some((txid, commit, from)) => {
-                    Some((txid, db.seed_continuation(txid, commit, from)?))
-                }
+                Some(Continuation {
+                    txid,
+                    commit,
+                    source,
+                }) => Some((txid, db.seed_continuation(txid, commit, source)?)),
                 None => None,
             };
             let seed = db.pos().ok();
@@ -2725,7 +2741,7 @@ impl LtxRepl {
                     local_path: Db::meta_path_for_path(&dst),
                     host: self.ltx_host.clone(),
                     queue: queue.clone(),
-                    base_txid: continuation.map_or(1, |(txid, _, _)| txid.0),
+                    base_txid: continuation.map_or(1, |continuation| continuation.txid.0),
                     min_txids: self.compaction_min_txids,
                     min_bytes: self.compaction_min_bytes,
                     pending_bytes: AtomicU64::new(0),

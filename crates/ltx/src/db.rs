@@ -58,6 +58,7 @@ use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use std::collections::HashMap;
 use std::ffi::c_int;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -969,7 +970,12 @@ impl Db {
     /// restore links only that epoch below this one: a fenced owner's late
     /// snapshot can end at the same txid in an epoch that was empty when
     /// this one restored, and linking it opens a database no owner held.
-    pub fn seed_continuation(&mut self, txid: TXID, commit: u32, source: u64) -> Result<Vec<u8>> {
+    pub fn seed_continuation(
+        &mut self,
+        txid: TXID,
+        commit: u32,
+        source: NonZeroU64,
+    ) -> Result<Vec<u8>> {
         let wal = self.wal_header_bytes()?;
         let header = ltx::Header {
             version: ltx::VERSION,
@@ -984,7 +990,7 @@ impl Db {
             wal_size: 0,
             wal_salt1: be_u32(&wal[16..]),
             wal_salt2: be_u32(&wal[20..]),
-            node_id: source,
+            node_id: source.get(),
         };
         let baseline = ltx::encode_file(&header, &[], 0)?;
         self.seed_l0_baseline(txid, txid, &baseline)?;
@@ -2565,4 +2571,12 @@ pub mod internal {
     pub fn be_u32(bytes: &[u8]) -> u32 {
         super::be_u32(bytes)
     }
+}
+
+/// The epoch a paged activation's marker continued, as
+/// `Db::seed_continuation` writes it into the header's `node_id`. `None`
+/// for any other object, and for a marker written before markers named
+/// their source.
+pub fn continued_epoch(header: &ltx::Header) -> Option<u64> {
+    NonZeroU64::new(header.node_id).map(NonZeroU64::get)
 }

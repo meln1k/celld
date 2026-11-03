@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use celld_logic::drain::DrainToken;
-use celld_logic::epoch_chain::{Step, Walk};
+use celld_logic::epoch_chain::{Step, Walk, Wants};
 use celld_logic::epoch_gc::ListedEpoch;
 use celld_logic::log_tier::{self, LogRecord, LogState};
 use celld_logic::wake::{waker_may_claim, AlarmSnapshot, PublicationId, Retirement};
@@ -656,6 +656,11 @@ impl Store {
         let mut walk = Walk::new();
         let range = (cell.to_string(), 0)..(cell.to_string(), below);
         for (key, prefix) in self.prefixes.range(range).rev() {
+            match walk.wants(key.1) {
+                Wants::List => {}
+                Wants::Pass => continue,
+                Wants::Done => break,
+            }
             if !prefix.listed() {
                 continue;
             }
@@ -663,12 +668,20 @@ impl Store {
             // txid.
             let writes =
                 (prefix.cut + 1..=prefix.writes.len()).map(|position| prefix.txid(position));
-            let marker = (prefix.marker && prefix.marker_txid > 0).then_some(prefix.marker_txid);
+            let marker = prefix.marker.then_some(prefix.marker_txid);
             let files = writes.chain(marker).map(|txid| (txid, txid));
-            let Step::Link { hi, base, .. } = walk.visit(key.1, files) else {
+            let Step::Link {
+                lo,
+                hi,
+                base,
+                marker: at_lo,
+            } = walk.visit(key.1, files)
+            else {
                 continue;
             };
-            if let Some(source) = prefix.source {
+            // The object at `lo` is the marker only if it is still listed;
+            // a write there names nothing, as production reads it.
+            if let (true, Some(source)) = (at_lo && marker == Some(lo), prefix.source) {
                 walk.continues_from(source);
             }
             spans.push(Span {
