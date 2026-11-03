@@ -15,6 +15,7 @@ pub mod cron;
 pub mod dead_node_reconciliation;
 pub mod drain;
 pub mod durability;
+pub mod epoch_chain;
 pub mod epoch_gc;
 pub mod format;
 pub mod gate;

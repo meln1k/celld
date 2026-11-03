@@ -117,10 +117,11 @@ the restore chain's base, one bucket call per step. In half of the swarm
 seeds, some or all bucket restores page their cell (`CELLD_LTX_PAGED`): the
 epoch's marker lands before the cell serves, and the epoch then continues
 the chain below it from the restored position instead of opening at the
-first one. A restore walks the chain as `EpochChain::build` does: down from
-the newest listed epoch, clipping each lower epoch below the cut above it,
-linking only an epoch that ends exactly at that cut, and stopping at one
-that opens at the first position. A paged cell pins epoch GC until its
+first one. A restore walks the chain with production's own rule
+(`celld_logic::epoch_chain::Walk`, which `EpochChain::build` calls too):
+down from the newest listed epoch, clipping each lower epoch below the cut
+above it, linking only an epoch that ends exactly at that cut, and stopping
+at one that opens at the first position. A paged cell pins epoch GC until its
 background fill completes, a few seconds later. Every fill here completes;
 production can turn the fill off, and such a cell pins epoch GC for as long
 as it stays open. Page faults themselves are not modelled: a paged cell

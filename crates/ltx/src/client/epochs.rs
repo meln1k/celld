@@ -16,6 +16,8 @@ use crate::error::Result;
 use crate::ltx::FileInfo;
 use crate::TXID;
 use async_trait::async_trait;
+use celld_logic::epoch_chain::Step;
+use celld_logic::epoch_chain::Walk;
 use futures_util::stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -38,39 +40,30 @@ pub struct EpochChain<C> {
 
 impl<C: ReplicaClient> EpochChain<C> {
     /// Walks `epochs` (ascending) down from the newest until an epoch that
-    /// opens with a snapshot, listing every level of each visited epoch. The
-    /// link below a continued epoch is the epoch whose objects, clipped to
-    /// the txids before the continuation's first, end exactly at the cut; an
-    /// epoch below that ends elsewhere is skipped. A fenced owner's late
-    /// snapshot can land in an intermediate epoch, whole but older than the
-    /// cut, and taking it as the base loses the writes between it and the
-    /// cut (CelldPersistencePaged.tla, `BreakLinkByOrder`). An epoch without
-    /// objects contributes nothing; no chain at all is `TxNotAvailable`.
+    /// opens with a snapshot, listing every level of each visited epoch.
+    /// Which epochs link is `celld_logic::epoch_chain::Walk`'s decision; the
+    /// simulator walks with the same type. An epoch without objects
+    /// contributes nothing; no chain at all is `TxNotAvailable`.
     pub async fn build(mut epochs: Vec<(u64, C)>) -> Result<Self> {
         let mut spans: Vec<Span<C>> = Vec::new();
+        let mut walk = Walk::new();
         while let Some((epoch, client)) = epochs.pop() {
             let mut levels = list_levels(&client).await?;
-            if let Some(above) = spans.last() {
-                // Clip to the txids before the continuation's first, then
-                // the link must end at the cut.
-                for files in &mut levels {
-                    files.retain(|f| f.max_txid < above.lo);
-                }
-                let ends = levels.iter().flatten().map(|f| f.max_txid).max();
-                if ends != Some(TXID(above.lo.0 - 1)) {
-                    continue;
-                }
+            for files in &mut levels {
+                files.retain(|f| walk.keeps(f.max_txid.0));
             }
-            let Some(lo) = levels.iter().flatten().map(|f| f.min_txid).min() else {
+            let lo = levels.iter().flatten().map(|f| f.min_txid.0).min();
+            let hi = levels.iter().flatten().map(|f| f.max_txid.0).max();
+            let Step::Link { lo, base } = walk.visit(lo.zip(hi)) else {
                 continue;
             };
             spans.push(Span {
                 epoch,
                 client,
-                lo,
+                lo: TXID(lo),
                 levels,
             });
-            if lo == TXID(1) {
+            if base {
                 break;
             }
         }

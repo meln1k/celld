@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use celld_logic::drain::DrainToken;
+use celld_logic::epoch_chain::{Step, Walk};
 use celld_logic::epoch_gc::ListedEpoch;
 use celld_logic::log_tier::{self, LogRecord, LogState};
 use celld_logic::wake::{waker_may_claim, AlarmSnapshot, PublicationId, Retirement};
@@ -595,48 +596,44 @@ impl Store {
         Ok((!spans.is_empty()).then(|| self.assemble(cell, &spans)))
     }
 
-    /// `EpochChain::build` over the epochs below `below`, newest first: walk
-    /// down from the newest epoch that lists objects, clip each lower epoch
-    /// to the positions below the span above it, link it only when it ends
-    /// exactly at that span's cut, and stop at the first span that opens at
-    /// the first position. Linking on anything but the exact cut would take
-    /// a fenced owner's late object for the base and lose what lies between
-    /// it and the cut (`BreakLinkByOrder`). Empty when nothing is listed
+    /// `EpochChain::build` over the epochs below `below`, newest first, with
+    /// production's walk (`celld_logic::epoch_chain::Walk`). Positions are
+    /// txids from 1: an epoch's objects hold the positions above its cut,
+    /// and its marker holds none (production's takes a transaction of its
+    /// own, after the cut), so an epoch holding only its marker serves the
+    /// empty span just above its cut. Empty when nothing is listed
     /// (production's `TxNotAvailable`), `NoBase` when objects are but no
     /// span opens at the first position: production builds that chain and
     /// fails later, when its restore plan finds no first position
     /// (`calc_restore_plan`).
-    ///
-    /// Production's marker takes a transaction of its own, after the cut;
-    /// here it takes none, so a paged epoch's first write follows the cut.
     fn spans(&self, cell: &str, below: Epoch) -> Result<Vec<Span>, NoBase> {
         let mut spans: Vec<Span> = Vec::new();
+        let mut walk = Walk::new();
         let range = (cell.to_string(), 0)..(cell.to_string(), below);
         for (key, prefix) in self.prefixes.range(range).rev() {
             if !prefix.listed() {
                 continue;
             }
-            let ends = match spans.last() {
-                None => prefix.writes.len(),
-                Some(above) => {
-                    let ends = prefix.writes.len().min(above.cut);
-                    // A span links when it ends exactly at the cut above and
-                    // adds positions, or is a marker alone at that cut: a
-                    // marker holds no position, so it links an epoch that
-                    // adds nothing to the chain.
-                    let adds = ends > prefix.cut || (ends == prefix.cut && prefix.marker);
-                    if ends != above.cut || !adds {
-                        continue;
-                    }
-                    ends
-                }
+            let lo = prefix.cut as u64 + 1;
+            // The objects' positions, clipped below the span above.
+            let hi = (lo..=prefix.writes.len() as u64)
+                .rev()
+                .find(|position| walk.keeps(*position));
+            let span = match hi {
+                Some(hi) => Some((lo, hi)),
+                None if prefix.marker && walk.keeps(lo - 1) => Some((lo, lo - 1)),
+                None => None,
             };
+            let Step::Link { base, .. } = walk.visit(span) else {
+                continue;
+            };
+            let (_, ends) = span.expect("a linked epoch has a span");
             spans.push(Span {
                 epoch: key.1,
                 cut: prefix.cut,
-                ends,
+                ends: ends as usize,
             });
-            if prefix.cut == 0 {
+            if base {
                 return Ok(spans);
             }
         }
