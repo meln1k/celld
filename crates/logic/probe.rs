@@ -136,6 +136,10 @@ probes! {
     DormantReleased,
     /// A dormant cell with WebSockets parked on it was released.
     DormantReleasedWithSockets,
+    /// A drain or the balancer kept a dormant cell whose last restore
+    /// failed, rather than release a record a peer would restore without
+    /// the tail this node failed to fold.
+    DormantKeptUnfolded,
     /// An owner record release outlived its deadline.
     ReleaseDeadline,
     /// A successor's adoption outlived its deadline.

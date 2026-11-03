@@ -306,7 +306,8 @@ ran and decides nothing, so adding one changes no trace hash. A sweep ends
 with the probes none of its seeds took, and `--coverage` prints how many
 seeds took each. Before a fix is judged by the seeds that stop failing, the
 probes on the branch it changes show whether any seed reaches it at all.
-In 100,000 swarm seeds, 43 of the 51 probes were taken and 8 never were.
+When they were added, 43 of the 51 probes were taken in 100,000 swarm
+seeds, and 8 never were.
 `PublishFailed` cannot be: the simulated `Publish` always succeeds, while
 production's can fail. `LogRecoveryGaveUp` needs 240 failed recoveries a
 second apart, longer than a run. The other six (`StartTimedOut`,
@@ -518,20 +519,6 @@ The core on `main` fails some seeds.
   none, so the owner goes on acknowledging writes the claim then restores
   without (swarm 38836, after a 0.9 s step against a 5 s lease). A VM
   suspend does the same (swarm 40737).
-- **A failed activation hands the cell away** (**lost-write**). A cell
-  epoch that ended without its final upload leaves acknowledged writes that
-  only its node's followers and bundles hold, and only that node's tail
-  names. When the cell next activates there, `fold_cell` finds no complete
-  follower (the one that has every frame is down) and fails the
-  activation, as it must, or the restore's bucket read fails, or a drain
-  stops the activation before its restore runs (swarm 89631). The core then
-  gives the cell away, by rebalance or release, and the peer that adopts
-  it restores from the bucket alone: nothing folds the first node's tail
-  for it, so the acknowledged writes are gone (swarm 92204, 32015).
-  Nothing in production repairs them later. Only recovery and the
-  reactivation fold upload a tail, and either writes it into the old
-  epoch's prefix, below the epoch the peer opened, where no restore reads
-  it.
 - **A drain releases a cell it stopped for a generation swap**
   (**lost-write**). A swap stop is the first half of moving a cell to a new
   isolate: it runs no durability barrier and leaves the database open
@@ -550,7 +537,9 @@ The core on `main` fails some seeds.
   loop flushes only open databases, and only the fold uploads a tail. The
   fold needs a complete follower, and the follower that missed the frame
   never becomes one, so the fold fails, the log never reopens, and the cell
-  never activates on that node again (swarm 1809, 2864, 5099).
+  never activates on that node again (swarm 1809, 2864, 5099). Nor does it
+  move: a cell whose last restore failed keeps its owner record (below),
+  so no peer restores it without the tail either (swarm 2617).
 - **Eleven `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.
@@ -728,6 +717,31 @@ failed bucket read (1), a clock fault (1), the slow clean reload (1) or a
 drain that released a swapped cell (1). Every new liveness or
 `alarm-not-fired` seed had a wedged walk-down (275), a late fold (32) or
 the capacity livelock (3).
+
+A failed activation used to hand its cell away. A cell epoch that ended
+without its final upload leaves acknowledged writes that only its node's
+followers and bundles hold, and only that node's tail names. When the cell
+next activates there, `fold_cell` finds no complete follower and fails the
+restore, as it must. The cell parked dormant, and the balancer or a drain
+then released its owner record. The peer that claimed it next restored
+from the bucket alone, and the acknowledged writes were gone (swarm 9197:
+n1 failed to fold c1 at epochs 4 to 12, released it, and n0 opened epoch
+13 without its write). Nothing in production repaired them later: only
+recovery and the reactivation fold upload a tail. Now a dormant cell
+whose last restore failed keeps its record (`Cell::restore_failed`, probe
+`DormantKeptUnfolded`) until a restore here succeeds. A later request
+retries the fold here, and a peer reaches the cell only by taking it over,
+which recovers this node's log first, or declares a loss a follower that
+stayed down justifies. In 100,000 swarm seeds lost writes went from 217 to
+2 in a debug build and from 262 to 3 with validation compiled out: the
+slow clean reload (swarm 28200), a drain that released a swapped cell
+(81438) and a clock fault (91139). Lost alarm handler commits went from 65
+to 9 and from 79 to 9. Liveness and `alarm-not-fired` rose by 70 seeds and
+by 76: 48 and 49 are a fold that never succeeds, the degraded log above,
+nearly all of them seeds that lost writes before, and 22 and 27 a wedged
+walk-down. Two seeds that lost writes before (swarm 515, 6074) now stop on
+the known release-ceiling invariant instead, in a debug build only. No
+failure kind is new.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
