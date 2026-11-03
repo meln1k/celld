@@ -129,6 +129,7 @@ impl World {
         }
         self.judge_death(node);
         let dead = self.machines[node].proc.take().expect("up");
+        self.count_probes(&dead.state);
         self.note(|| format!("crash {who}{}", if wipe { " (disk wiped)" } else { "" }));
         self.close_replicas(node, dead.replicas);
         if wipe {

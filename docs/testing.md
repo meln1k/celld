@@ -298,6 +298,25 @@ fault tests require their runs to enter every phase of `Phase`, so a
 simulator change that stops reaching one fails a test.
 A phase the core enters and leaves within one event is not seen.
 
+Phases are coarse, so the core also carries code probes
+(`crates/logic/probe.rs`): named rare branches, such as a reset of a cell
+holding a WebSocket, a handler's commit that finishes after its cell left
+its epoch, or a deadline of each kind. A probe counts the times its branch
+ran and decides nothing, so adding one changes no trace hash. A sweep ends
+with the probes none of its seeds took, and `--coverage` prints how many
+seeds took each. Before a fix is judged by the seeds that stop failing, the
+probes on the branch it changes show whether any seed reaches it at all.
+In 100,000 swarm seeds, 43 of the 51 probes were taken and 8 never were.
+`PublishFailed` cannot be: the simulated `Publish` always succeeds, while
+production's can fail. `LogRecoveryGaveUp` needs 240 failed recoveries a
+second apart, longer than a run. The other six (`StartTimedOut`,
+`EvictionDeadline`, `GateProofShort`, `ResumeFailed`,
+`AlarmTimerDroppedFenced`, `AlarmCancelledEviction`) are branches no
+simulated schedule reaches yet. A fix to any of them needs a schedule that
+takes it first. Some are taken rarely: a swap stop on a draining node (the
+lost-write bug below) in 4 seeds, a dormant cell released with sockets
+parked on it in 3.
+
 Each check has a planted bug (`Mutation` in `crates/sim/src/lib.rs`) in the
 simulated shell or bucket. A test requires every check to catch its bug, so a
 check cannot go blind without a test failing.

@@ -8,8 +8,9 @@
 //! seed's configuration from the seed itself. `--mutation` plants a known
 //! bug, named as in `Mutation`, to watch a check catch it. `--memory` gives
 //! each node a memory ceiling that about `ROOM` cells fit under.
-//! `--coverage` prints every phase transition a range took, with how many
-//! seeds took it.
+//! `--coverage` prints every phase transition a range took, and every code
+//! probe of the core (`celld_logic::Probe`), with how many seeds took it. A
+//! range always ends with the phases and probes none of its seeds reached.
 //!
 //! A swarm range can be judged against the known failures
 //! (`crates/sim/src/known.rs`): `--known FILE` prints `NEW` for a seed that
@@ -104,12 +105,18 @@ fn main() {
         let mut watched = std::collections::BTreeMap::<&str, u64>::new();
         // Per transition: the seeds that took it, and how often in all.
         let mut covered = std::collections::BTreeMap::<(&str, &str), (u64, u64)>::new();
+        // Per code probe: the seeds that took it, and how often in all.
+        let mut probed = [(0u64, 0u64); celld_logic::Probe::COUNT];
         for seed in seeds {
             let outcome = run(seed, &config_for(seed));
             for (transition, times) in &outcome.coverage {
                 let entry = covered.entry(*transition).or_default();
                 entry.0 += 1;
                 entry.1 += times;
+            }
+            for (seen, times) in probed.iter_mut().zip(outcome.probes) {
+                seen.0 += u64::from(times > 0);
+                seen.1 += times;
             }
             let mut kinds = std::collections::BTreeSet::new();
             for w in &outcome.watched {
@@ -153,6 +160,9 @@ fn main() {
             for ((from, to), (seeds, times)) in &covered {
                 println!("COVER {from} -> {to}: {seeds} seeds, {times} times");
             }
+            for (probe, (seeds, times)) in celld_logic::Probe::ALL.iter().zip(probed) {
+                println!("PROBE {}: {seeds} seeds, {times} times", probe.name());
+            }
         }
         let never: Vec<&str> = celld_sim::coverage::PHASES
             .into_iter()
@@ -162,6 +172,11 @@ fn main() {
             "{} phase transitions taken; phases never entered: {never:?}",
             covered.len()
         );
+        let unprobed: Vec<&str> = (celld_logic::Probe::ALL.iter().zip(probed))
+            .filter(|(_, (seeds, _))| *seeds == 0)
+            .map(|(probe, _)| probe.name())
+            .collect();
+        println!("probes never taken: {unprobed:?}");
         println!("{failed} of {total} seeds failed");
         if known.is_some() {
             println!("{unexpected} of {total} seeds did not fail as listed");

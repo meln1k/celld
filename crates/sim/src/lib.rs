@@ -724,6 +724,9 @@ pub struct Outcome {
     pub stats: Stats,
     /// The phase transitions the cores took (`coverage.rs`).
     pub coverage: coverage::Coverage,
+    /// How many times the cores took each code probe, in `Probe::ALL`
+    /// order (`celld_logic::Probe`).
+    pub probes: [u64; celld_logic::Probe::COUNT],
 }
 
 impl Outcome {

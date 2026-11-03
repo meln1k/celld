@@ -26,6 +26,7 @@ pub mod log_tier;
 mod output_gate;
 pub mod peer;
 pub mod pressure;
+mod probe;
 pub mod queue;
 pub mod rebalance;
 pub mod restore;
@@ -36,6 +37,7 @@ pub mod sweep;
 pub mod wake;
 
 mod types;
+pub use probe::Probe;
 pub use types::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -833,6 +835,8 @@ pub struct State {
     memory_headroom: bool,
     /// Which resource is holding the latch, for the effect the shell logs.
     shed_reason: Option<&'static str>,
+    /// How many times each code probe was taken (`probe.rs`).
+    probes: [u64; Probe::COUNT],
 }
 
 impl State {
@@ -898,7 +902,19 @@ impl State {
             shedding: false,
             memory_headroom: false,
             shed_reason: None,
+            probes: [0; Probe::COUNT],
         }
+    }
+
+    /// How many times each code probe was taken, in `Probe::ALL` order.
+    pub fn probes(&self) -> impl Iterator<Item = (Probe, u64)> + '_ {
+        (Probe::ALL.iter().copied()).zip(self.probes.iter().copied())
+    }
+
+    /// Count a probed branch. Decides nothing.
+    fn probe(&mut self, probe: Probe) {
+        let count = &mut self.probes[probe as usize];
+        *count = count.saturating_add(1);
     }
 
     pub fn node(&self) -> &str {
@@ -2369,6 +2385,7 @@ impl State {
     }
 
     fn fail_initial_node_lease(&mut self, spec: NodeLeaseSpec, effects: &mut Vec<Effect>) {
+        self.probe(Probe::InitialLeaseFailed);
         // Nothing else will ever ask: `StartNodeLease` is a one-shot at
         // process start. Arm the retry here or this node is done serving.
         // The renewal cadence is the right interval -- it is already the
@@ -2868,6 +2885,7 @@ impl State {
         // Ambiguous is the only safe class: the write may or may not be
         // durable, so the client must not be told it succeeded.
         if self.barriers.contains_key(&op) {
+            self.probe(Probe::GateDeadline);
             // Source is irrelevant on a failed proof; Bucket is the
             // conservative label.
             self.durable_reached(op, Err(Failure::Ambiguous), ProofSource::Bucket, effects);
@@ -2888,6 +2906,7 @@ impl State {
         // our still-owned record or reads the already-blank record and
         // settles as rejected.
         if cell.releasing == Some(op) {
+            self.probe(Probe::ReleaseDeadline);
             self.owner_released(op, Err(Failure::Definite), effects);
             return;
         }
@@ -2895,6 +2914,7 @@ impl State {
         // acknowledgement cannot restore this donor's authority. Future
         // demand reads the record and claims or follows the real owner.
         if matches!(cell.phase, Phase::Adopting { op: current, .. } if current == op) {
+            self.probe(Probe::AdoptDeadline);
             self.successor_adopted(op, Err(Failure::Definite), effects);
             return;
         }
@@ -2915,6 +2935,7 @@ impl State {
                 _ => 0,
             };
             let (id, now_mono_ms) = (id.clone(), self.now_mono_ms);
+            self.probe(Probe::AlarmDeadline);
             self.alarm_finished(
                 op,
                 (id, epoch),
@@ -2929,6 +2950,19 @@ impl State {
             return;
         }
         let phase = Some(cell.phase.clone());
+        let probe = match phase {
+            Some(Phase::ReadingOwner { .. }) => Some(Probe::OwnerReadDeadline),
+            Some(Phase::ReadingNodeLease { .. }) => Some(Probe::NodeLeaseReadDeadline),
+            Some(Phase::RecoveringOwnerLog { .. }) => Some(Probe::LogRecoveryDeadline),
+            Some(Phase::ReadingCapacity { .. }) => Some(Probe::CapacityReadDeadline),
+            Some(Phase::Acquiring { .. }) => Some(Probe::ClaimDeadline),
+            Some(Phase::ReconcilingAcquire { .. }) => Some(Probe::ReconcileDeadline),
+            Some(Phase::EnsuringDurability { .. }) => Some(Probe::EvictionDeadline),
+            _ => None,
+        };
+        if let Some(probe) = probe {
+            self.probe(probe);
+        }
         match phase {
             Some(Phase::ReadingOwner { .. }) => {
                 self.owner_read(op, 0, Err(Failure::Definite), effects)
@@ -3150,6 +3184,7 @@ impl State {
             cell.held_epoch != Some(source.epoch)
                 || cell.alarm_source.is_some_and(|previous| previous > source)
         }) {
+            self.probe(Probe::AlarmObservationStale);
             self.cells.insert(id.to_string(), cell);
             return;
         }
@@ -3165,6 +3200,7 @@ impl State {
                 ..
             }
         ) {
+            self.probe(Probe::AlarmObservationDuringReset);
             self.cells.insert(id.to_string(), cell);
             return;
         }
@@ -3176,6 +3212,7 @@ impl State {
             // here re-emits EnsureDurable forever while the cell has no pin.
             let safe_drain_refresh = self.draining && (at_ms.is_none() || covered);
             if !safe_drain_refresh {
+                self.probe(Probe::AlarmCancelledEviction);
                 self.cancel_eviction(id, &mut cell, epoch, EvictCancellation::Alarm, effects);
             }
         }
@@ -3208,6 +3245,7 @@ impl State {
                     *firing_covered = covered;
                 } else {
                     *observed = Some((alarm, covered));
+                    self.probe(Probe::AlarmObservationStaged);
                 }
                 self.cells.insert(id.to_string(), cell);
                 return;
@@ -3310,6 +3348,7 @@ impl State {
             // The alarm stays armed and covered for the successor; the
             // timer below keeps it live should the cell stay after all.
             Phase::Resident { .. } if self.draining && cell.quiescing => {
+                self.probe(Probe::AlarmTimerDeferredForDrain);
                 effects.push(Effect::ScheduleTimer {
                     timer: Timer::CellAlarm {
                         cell: id.to_string(),
@@ -3322,10 +3361,12 @@ impl State {
             }
             Phase::Resident { epoch } => epoch,
             Phase::EnsuringDurability { epoch, .. } => {
+                self.probe(Probe::AlarmFireCancelledEviction);
                 self.cancel_eviction(id, &mut cell, epoch, EvictCancellation::Alarm, effects);
                 epoch
             }
             Phase::Fenced => {
+                self.probe(Probe::AlarmTimerDroppedFenced);
                 cell.alarm = None;
                 self.cells.insert(id.to_string(), cell);
                 return;
@@ -3337,11 +3378,13 @@ impl State {
             // drain that never settled). The successor reads the alarm
             // from the cell's storage when it activates.
             Phase::Dormant { .. } | Phase::Inactive if self.draining => {
+                self.probe(Probe::AlarmTimerDroppedDraining);
                 cell.alarm = None;
                 self.cells.insert(id.to_string(), cell);
                 return;
             }
             Phase::Dormant { .. } => {
+                self.probe(Probe::AlarmTimerWokeCell);
                 cell.alarm_wake = true;
                 // Every activation takes a fresh epoch. The LTX metadata does
                 // not survive an eviction, so a same-epoch wake would restart
@@ -3360,6 +3403,7 @@ impl State {
                 return;
             }
             Phase::Inactive => {
+                self.probe(Probe::AlarmTimerWokeCell);
                 cell.alarm_wake = true;
                 self.admit_or_queue_activation(id, &mut cell, ColdStart::ReadOwner, effects);
                 effects.push(Effect::ScheduleTimer {
@@ -3373,6 +3417,7 @@ impl State {
                 return;
             }
             _ => {
+                self.probe(Probe::AlarmTimerRetried);
                 effects.push(Effect::ScheduleTimer {
                     timer: Timer::CellAlarm {
                         cell: id.to_string(),
@@ -3459,6 +3504,7 @@ impl State {
             // reset or fence that took it has already refused to acknowledge
             // the write. Settle the alarm below; a superseded op falls out of
             // `take_cell_op`.
+            self.probe(Probe::AlarmFinishedSuperseded);
         }
         let result = result.map(|(alarm, covered, _)| (alarm, covered));
         let Some(id) = self.take_cell_op(op, |cell| {
@@ -3488,6 +3534,9 @@ impl State {
                 // follow. Clearing it here first makes a consumed alarm look
                 // like it was never armed, and the entry is never deleted.
                 self.cells.insert(id.clone(), cell);
+                if observed.is_some() {
+                    self.probe(Probe::AlarmSettledOnStagedObservation);
+                }
                 let (alarm, covered) = observed.unwrap_or((alarm, covered));
                 self.alarm_observed(
                     &id,
@@ -3502,6 +3551,7 @@ impl State {
                 );
             }
             Err(_) => {
+                self.probe(Probe::AlarmFinishedFailed);
                 cell.alarm = Some(AlarmState::Armed {
                     at_ms,
                     generation,
@@ -3520,6 +3570,7 @@ impl State {
     }
 
     fn fence_node(&mut self, reason: HaltReason, effects: &mut Vec<Effect>) {
+        self.probe(Probe::NodeFenced);
         self.node_authority = NodeAuthority::Fenced;
         self.fence(effects);
         effects.push(Effect::Halt { code: 3, reason });
@@ -4561,6 +4612,7 @@ impl State {
                 cell.owner_log_recovery_attempts = 0;
             }
             Err(_) => {
+                self.probe(Probe::LogRecoveryFailed);
                 // A recovery fails precisely while the survivors sweep the
                 // dead owner's deep log — minutes of work for a large
                 // owner. The request waits the sweep out
@@ -4569,6 +4621,7 @@ impl State {
                 cell.owner_log_recovery_attempts =
                     cell.owner_log_recovery_attempts.saturating_add(1);
                 if cell.owner_log_recovery_attempts >= self.config.owner_log_recovery_attempts {
+                    self.probe(Probe::LogRecoveryGaveUp);
                     cell.owner_log_recovery_attempts = 0;
                     set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
                     self.finish_requests(&id, &mut cell, Err(RequestError::ResolveFailed), effects);
@@ -4767,7 +4820,12 @@ impl State {
                 // Seed the mirror from the durable truth the restore loaded,
                 // before the isolate opens the same database and long before
                 // it would re-arm anything.
-                if let Some(alarm) = outcome.alarm.filter(|alarm| alarm.at_ms >= 0) {
+                let restored_alarm = outcome.alarm.filter(|alarm| alarm.at_ms >= 0);
+                if restored_alarm.is_none() && matches!(cell.alarm, Some(AlarmState::Armed { .. }))
+                {
+                    self.probe(Probe::RestoreKeepsArmedAlarm);
+                }
+                if let Some(alarm) = restored_alarm {
                     let generation = self.next_timer_generation;
                     self.next_timer_generation = self
                         .next_timer_generation
@@ -4801,9 +4859,13 @@ impl State {
                 });
             }
             Err(_) => {
+                self.probe(Probe::RestoreFailed);
                 set_phase(&mut self.occupied, &mut cell, Phase::Dormant { epoch });
                 self.finish_requests(&id, &mut cell, Err(RequestError::RestoreFailed), effects);
                 resume_failed = cell.resume_demand;
+                if resume_failed {
+                    self.probe(Probe::ResumeFailed);
+                }
             }
         }
         self.cells.insert(id.clone(), cell);
@@ -4882,6 +4944,7 @@ impl State {
             self.cells.insert(id, cell);
             return;
         }
+        self.probe(Probe::StartTimedOut);
         self.timed_out_runtime_starts.insert(op);
         self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
         self.cells.insert(id, cell);
@@ -4910,6 +4973,7 @@ impl State {
                 self.finish_requests(&id, &mut cell, Ok(Route::Local), effects);
             }
             Err(_) => {
+                self.probe(Probe::PublishFailed);
                 let next = self.cell_op(&id);
                 set_phase(
                     &mut self.occupied,
@@ -5126,6 +5190,7 @@ impl State {
                 // node that has already decided it has no room. Publishing it
                 // as unowned is what turns an eviction into shed load.
                 if rebalance {
+                    self.probe(Probe::EvictionReleasedOwner);
                     let op = self.cell_op(&id);
                     cell.releasing = Some(op);
                     self.releasing_cells.insert(id.clone());
@@ -5139,6 +5204,7 @@ impl State {
             StopCause::Evict { .. } => {
                 // A request arrived mid-eviction, so the cell turns straight
                 // back around. The eviction is over either way.
+                self.probe(Probe::EvictionTurnedAround);
                 self.eviction_permits.remove(&id);
                 // The stop discarded the LTX metadata. Re-read ownership and
                 // claim epoch+1 before reusing the preserved SQLite image.
@@ -5149,6 +5215,7 @@ impl State {
             // drain to evict; dormant, the drain releases its record like
             // any other.
             StopCause::Swap if self.draining => {
+                self.probe(Probe::SwapStopWhileDraining);
                 set_phase(&mut self.occupied, &mut cell, Phase::Dormant { epoch });
                 self.finish_requests(&id, &mut cell, Err(RequestError::PublishFailed), effects);
             }
@@ -5207,6 +5274,7 @@ impl State {
             "only an eviction stop is bounded"
         );
         self.finish_eviction(op, Err(error), effects);
+        self.probe(Probe::StopFailedRestarts);
 
         cell.isolate = None;
         cell.evict_rebalance = false;
@@ -5461,6 +5529,7 @@ impl State {
                 set_phase(&mut self.occupied, cell, Phase::Resident { epoch });
                 cell.eviction_refused_mono_ms = Some(now);
                 self.eviction_permits.remove(&id);
+                self.probe(Probe::EvictionRefused);
                 self.finish_eviction(op, Err(EvictError::Failed(reason)), effects);
             }
         }
@@ -5759,6 +5828,14 @@ impl State {
     /// Release one dormant cell's record for a successor. The runtime is
     /// already stopped, so this is the record write alone.
     fn release_dormant(&mut self, id: &str, epoch: Epoch, effects: &mut Vec<Effect>) {
+        self.probe(Probe::DormantReleased);
+        if self
+            .cells
+            .get(id)
+            .is_some_and(|cell| !cell.websockets.is_empty())
+        {
+            self.probe(Probe::DormantReleasedWithSockets);
+        }
         let op = self.cell_op(id);
         let handoff = !self.draining;
         let cell = self.cells.get_mut(id).expect("dormant cell listed above");
@@ -6365,6 +6442,15 @@ impl State {
         ) {
             return;
         }
+        let cell = self.cells.get(id).expect("resident above");
+        let sockets = !cell.websockets.is_empty();
+        let firing = matches!(cell.alarm, Some(AlarmState::Firing { .. }));
+        if sockets {
+            self.probe(Probe::ResetWithWebSocket);
+        }
+        if firing {
+            self.probe(Probe::ResetWhileAlarmFiring);
+        }
         // Every other write still on the gate for this cell loses its runtime
         // here, so none of them may be acknowledged either.
         let doomed: Vec<OpId> = self
@@ -6391,6 +6477,7 @@ impl State {
                 // re-armed, with the wake entry left in place for the next
                 // activation to find.
                 GateOwner::Alarm { alarm, .. } => {
+                    self.probe(Probe::ResetFailsAlarmCommit);
                     let (now_ms, now_mono_ms) = (self.now_ms, self.now_mono_ms);
                     self.alarm_finished(
                         alarm,

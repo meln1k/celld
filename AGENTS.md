@@ -41,7 +41,7 @@ $B --swarm --seeds 0..1000                 # a quick sweep
 seq 0 31 | xargs -P32 -I{} sh -c \
   "$B --swarm --seeds \$(({}*3125))..\$((({}+1)*3125)) > q.{}.txt"  # 100k
 $B --swarm --seed 92204 --trace            # replay one seed, event by event
-$B --swarm --seeds 0..1000 --coverage      # every phase transition taken
+$B --swarm --seeds 0..1000 --coverage      # every phase transition and probe taken
 ```
 
 A seed is the whole run: the same seed and binary give the same trace hash.
@@ -55,6 +55,9 @@ about five minutes on 32 cores.
   shell's match on `Effect` and `coverage::name` are exhaustive, so a new
   variant stops the build until it is modelled. A new `Phase` must also be
   added to `coverage::PHASES`; a test checks that.
+- A fix to a rare branch: probe the branch first (`crates/logic/probe.rs`),
+  as its own commit, with trace hashes unchanged, and check that a sweep
+  takes it.
 - Compare a 100k sweep in both modes before and after the change. A new
   failure kind is either a core bug or a simulator bug; trace it with
   `--trace` before calling it either.

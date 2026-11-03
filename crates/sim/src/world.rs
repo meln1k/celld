@@ -60,8 +60,8 @@ use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use celld_logic::{
-    on_event, pressure, Config, Epoch, Event, OpId, OwnershipOnEvict, RequestId, State, Timer,
-    WebSocketId,
+    on_event, pressure, Config, Epoch, Event, OpId, OwnershipOnEvict, Probe, RequestId, State,
+    Timer, WebSocketId,
 };
 
 use self::judges::Watch;
@@ -503,6 +503,8 @@ pub struct World {
     next_recovery: u64,
     /// The phase transitions the cores took, and every cell's name.
     coverage: Coverage,
+    /// How many times every process's core took each code probe.
+    probes: [u64; Probe::COUNT],
     cell_names: Vec<String>,
     panic: Option<String>,
 }
@@ -560,6 +562,7 @@ impl World {
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),
+            probes: [0; Probe::COUNT],
             cell_names,
             hash: Fnv(0xcbf2_9ce4_8422_2325),
             trace: Vec::new(),
@@ -832,11 +835,24 @@ impl World {
         }
     }
 
+    /// Add the probes a process's core took to the run's.
+    fn count_probes(&mut self, state: &State) {
+        for (probe, times) in state.probes() {
+            self.probes[probe as usize] += times;
+        }
+    }
+
     fn finish(mut self) -> Outcome {
         // A run that panicked stopped early: its goals prove nothing.
         if self.panic.is_none() {
             self.judge_goals();
             self.judge_alarms(true);
+        }
+        // And the probes of every process still up.
+        for p in self.machines.iter().filter_map(|m| m.proc.as_ref()) {
+            for (probe, times) in p.state.probes() {
+                self.probes[probe as usize] += times;
+            }
         }
         let authoritative = self
             .machines
@@ -859,6 +875,7 @@ impl World {
             watched: self.checker.watched,
             stats: self.stats,
             coverage: self.coverage,
+            probes: self.probes,
         }
     }
 }
