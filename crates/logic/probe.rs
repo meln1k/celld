@@ -147,6 +147,9 @@ probes! {
     /// failed, rather than release a record a peer would restore without
     /// the tail this node failed to fold.
     DormantKeptUnfolded,
+    /// A dormant cell's record was released though its last claim here was
+    /// never followed by a restore, which would have folded this node's tail.
+    DormantReleasedUnrestored,
     /// An owner record release outlived its deadline.
     ReleaseDeadline,
     /// A successor's adoption outlived its deadline.

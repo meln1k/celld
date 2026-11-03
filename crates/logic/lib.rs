@@ -467,6 +467,11 @@ struct Cell {
     /// release would restore from the bucket alone and lose them; one that
     /// takes it over from this node recovers this node's log first.
     restore_failed: bool,
+    /// A claim from this node landed and no restore has run since: the cell
+    /// parked dormant at the claimed epoch when its demand went away. The
+    /// restore is what folds the tail this node's earlier epoch may have left
+    /// in its log, so that tail can still be unfolded.
+    unrestored_claim: bool,
     /// A restarted process is reading this cell's record to confirm what it
     /// owns. Like startup demand it keeps the read queued, but it wakes
     /// nothing: the read settles the cell to dormant or inactive.
@@ -627,6 +632,7 @@ impl Default for Cell {
             resume_demand: false,
             resume_epoch: None,
             restore_failed: false,
+            unrestored_claim: false,
             confirming: false,
             isolate: None,
             generation: 0,
@@ -4154,6 +4160,7 @@ impl State {
                         .and_then(|claim| claim.prior.clone()),
                 };
                 self.record_acquisition(&spec);
+                cell.unrestored_claim = spec.prior.as_deref() == Some(self.node.as_str());
                 let ownership_only = !cell.requests.is_empty()
                     && cell
                         .requests
@@ -4715,6 +4722,7 @@ impl State {
                     prior: claim.prior.clone(),
                 };
                 self.record_acquisition(&spec);
+                cell.unrestored_claim = spec.prior.as_deref() == Some(self.node.as_str());
                 let ownership_only = !cell.requests.is_empty()
                     && cell
                         .requests
@@ -4827,6 +4835,7 @@ impl State {
         match result {
             Ok(outcome) => {
                 cell.restore_failed = false;
+                cell.unrestored_claim = false;
                 if outcome.restored {
                     self.activity.restored = self.activity.restored.saturating_add(1);
                 }
@@ -5881,6 +5890,9 @@ impl State {
     /// already stopped, so this is the record write alone.
     fn release_dormant(&mut self, id: &str, epoch: Epoch, effects: &mut Vec<Effect>) {
         self.probe(Probe::DormantReleased);
+        if self.cells.get(id).is_some_and(|cell| cell.unrestored_claim) {
+            self.probe(Probe::DormantReleasedUnrestored);
+        }
         if self
             .cells
             .get(id)
