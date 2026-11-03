@@ -122,11 +122,17 @@ first one. A restore walks the chain with production's own rule
 (`celld_logic::epoch_chain::Walk`, which `EpochChain::build` calls too):
 down from the newest listed epoch, clipping each lower epoch below the cut
 above it, linking only an epoch that ends exactly at that cut, and stopping
-at one that opens at the first position. A paged cell pins epoch GC until its
+at one that opens at the first position. Below a linked paged epoch whose
+marker is still listed, it links only the epoch the marker names, passing
+the ones between unlisted: a fenced owner's late upload can end one of them
+at the same cut with other writes. A paged cell pins epoch GC until its
 background fill completes, a few seconds later. Every fill here completes;
 production can turn the fill off, and such a cell pins epoch GC for as long
 as it stays open. Page faults themselves are not modelled: a paged cell
-holds its whole database from the start. A deploy moves a node's resident
+holds its whole database from the start. Nor are markers written before
+markers named their source, which production still links by the cut alone,
+or the marker's read: the simulator takes a listed marker's source from its
+prefix, where production reads the object. A deploy moves a node's resident
 cells onto a new application generation, which restarts each runtime on its
 open database; in half of the swarm seeds, some of those restarts fail
 during the chaos window, as new code that does not load would. A write can set or clear its cell's alarm, which lives in the

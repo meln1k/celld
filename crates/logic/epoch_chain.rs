@@ -53,7 +53,9 @@ pub enum Wants {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     /// Not part of the chain: nothing listed below the cut, or what is
-    /// listed does not end at it.
+    /// listed does not end at it. Its marker, if it has one, is not read:
+    /// the cut and any source named above stand, so skipping the epoch a
+    /// marker named ends the walk (`wants` answers `Done` next).
     Skip,
     /// Part of the chain, serving `lo` through `hi`: the caller keeps the
     /// objects that end at or before `hi`. `base` when it opens at txid 1,

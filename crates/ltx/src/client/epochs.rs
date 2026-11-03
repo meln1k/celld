@@ -7,8 +7,12 @@
 //! from the newest epoch until one that opens with a snapshot, lists every
 //! level of each visited epoch once, clips an epoch to the txids before the
 //! next epoch's first (a fold that landed after the cut was never part of
-//! it), and routes every read by txid. The planner and the page map then
-//! run over it unchanged.
+//! it), and routes every read by txid. A linked epoch's level-0 marker names
+//! the epoch it continued (`continued_epoch`), and only that epoch links
+//! next: the walk passes the epochs between unlisted, since one of them can
+//! end at the same cut with other writes. Which epochs link is decided by
+//! `celld_logic::epoch_chain::Walk`. The planner and the page map then run
+//! over it unchanged.
 use crate::client::ReplicaClient;
 use crate::compaction_level::SNAPSHOT_LEVEL;
 use crate::db::continued_epoch;
