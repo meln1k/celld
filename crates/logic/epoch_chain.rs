@@ -14,10 +14,19 @@
 //! cut, and taking it as the base loses the writes between it and the cut
 //! (CelldPersistencePaged.tla, `BreakLinkByOrder`).
 //!
+//! Ending at the cut is not enough either. A fenced owner's late snapshot
+//! can also end exactly at the cut, in an epoch that was empty when the
+//! continuation restored and so was never its source: the same length,
+//! other writes. Linking it opens a database no owner ever held (swarm
+//! 240955). So a continuation's marker names the epoch it continued
+//! (`continues_from`), and the walk links only that epoch below it. A
+//! marker that names none, written before markers did, keeps the old rule.
+//!
 //! The listing is I/O, so the caller does it: `celld_ltx`'s `EpochChain`
 //! over the bucket, and the simulator over its own. Both walk with this
 //! type, so the chain the simulator checks is the chain production builds.
 
+pub type Epoch = u64;
 pub type Txid = u64;
 
 /// One epoch's place in the chain, the walk's verdict on it.
@@ -36,6 +45,9 @@ pub enum Step {
 pub struct Walk {
     /// The first txid the newest linked epoch serves.
     above: Option<Txid>,
+    /// The epoch the newest linked epoch continued, when its marker names
+    /// it: the only epoch the walk may link next.
+    source: Option<Epoch>,
 }
 
 impl Walk {
@@ -50,13 +62,22 @@ impl Walk {
         self.above.is_none_or(|lo| max_txid < lo)
     }
 
-    /// Decide on the next epoch down, given the txids its kept objects span
-    /// (`None` when it kept none). A span may end one short of where it
-    /// starts: an epoch that holds only an opener that takes no txid.
-    pub fn visit(&mut self, span: Option<(Txid, Txid)>) -> Step {
+    /// The epoch just linked continued `source`, as its marker names it.
+    pub fn continues_from(&mut self, source: Epoch) {
+        self.source = Some(source);
+    }
+
+    /// Decide on `epoch`, the next one down, given the txids its kept
+    /// objects span (`None` when it kept none). A span may end one short of
+    /// where it starts: an epoch that holds only an opener that takes no
+    /// txid.
+    pub fn visit(&mut self, epoch: Epoch, span: Option<(Txid, Txid)>) -> Step {
         let Some((lo, hi)) = span else {
             return Step::Skip;
         };
+        if self.source.is_some_and(|source| source != epoch) {
+            return Step::Skip;
+        }
         if self
             .above
             .is_some_and(|above| hi.checked_add(1) != Some(above))
@@ -64,6 +85,7 @@ impl Walk {
             return Step::Skip;
         }
         self.above = Some(lo);
+        self.source = None;
         Step::Link { lo, base: lo == 1 }
     }
 }

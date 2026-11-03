@@ -963,7 +963,13 @@ impl Db {
     /// A whole-database opener is what a paged cell cannot afford: on the
     /// 2 GB fleet whale it took minutes through the fault path, the
     /// durability gate timed out, and every re-activation started it over.
-    pub fn seed_continuation(&mut self, txid: TXID, commit: u32) -> Result<Vec<u8>> {
+    ///
+    /// The marker names `source`, the epoch whose chain this one continues,
+    /// in its header's `node_id`, which celld uses for nothing else. A
+    /// restore links only that epoch below this one: a fenced owner's late
+    /// snapshot can end at the same txid in an epoch that was empty when
+    /// this one restored, and linking it opens a database no owner held.
+    pub fn seed_continuation(&mut self, txid: TXID, commit: u32, source: u64) -> Result<Vec<u8>> {
         let wal = self.wal_header_bytes()?;
         let header = ltx::Header {
             version: ltx::VERSION,
@@ -978,7 +984,7 @@ impl Db {
             wal_size: 0,
             wal_salt1: be_u32(&wal[16..]),
             wal_salt2: be_u32(&wal[20..]),
-            node_id: 0,
+            node_id: source,
         };
         let baseline = ltx::encode_file(&header, &[], 0)?;
         self.seed_l0_baseline(txid, txid, &baseline)?;

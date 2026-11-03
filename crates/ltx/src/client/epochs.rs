@@ -14,6 +14,7 @@ use crate::compaction_level::SNAPSHOT_LEVEL;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ltx::FileInfo;
+use crate::ltx::Header;
 use crate::TXID;
 use async_trait::async_trait;
 use celld_logic::epoch_chain::Step;
@@ -54,9 +55,23 @@ impl<C: ReplicaClient> EpochChain<C> {
             }
             let lo = levels.iter().flatten().map(|f| f.min_txid.0).min();
             let hi = levels.iter().flatten().map(|f| f.max_txid.0).max();
-            let Step::Link { lo, base } = walk.visit(lo.zip(hi)) else {
+            let Step::Link { lo, base } = walk.visit(epoch, lo.zip(hi)) else {
                 continue;
             };
+            // A continuation's first txid is its marker, which names the
+            // epoch it continued (`Db::seed_continuation`). A marker from
+            // before markers did names none.
+            let marker = (levels.first().into_iter().flatten())
+                .find(|f| f.min_txid.0 == lo && f.max_txid.0 == lo);
+            if let (false, Some(marker)) = (base, marker) {
+                let bytes = client
+                    .open_ltx_file(0, marker.min_txid, marker.max_txid)
+                    .await?;
+                let source = Header::parse(&bytes)?.node_id;
+                if source != 0 {
+                    walk.continues_from(source);
+                }
+            }
             spans.push(Span {
                 epoch,
                 client,

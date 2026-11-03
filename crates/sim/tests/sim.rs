@@ -104,6 +104,19 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
 }
 
 #[test]
+fn a_restore_links_only_the_epoch_a_paged_epoch_continued() {
+    // In each seed a fenced owner's last upload, after a pause or suspend,
+    // ends exactly at a paged epoch's cut, in an epoch that was empty when
+    // the paged epoch restored. A restore that linked it on the cut alone
+    // opened writes no database ever held in that order (swarm 240955).
+    for seed in [240_955, 1_744_217, 2_889_492] {
+        let outcome = run(seed, &SimConfig::swarm(seed));
+        assert!(outcome.passed(), "seed {seed}: {:?}", outcome.violations);
+        assert!(outcome.stats.paged > 0, "seed {seed} paged no restore");
+    }
+}
+
+#[test]
 fn a_bucket_slower_than_the_lease_never_grants_authority() {
     // A lease write that takes longer than the TTL lands already expired.
     // The core must notice and keep retrying, never believing it holds a

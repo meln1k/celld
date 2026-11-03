@@ -86,6 +86,8 @@ struct Prefix {
     /// position.
     cut: usize,
     marker: bool,
+    /// The epoch the paged activation continued, as its marker names it.
+    source: Option<Epoch>,
 }
 
 impl Prefix {
@@ -546,12 +548,28 @@ impl Store {
     /// A paged activation's marker (`seed_continuation`): `epoch` continues
     /// the chain it restored, `content`, from its last position. Uploaded
     /// before the cell serves, and it counts as covering that position
-    /// (`note_covered`).
-    pub fn put_marker(&mut self, cell: &str, epoch: Epoch, content: &[WriteId], at_ms: u64) {
+    /// (`note_covered`). It names `source`, the epoch whose chain it
+    /// continues.
+    pub fn put_marker(
+        &mut self,
+        cell: &str,
+        epoch: Epoch,
+        content: &[WriteId],
+        source: Option<Epoch>,
+        at_ms: u64,
+    ) {
         let prefix = self.prefixes.entry((cell.to_string(), epoch)).or_default();
         prefix.cut = content.len();
         prefix.marker = true;
+        prefix.source = source;
         self.put(cell, epoch, content, at_ms);
+    }
+
+    /// The newest epoch of the chain a restore at `epoch` reads: the one a
+    /// paged activation's marker names (`EpochChain::spans`).
+    pub fn chain_source(&self, cell: &str, epoch: Epoch) -> Option<Epoch> {
+        let spans = self.spans(cell, epoch).ok()?;
+        spans.first().map(|span| span.epoch)
     }
 
     /// What a restore at `epoch` reads: the chain below it. `None` when no
@@ -624,9 +642,12 @@ impl Store {
                 None if prefix.marker && walk.keeps(lo - 1) => Some((lo, lo - 1)),
                 None => None,
             };
-            let Step::Link { base, .. } = walk.visit(span) else {
+            let Step::Link { base, .. } = walk.visit(key.1, span) else {
                 continue;
             };
+            if let Some(source) = prefix.source {
+                walk.continues_from(source);
+            }
             let (_, ends) = span.expect("a linked epoch has a span");
             spans.push(Span {
                 epoch: key.1,

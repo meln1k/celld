@@ -754,6 +754,26 @@ ended after the drain began. Nothing else changed in either mode. With
 drains and deploys raised in every seed of a scratch build, lost writes
 in 10,000 seeds went from 7 to 1, the 1 a superseded resume.
 
+A restore could link the wrong epoch below a paged one (**torn-restore**).
+A paged epoch continues the chain it restored from the cut, and a restore
+used to link below it the newest epoch whose objects end exactly at that
+cut. A fenced owner's last upload can end there too, in an epoch that was
+empty when the paged epoch restored: the same length, other writes. In
+swarm 240955, n2 restored c6 at epoch 2 and was suspended for 9.8 s; n0
+took it over at epoch 3, paging in epoch 1's 22 writes; n2 woke and
+uploaded epoch 2, also 22 writes long but ending in its own write 247
+instead of 199; n1's restore at epoch 4 linked epoch 2 below epoch 3 and
+opened a database no owner ever held. Epoch GC trusted the same chain, so
+it deleted epoch 1, the real source (swarm 2889492). Production builds the
+chain this way (`EpochChain::build`), and LTX files carry no checksum
+across the link that would catch it. Now a paged epoch's marker names the
+epoch it continued, in its header's otherwise unused `node_id`, and the
+walk (`celld_logic::epoch_chain::Walk`, which production and the
+simulator share) links only that epoch below it. A marker written before
+names none and keeps the old rule. The bug was rare in a sweep, 3 seeds in
+3,000,000 (240955, 1744217, 2889492), because it needs a bucket restore,
+paging, and a pause or suspend at once; the suite runs those three seeds.
+
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
 failing seed of the suite's configurations and of swarm seeds 0..10000, in

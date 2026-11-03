@@ -2374,7 +2374,7 @@ impl LtxRepl {
         let mut registration = PagedRegistration(None);
         // A paged activation continues its chain from the cut: (last txid of
         // the chain, page count at the cut).
-        let mut continuation: Option<(TXID, u32)> = None;
+        let mut continuation: Option<(TXID, u32, u64)> = None;
         if resume_local {
             anyhow::ensure!(
                 is_file(&dst),
@@ -2492,7 +2492,7 @@ impl LtxRepl {
                     // the eviction barrier, and a fenced owner's late
                     // snapshot in a lower epoch would outrank its chain
                     // (CelldPersistencePaged.tla, `BreakNoMarker`).
-                    continuation = Some((TXID(chain.max_txid().0 + 1), map.commit));
+                    continuation = Some((TXID(chain.max_txid().0 + 1), map.commit, from));
                     let reader = celld_ltx::paged::EpochChainReader::new(readers);
                     let source = celld_ltx::paged::PageSource::new(map, Box::new(reader));
                     let name = celld_ltx::paged_vfs::next_registration_name();
@@ -2602,7 +2602,9 @@ impl LtxRepl {
                 db.truncate_page_n = pages;
             }
             let marker = match continuation {
-                Some((txid, commit)) => Some((txid, db.seed_continuation(txid, commit)?)),
+                Some((txid, commit, from)) => {
+                    Some((txid, db.seed_continuation(txid, commit, from)?))
+                }
                 None => None,
             };
             let seed = db.pos().ok();
@@ -2723,7 +2725,7 @@ impl LtxRepl {
                     local_path: Db::meta_path_for_path(&dst),
                     host: self.ltx_host.clone(),
                     queue: queue.clone(),
-                    base_txid: continuation.map_or(1, |(txid, _)| txid.0),
+                    base_txid: continuation.map_or(1, |(txid, _, _)| txid.0),
                     min_txids: self.compaction_min_txids,
                     min_bytes: self.compaction_min_bytes,
                     pending_bytes: AtomicU64::new(0),
