@@ -573,15 +573,16 @@ The core on `main` fails some seeds.
     `prune_stale_live`.
   - `activation waiter … is queued twice`: the same scan, for a cell that
     a request is also waiting on.
-- **A memory walk-down that wedges.** A node latches on pressure while a cell
-  is still activating: the cell counts as occupied but holds no memory yet.
-  The walk-down evicts one cell, the activating cell's memory lands, and the
-  next sample is unchanged. The futility stop
-  (`shedding_can_reach_resume_line`) reads that as zero yield per eviction
-  and stops shedding with the latch held, so the node refuses every new cell
-  and never evicts an idle one. Nothing measures differently again, so it
-  stays that way (**memory-not-relieved**, and **liveness** or
-  **alarm-not-fired** when the cells it refuses have nowhere else to go).
+- **A memory walk-down that wedges.** A latched node holds the latch while
+  shedding no more, so it refuses every new cell and never evicts an idle
+  one, and nothing measures differently again (**memory-not-relieved**, and
+  **liveness** or **alarm-not-fired** when the cells it refuses have nowhere
+  else to go). One way in is left of the futility stop's, below: a cut
+  sampled after an eviction's memory left but before its stop reached the
+  core counts the cell and not its bytes, so the stop that lands next reads
+  as zero yield (swarm 34741, after a pause). Most wedges left, 34 of 38 in
+  100,000 seeds, never take the futility stop, and are not traced yet
+  (swarm 2515).
 - **A capacity livelock.** When every node is at its residency cap, a new
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
@@ -888,6 +889,24 @@ parks dormant (probe `StartFailed`). With the fix, liveness is at 1,095 and
 seed that newly fails diverges from the parent at a failed start and fails
 a known kind (traced samples: a wedged walk-down, a fold that never succeeds, a lease lost
 mid-handoff). The suite runs swarms 30 and 84.
+
+The memory walk-down's futility stop held its latch on a cut that a cell
+still on its way in had made meaningless. A cell counts as occupied from its
+claim, but its database and heap open only as it starts. When the cut
+evicted one cell and an activating cell's memory then landed, the next
+sample read flat, the stop took that for zero yield per eviction, and the
+node held the latch with no cut left to measure, refusing every cell for
+good (swarm 19: one more eviction would have reached the resume line, and
+c5 was never served). Now a cut remembers how many cells were on their way
+in, and a stop whose cut has seen one land since takes a fresh cut instead
+(probe `ShedRecutAfterActivationLanded`). Admission is closed while
+latched, so it re-cuts only as often as those cells land, and a stop on a
+fully weighed cut holds as before. In 100,000 swarm seeds, liveness went
+from 1,095 to 218 with validation compiled out and from 949 to 198 with it
+on, **alarm-not-fired** from 177 to 105 and 140 to 84, and
+**memory-not-relieved** watches from 1,452 to 38 and 1,246 to 36. Every one
+of the 30 seeds that newly fail takes the re-cut and fails a known kind. The
+suite runs swarm 19.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

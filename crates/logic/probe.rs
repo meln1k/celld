@@ -130,10 +130,10 @@ probes! {
     /// shedding cannot reach the resume line: it holds the latch, cuts
     /// nothing more and evicts no idle cell.
     ShedStoppedFutile,
-    /// Of those, a stop whose cut was taken while a cell counted as occupied
-    /// was still on its way in, so its memory may have landed after the cut
-    /// and hidden what the cut gave back.
-    ShedStoppedOnUnweighedCut,
+    /// The stop would have held, but a cell on its way in at the last cut
+    /// has landed since, hiding what the cut gave back, so the walk down
+    /// takes a fresh cut instead.
+    ShedRecutAfterActivationLanded,
 
     // Stops and handoffs.
     /// A swap stop ended on a draining node: the cell starts again at the

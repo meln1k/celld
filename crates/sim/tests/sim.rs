@@ -176,6 +176,22 @@ fn a_failed_start_closes_the_database_its_restore_opened() {
 }
 
 #[test]
+fn a_walk_down_recuts_when_an_activating_cell_lands_after_its_cut() {
+    // n0 latches on memory with c3's claim in flight. The cut evicts c5,
+    // c3's memory lands, and the next sample reads flat. The futility stop
+    // took that for zero yield and held the latch for good, one eviction
+    // short of the resume line, so c5 was never served.
+    let seed = 19;
+    let outcome = run(seed, &SimConfig::swarm(seed));
+    assert!(outcome.passed(), "{:?}", outcome.violations);
+    let recut = outcome.probes[celld_logic::Probe::ShedRecutAfterActivationLanded as usize];
+    assert!(
+        recut > 0,
+        "the seed no longer stops on a cut taken mid-activation"
+    );
+}
+
+#[test]
 fn a_bucket_slower_than_the_lease_never_grants_authority() {
     // A lease write that takes longer than the TTL lands already expired.
     // The core must notice and keep retrying, never believing it holds a

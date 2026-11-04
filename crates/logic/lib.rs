@@ -678,9 +678,8 @@ struct ShedCut {
     bytes: u64,
     /// The residency the cut was taken at.
     cells: usize,
-    /// Probe-only: of those, cells still on their way in (acquiring,
-    /// restoring, starting), which count as occupied before their memory
-    /// lands.
+    /// Of those, cells still on their way in (`unweighed_cells`): counted
+    /// as occupied, but holding no memory in `bytes` yet.
     unweighed: usize,
 }
 
@@ -6379,19 +6378,40 @@ impl State {
             // fresh baseline. The band absorbs the jitter of a live sample and
             // decides nothing about what a cut must achieve.
             let rose = sample_bytes > cut.bytes.saturating_add(cut.bytes / 100);
+            // A cell on its way in at the cut whose memory has landed since
+            // hides what the cut gave back: one cell left, one arrived, and
+            // the sample reads flat. Judged on that, the stop held the latch
+            // with no cut left to measure, and nothing changed again (swarm
+            // 19). Such a cut says nothing about yield, so take a fresh one.
+            // Admission is closed while latched, so this re-cuts only as
+            // often as cells already in flight land.
+            let landed_since = self.unweighed_cells() < cut.unweighed;
             if cut_landed && !rose && !self.shedding_can_reach_resume_line(cut, sample_bytes) {
-                self.probe(Probe::ShedStoppedFutile);
-                if cut.unweighed > 0 {
-                    self.probe(Probe::ShedStoppedOnUnweighedCut);
+                if !landed_since {
+                    self.probe(Probe::ShedStoppedFutile);
+                    return;
                 }
-                return;
+                self.probe(Probe::ShedRecutAfterActivationLanded);
             }
         }
         // How far this resource sample asks the node to come down: a proportion
         // of what was just measured, because the effect of an eviction on the
         // sample is not visible until the next one.
         self.shed_floor = pressure::PressureConfig::release_target(load.resident_cells);
-        let unweighed = (self.cells.values())
+        self.shed_cut = Some(ShedCut {
+            metric,
+            bytes: sample_bytes,
+            cells: load.resident_cells,
+            unweighed: self.unweighed_cells(),
+        });
+        self.shed_toward_floor(effects);
+    }
+
+    /// Cells that count as occupied but are still on their way in:
+    /// acquiring, restoring or starting, before their database and heap are
+    /// open, so a memory sample holds nothing of theirs yet.
+    fn unweighed_cells(&self) -> usize {
+        (self.cells.values())
             .filter(|cell| {
                 matches!(
                     cell.phase,
@@ -6401,14 +6421,7 @@ impl State {
                         | Phase::Starting { .. }
                 )
             })
-            .count();
-        self.shed_cut = Some(ShedCut {
-            metric,
-            bytes: sample_bytes,
-            cells: load.resident_cells,
-            unweighed,
-        });
-        self.shed_toward_floor(effects);
+            .count()
     }
 
     /// Is there a heap this walk down can still take back whole?
