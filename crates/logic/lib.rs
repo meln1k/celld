@@ -472,6 +472,10 @@ struct Cell {
     /// restore is what folds the tail this node's earlier epoch may have left
     /// in its log, so that tail can still be unfolded.
     unrestored_claim: bool,
+    /// Probe-only: the path that last parked this cell dormant without a
+    /// proof or a restore, and that neither flag above keeps. Names the
+    /// probe its release fires.
+    parked_unproven: Option<Probe>,
     /// A restarted process is reading this cell's record to confirm what it
     /// owns. Like startup demand it keeps the read queued, but it wakes
     /// nothing: the read settles the cell to dormant or inactive.
@@ -645,6 +649,7 @@ impl Default for Cell {
             resume_epoch: None,
             restore_failed: false,
             unrestored_claim: false,
+            parked_unproven: None,
             confirming: false,
             isolate: None,
             generation: 0,
@@ -4122,6 +4127,8 @@ impl State {
                 // and the next request wakes it through the usual claim.
                 let phase = match result {
                     Ok(Some(record)) if record.node.as_deref() == Some(self.node.as_str()) => {
+                        self.probe(Probe::DormantConfirmedUnrestored);
+                        cell.parked_unproven = Some(Probe::DormantReleasedConfirmed);
                         Phase::Dormant {
                             epoch: record.epoch,
                         }
@@ -4985,6 +4992,8 @@ impl State {
                 resume_failed = cell.resume_demand;
             }
             Err(_) => {
+                self.probe(Probe::StartFailedParked);
+                cell.parked_unproven = Some(Probe::DormantReleasedAfterFailedStart);
                 set_phase(&mut self.occupied, &mut cell, Phase::Dormant { epoch });
                 self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
                 resume_failed = cell.resume_demand;
@@ -5919,6 +5928,9 @@ impl State {
     /// already stopped, so this is the record write alone.
     fn release_dormant(&mut self, id: &str, epoch: Epoch, effects: &mut Vec<Effect>) {
         self.probe(Probe::DormantReleased);
+        if let Some(probe) = self.cells.get(id).and_then(|cell| cell.parked_unproven) {
+            self.probe(probe);
+        }
         if self
             .cells
             .get(id)
@@ -7225,6 +7237,9 @@ fn phase_requires_activation_permit(phase: &Phase, swapping: bool) -> bool {
 fn set_phase(occupied: &mut usize, cell: &mut Cell, phase: Phase) {
     if !matches!(&phase, Phase::Resident { .. }) {
         cell.quiescing = false;
+    }
+    if !matches!(&phase, Phase::Dormant { .. }) {
+        cell.parked_unproven = None;
     }
     // Ownership follows the confirmed phases and survives the transient
     // wake phases between them; a phase that names another owner, no owner,

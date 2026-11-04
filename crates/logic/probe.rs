@@ -154,6 +154,16 @@ probes! {
     /// Of those, a cell whose claim here landed with no restore, so the
     /// tail an earlier epoch left in this node's log stays unfolded.
     DormantKeptUnrestored,
+    /// A restarted process confirmed a cell its record still names here and
+    /// parked it dormant, with no restore and no proof.
+    DormantConfirmedUnrestored,
+    /// Of dormant releases, one of a cell parked that way.
+    DormantReleasedConfirmed,
+    /// A runtime start failed outside a swap, and the cell parked dormant
+    /// with no proof.
+    StartFailedParked,
+    /// Of dormant releases, one of a cell parked that way.
+    DormantReleasedAfterFailedStart,
     /// An owner record release outlived its deadline.
     ReleaseDeadline,
     /// A successor's adoption outlived its deadline.
