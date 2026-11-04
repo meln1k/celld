@@ -5743,18 +5743,18 @@ impl State {
         // application cell carries no comparable background obligation.
         #[cfg(celld_internal_tests)]
         self.record_drain_table_visits(self.cells.len());
+        let mut kept = KeptRecords::default();
         let dormant_queues: Vec<(CellId, Epoch)> = self
             .cells
             .iter()
             .filter_map(|(id, cell)| match cell.phase {
-                Phase::Dormant { epoch }
-                    if cell.releasing.is_none() && !cell.keeps_record() && is_queue_broker(id) =>
-                {
-                    Some((id.clone(), epoch))
+                Phase::Dormant { epoch } if cell.releasing.is_none() && is_queue_broker(id) => {
+                    kept_or_released(cell, &mut kept).then(|| (id.clone(), epoch))
                 }
                 _ => None,
             })
             .collect();
+        self.probe_kept_records(&kept);
         for (id, epoch) in dormant_queues {
             if in_flight >= self.config.max_releases {
                 return;
@@ -5845,35 +5845,34 @@ impl State {
         // directly.
         #[cfg(celld_internal_tests)]
         self.record_drain_table_visits(self.cells.len());
+        let mut kept = KeptRecords::default();
         let dormant: Vec<(CellId, Epoch)> = self
             .cells
             .iter()
             .filter_map(|(id, cell)| match cell.phase {
-                Phase::Dormant { epoch } if cell.releasing.is_none() && !cell.keeps_record() => {
-                    Some((id.clone(), epoch))
+                Phase::Dormant { epoch } if cell.releasing.is_none() => {
+                    kept_or_released(cell, &mut kept).then(|| (id.clone(), epoch))
                 }
                 _ => None,
             })
             .collect();
-        if (self.cells.values())
-            .any(|cell| cell.keeps_record() && matches!(cell.phase, Phase::Dormant { .. }))
-        {
-            self.probe(Probe::DormantKeptUnfolded);
-        }
-        if (self.cells.values()).any(|cell| {
-            cell.unrestored_claim
-                && !cell.restore_failed
-                && cell.releasing.is_none()
-                && matches!(cell.phase, Phase::Dormant { .. })
-        }) {
-            self.probe(Probe::DormantKeptUnrestored);
-        }
+        self.probe_kept_records(&kept);
         for (id, epoch) in dormant {
             if in_flight >= self.config.max_releases {
                 return;
             }
             self.release_dormant(&id, epoch, effects);
             in_flight += 1;
+        }
+    }
+
+    /// A release walk kept these cells' records (`kept_or_released`).
+    fn probe_kept_records(&mut self, kept: &KeptRecords) {
+        if kept.any {
+            self.probe(Probe::DormantKeptUnfolded);
+        }
+        if kept.unrestored {
+            self.probe(Probe::DormantKeptUnrestored);
         }
     }
 
@@ -5937,36 +5936,23 @@ impl State {
                 .max_releases
                 .saturating_sub(self.handoffs_in_flight()),
         );
+        let mut kept = KeptRecords::default();
         let mut dormant: Vec<(CellId, Epoch, u64)> = self
             .cells
             .iter()
             .filter_map(|(id, cell)| match cell.phase {
                 Phase::Dormant { epoch }
                     if cell.releasing.is_none()
-                        && !cell.keeps_record()
                         && cell.requests.is_empty()
                         && !self.alarm_is_imminent(cell) =>
                 {
-                    Some((id.clone(), epoch, cell.last_used_mono_ms))
+                    (kept_or_released(cell, &mut kept))
+                        .then(|| (id.clone(), epoch, cell.last_used_mono_ms))
                 }
                 _ => None,
             })
             .collect();
-        if (self.cells.values())
-            .any(|cell| cell.keeps_record() && matches!(cell.phase, Phase::Dormant { .. }))
-        {
-            self.probe(Probe::DormantKeptUnfolded);
-        }
-        if (self.cells.values()).any(|cell| {
-            cell.unrestored_claim
-                && !cell.restore_failed
-                && cell.releasing.is_none()
-                && cell.requests.is_empty()
-                && !self.alarm_is_imminent(cell)
-                && matches!(cell.phase, Phase::Dormant { .. })
-        }) {
-            self.probe(Probe::DormantKeptUnrestored);
-        }
+        self.probe_kept_records(&kept);
         dormant.sort_by(|left, right| (left.2, &left.0).cmp(&(right.2, &right.0)));
         for (id, epoch, _) in dormant.into_iter().take(budget) {
             self.release_dormant(&id, epoch, effects);
@@ -7212,6 +7198,27 @@ fn phase_requires_activation_permit(phase: &Phase, swapping: bool) -> bool {
 /// The one gate every phase change passes through: it keeps `occupied`
 /// equal to the number of cells in a capacity-occupying phase, so nothing
 /// ever has to count them. `validate` asserts the equality by walking.
+/// The dormant cells a release walk kept rather than release, for its
+/// probes.
+#[derive(Default)]
+struct KeptRecords {
+    any: bool,
+    /// One kept because a claim here landed with no restore.
+    unrestored: bool,
+}
+
+/// Whether a release walk may release this dormant cell, which passed the
+/// walk's own filters. One that keeps its record (`Cell::keeps_record`) is
+/// noted in `kept` for the walk's probes.
+fn kept_or_released(cell: &Cell, kept: &mut KeptRecords) -> bool {
+    if !cell.keeps_record() {
+        return true;
+    }
+    kept.any = true;
+    kept.unrestored |= !cell.restore_failed;
+    false
+}
+
 fn set_phase(occupied: &mut usize, cell: &mut Cell, phase: Phase) {
     if !matches!(&phase, Phase::Resident { .. }) {
         cell.quiescing = false;
