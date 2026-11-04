@@ -3579,6 +3579,32 @@ impl State {
         }
     }
 
+    /// Stop a cell whose runtime failed to start or publish with a cleanup
+    /// stop, which proves its database durable and closes it before the cell
+    /// parks dormant (`runtime_stopped`).
+    fn begin_cleanup(
+        &mut self,
+        id: &str,
+        cell: &mut Cell,
+        epoch: Epoch,
+        effects: &mut Vec<Effect>,
+    ) {
+        let op = self.cell_op(id);
+        let cause = StopCause::Cleanup;
+        set_phase(
+            &mut self.occupied,
+            cell,
+            Phase::Cleaning { op, epoch, cause },
+        );
+        effects.push(Effect::StopRuntime {
+            op,
+            cell: id.to_string(),
+            epoch,
+            cause,
+            bounded: false,
+        });
+    }
+
     fn fence_node(&mut self, reason: HaltReason, effects: &mut Vec<Effect>) {
         self.probe(Probe::NodeFenced);
         self.node_authority = NodeAuthority::Fenced;
@@ -4931,23 +4957,7 @@ impl State {
                     true => Probe::SwapRestartFailed,
                     false => Probe::StartFailed,
                 });
-                let next = self.cell_op(&id);
-                set_phase(
-                    &mut self.occupied,
-                    &mut cell,
-                    Phase::Cleaning {
-                        op: next,
-                        epoch,
-                        cause: StopCause::Cleanup,
-                    },
-                );
-                effects.push(Effect::StopRuntime {
-                    op: next,
-                    cell: id.clone(),
-                    epoch,
-                    cause: StopCause::Cleanup,
-                    bounded: false,
-                });
+                self.begin_cleanup(&id, &mut cell, epoch, effects);
                 self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
                 resume_failed = cell.resume_demand;
             }
@@ -5008,23 +5018,7 @@ impl State {
             }
             Err(_) => {
                 self.probe(Probe::PublishFailed);
-                let next = self.cell_op(&id);
-                set_phase(
-                    &mut self.occupied,
-                    &mut cell,
-                    Phase::Cleaning {
-                        op: next,
-                        epoch,
-                        cause: StopCause::Cleanup,
-                    },
-                );
-                effects.push(Effect::StopRuntime {
-                    op: next,
-                    cell: id.clone(),
-                    epoch,
-                    cause: StopCause::Cleanup,
-                    bounded: false,
-                });
+                self.begin_cleanup(&id, &mut cell, epoch, effects);
             }
         }
         self.cells.insert(id.clone(), cell);
