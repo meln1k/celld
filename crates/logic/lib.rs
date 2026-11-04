@@ -678,6 +678,10 @@ struct ShedCut {
     bytes: u64,
     /// The residency the cut was taken at.
     cells: usize,
+    /// Probe-only: of those, cells still on their way in (acquiring,
+    /// restoring, starting), which count as occupied before their memory
+    /// lands.
+    unweighed: usize,
 }
 
 /// All authoritative coordination state for the first vertical slice.
@@ -6376,6 +6380,10 @@ impl State {
             // decides nothing about what a cut must achieve.
             let rose = sample_bytes > cut.bytes.saturating_add(cut.bytes / 100);
             if cut_landed && !rose && !self.shedding_can_reach_resume_line(cut, sample_bytes) {
+                self.probe(Probe::ShedStoppedFutile);
+                if cut.unweighed > 0 {
+                    self.probe(Probe::ShedStoppedOnUnweighedCut);
+                }
                 return;
             }
         }
@@ -6383,10 +6391,22 @@ impl State {
         // of what was just measured, because the effect of an eviction on the
         // sample is not visible until the next one.
         self.shed_floor = pressure::PressureConfig::release_target(load.resident_cells);
+        let unweighed = (self.cells.values())
+            .filter(|cell| {
+                matches!(
+                    cell.phase,
+                    Phase::Acquiring { dormant: false, .. }
+                        | Phase::ReconcilingAcquire { dormant: false, .. }
+                        | Phase::Restoring { .. }
+                        | Phase::Starting { .. }
+                )
+            })
+            .count();
         self.shed_cut = Some(ShedCut {
             metric,
             bytes: sample_bytes,
             cells: load.resident_cells,
+            unweighed,
         });
         self.shed_toward_floor(effects);
     }

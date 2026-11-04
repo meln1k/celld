@@ -125,6 +125,16 @@ probes! {
     /// The read that settles an ambiguous claim outlived its deadline.
     ReconcileDeadline,
 
+    // Memory pressure.
+    /// A latched node's last cut landed, and the futility stop judged that
+    /// shedding cannot reach the resume line: it holds the latch, cuts
+    /// nothing more and evicts no idle cell.
+    ShedStoppedFutile,
+    /// Of those, a stop whose cut was taken while a cell counted as occupied
+    /// was still on its way in, so its memory may have landed after the cut
+    /// and hidden what the cut gave back.
+    ShedStoppedOnUnweighedCut,
+
     // Stops and handoffs.
     /// A swap stop ended on a draining node: the cell starts again at the
     /// same epoch, for the drain to prove and evict.
