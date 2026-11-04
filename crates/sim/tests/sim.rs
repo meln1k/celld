@@ -136,6 +136,22 @@ fn a_drain_keeps_a_cell_whose_claim_here_never_restored() {
 }
 
 #[test]
+fn a_failed_alarm_handler_keeps_a_newer_uncovered_alarm_from_eviction() {
+    // c3's alarm handler outlives its deadline while a request arms c3 for
+    // later. The deadline re-arms the fired alarm; marked covered, the cell
+    // was evicted with the newer alarm in its database and no wake entry
+    // for it.
+    let seed = 7_053_222;
+    let outcome = run(seed, &SimConfig::swarm(seed));
+    assert!(outcome.passed(), "{:?}", outcome.violations);
+    let rearmed = outcome.probes[celld_logic::Probe::AlarmRearmedOverUncovered as usize];
+    assert!(
+        rearmed > 0,
+        "the seed no longer re-arms over an uncovered alarm"
+    );
+}
+
+#[test]
 fn a_bucket_slower_than_the_lease_never_grants_authority() {
     // A lease write that takes longer than the TTL lands already expired.
     // The core must notice and keep retrying, never believing it holds a

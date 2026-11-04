@@ -841,6 +841,18 @@ rare: 1 seed in 100,000 swarm seeds takes it besides 138032, and in both
 modes every failing line of those 100,000 is the same as the parent's. The
 suite runs swarm 138032.
 
+A failed alarm handler's re-arm hid a newer alarm from eviction. A handler
+that fails, or outlives its operation deadline, re-arms the alarm it fired
+with that alarm's wake coverage, and drops the observation staged while it
+ran. When that observation was a newer alarm no wake entry covered yet, the
+cell looked covered, so eviction let it go with an alarm in its database
+that nothing in the bucket named (**uncovered-alarm**, swarm 7053222: a
+request armed c3 for 22560 while its handler ran 15 s through a partition;
+the deadline re-armed the fired alarm as covered, and the balancer evicted
+c3). Now the re-arm is covered only if the staged state was too (probe
+`AlarmRearmedOverUncovered`), so the cell stays until the retry or a later
+observation settles the alarm and its entry. The suite runs swarm 7053222.
+
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
 failing seed of the suite's configurations and of swarm seeds 0..10000, in

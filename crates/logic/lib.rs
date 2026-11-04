@@ -3580,13 +3580,19 @@ impl State {
             }
             Err(_) => {
                 self.probe(Probe::AlarmFinishedFailed);
-                if covered && observed.as_ref().is_some_and(|(_, staged)| !staged) {
+                // The re-arm keeps the fired alarm for at-least-once, but the
+                // database may hold the newer state staged behind it, and a
+                // wake entry covers the cell only if it covers that state
+                // too. Until the retry or a later observation settles it,
+                // eviction must not take a cell nothing in the bucket wakes.
+                let staged_uncovered = observed.as_ref().is_some_and(|(_, staged)| !staged);
+                if covered && staged_uncovered {
                     self.probe(Probe::AlarmRearmedOverUncovered);
                 }
                 cell.alarm = Some(AlarmState::Armed {
                     at_ms,
                     generation,
-                    covered,
+                    covered: covered && !staged_uncovered,
                 });
                 self.cells.insert(id.clone(), cell);
                 effects.push(Effect::ScheduleTimer {
