@@ -267,6 +267,7 @@ impl World {
             } => self.ensure_durable(node, op, &cell, epoch),
             Effect::AbandonEvictionStop { op, .. } => self.abandon_stop(node, op),
             Effect::ReleaseOwner { op, cell, epoch } => {
+                self.judge_release(node, &cell);
                 self.store_call(node, StoreReq::ReleaseOwner { op, cell, epoch })
             }
             Effect::AdoptReleased {

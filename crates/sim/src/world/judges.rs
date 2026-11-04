@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use celld_logic::drain;
-use celld_logic::{Epoch, WebSocketKind};
+use celld_logic::{Epoch, Phase, WebSocketKind};
 
 use super::alarms::ALARM_SLACK_MS;
 use super::{Pending, Time, World, LOAD_SAMPLE_MS, OPERATION_DEADLINE_MS, WALL_EPOCH_MS};
@@ -68,6 +68,37 @@ impl World {
         let pinned = self.pinned(node, cell);
         let uncovered = self.alarm_uncovered(node, cell, epoch);
         self.checker.evicting(self.t, &who, cell, pinned, uncovered);
+    }
+
+    /// Watched: the core is releasing `cell`'s owner record. This process
+    /// must hold no tail of the cell: a peer that adopts the record restores
+    /// from the per-cell layout alone, and only this process folds a tail.
+    pub(super) fn judge_release(&mut self, node: usize, cell: &str) {
+        let tails: Vec<Epoch> = (self.machines[node].proc().tails.keys())
+            .filter(|(c, _)| c == cell)
+            .map(|(_, epoch)| *epoch)
+            .collect();
+        if !tails.is_empty() {
+            let who = self.who(node);
+            (self.checker).released_with_tail(self.t, &who, cell, &tails);
+        }
+    }
+
+    /// Watched: a cell the core holds dormant has no database open here.
+    /// Every path to dormant either stops the runtime, which proves and
+    /// closes the database, or never opened one; an open one is leaked.
+    pub(super) fn judge_dormant(&mut self, node: usize) {
+        let p = self.machines[node].proc();
+        let open: Vec<(String, Epoch, Epoch)> = (p.replicas.keys())
+            .filter_map(|(cell, epoch)| match p.state.phase(cell) {
+                Some(Phase::Dormant { epoch: dormant }) => Some((cell.clone(), *epoch, *dormant)),
+                _ => None,
+            })
+            .collect();
+        let who = self.who(node);
+        for (cell, epoch, dormant) in open {
+            (self.checker).dormant_open(self.t, &who, &cell, epoch, dormant);
+        }
     }
 
     /// The process on `node` is about to die: every alarm a client was told

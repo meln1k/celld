@@ -65,6 +65,7 @@ impl World {
     /// Production's periodic sampler.
     pub(super) fn sample_load(&mut self, node: usize) {
         self.judge_idle(node);
+        self.judge_dormant(node);
         self.fold_load_sample(node);
         self.work(node, LOAD_SAMPLE_MS, Work::LoadSample);
     }

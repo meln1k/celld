@@ -353,6 +353,17 @@ core, not to the simulator or to the property itself.
   older generation.
 - **idle-not-evicted**: a cell with nothing in flight, no socket and no alarm
   stayed resident long past its idle limit.
+- **released-with-tail**: the core released a cell's owner record while its
+  node held an unfolded tail of the cell: acknowledged writes from an epoch
+  that ended without its final upload, which only that node's next restore
+  folds.
+- **dormant-replica-open**: at a load sample, the core held a cell dormant
+  while its node still had a database of the cell open.
+  A preserve that begins while a restore is in flight hits it: the core
+  retires the restore and parks the cell dormant, and the restore then
+  opens the database, which nothing closes before the process exits (229
+  of 100,000 swarm seeds with validation compiled out, 200 with it on).
+  Data is safe, since the epoch never served.
 - **socket-outlives-runtime**: an outbound WebSocket stayed open after its
   cell's runtime stopped.
 - **memory-not-relieved**: a node with no socket open stayed latched on
