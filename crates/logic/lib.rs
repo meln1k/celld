@@ -47,11 +47,6 @@ enum Activation {
     Restore(RestoreSpec),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ColdStart {
-    ReadOwner,
-}
-
 /// What a node does for a cell that needs a residency slot it does not have.
 ///
 /// Every caller of `State::activate_or_wait` states this, because the answer
@@ -433,7 +428,6 @@ struct Cell {
     requests: BTreeSet<RequestId>,
     websockets: BTreeMap<WebSocketId, WebSocketKind>,
     waiting_for: Option<Activation>,
-    waiting_activation: Option<ColdStart>,
     /// The in-flight release of this cell's ownership record, if any.
     releasing: Option<OpId>,
     /// Whether the eviction now under way hands this cell to the fleet.
@@ -472,10 +466,6 @@ struct Cell {
     /// restore is what folds the tail this node's earlier epoch may have left
     /// in its log, so that tail can still be unfolded.
     unrestored_claim: bool,
-    /// Probe-only: the path that last parked this cell dormant without a
-    /// proof or a restore, and that neither flag above keeps. Names the
-    /// probe its release fires.
-    parked_unproven: Option<Probe>,
     /// A restarted process is reading this cell's record to confirm what it
     /// owns. Like startup demand it keeps the read queued, but it wakes
     /// nothing: the read settles the cell to dormant or inactive.
@@ -637,7 +627,6 @@ impl Default for Cell {
             requests: BTreeSet::new(),
             websockets: BTreeMap::new(),
             waiting_for: None,
-            waiting_activation: None,
             releasing: None,
             evict_rebalance: false,
             held_epoch: None,
@@ -649,7 +638,6 @@ impl Default for Cell {
             resume_epoch: None,
             restore_failed: false,
             unrestored_claim: false,
-            parked_unproven: None,
             confirming: false,
             isolate: None,
             generation: 0,
@@ -1410,7 +1398,7 @@ impl State {
             let Some(cell) = self.cells.get(id) else {
                 return Err(format!("activation waiter {id:?} has no cell state"));
             };
-            if cell.phase != Phase::WaitingActivation || cell.waiting_activation.is_none() {
+            if cell.phase != Phase::WaitingActivation {
                 return Err(format!("activation waiter {id:?} is not waiting"));
             }
             if self.activation_permits.contains(id) {
@@ -2032,42 +2020,24 @@ impl State {
         }
     }
 
-    fn begin_cold_route(
-        &mut self,
-        id: &str,
-        cell: &mut Cell,
-        start: ColdStart,
-        effects: &mut Vec<Effect>,
-    ) {
+    fn begin_cold_route(&mut self, id: &str, cell: &mut Cell, effects: &mut Vec<Effect>) {
         debug_assert!(self.activation_permits.contains(id));
-        cell.waiting_activation = None;
-        match start {
-            ColdStart::ReadOwner => {
-                let op = self.cell_op(id);
-                set_phase(&mut self.occupied, cell, Phase::ReadingOwner { op });
-                effects.push(Effect::ReadOwner {
-                    op,
-                    cell: id.to_string(),
-                });
-            }
-        }
+        let op = self.cell_op(id);
+        set_phase(&mut self.occupied, cell, Phase::ReadingOwner { op });
+        effects.push(Effect::ReadOwner {
+            op,
+            cell: id.to_string(),
+        });
     }
 
-    fn admit_or_queue_activation(
-        &mut self,
-        id: &str,
-        cell: &mut Cell,
-        start: ColdStart,
-        effects: &mut Vec<Effect>,
-    ) {
+    fn admit_or_queue_activation(&mut self, id: &str, cell: &mut Cell, effects: &mut Vec<Effect>) {
         if self.activation_permits.contains(id) {
-            self.begin_cold_route(id, cell, start, effects);
+            self.begin_cold_route(id, cell, effects);
         } else if self.activation_permits.len() < self.config.max_activations {
             self.activation_permits.insert(id.to_string());
-            self.begin_cold_route(id, cell, start, effects);
+            self.begin_cold_route(id, cell, effects);
         } else {
             set_phase(&mut self.occupied, cell, Phase::WaitingActivation);
-            cell.waiting_activation = Some(start);
             self.activation_waiters.push_back(id.to_string());
             self.watch_queued(id, cell, effects);
         }
@@ -2091,20 +2061,15 @@ impl State {
                 self.cells.insert(id, cell);
                 continue;
             }
-            let Some(start) = cell.waiting_activation.take() else {
-                self.cells.insert(id, cell);
-                continue;
-            };
             if cell.requests.is_empty()
                 && !cell.alarm_wake
                 && !cell.resume_demand
                 && !cell.confirming
             {
-                let ColdStart::ReadOwner = start;
                 set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
             } else {
                 self.activation_permits.insert(id.clone());
-                self.begin_cold_route(&id, &mut cell, start, effects);
+                self.begin_cold_route(&id, &mut cell, effects);
             }
             self.cells.insert(id, cell);
         }
@@ -2148,7 +2113,7 @@ impl State {
                 ..Cell::default()
             };
             self.resuming_cells.insert(local.id.clone());
-            self.admit_or_queue_activation(&local.id, &mut cell, ColdStart::ReadOwner, effects);
+            self.admit_or_queue_activation(&local.id, &mut cell, effects);
             self.cells.insert(local.id, cell);
         }
         if self.resuming_cells.is_empty() {
@@ -2183,7 +2148,7 @@ impl State {
                 ..Cell::default()
             };
             self.confirming_cells.insert(local.id.clone());
-            self.admit_or_queue_activation(&local.id, &mut cell, ColdStart::ReadOwner, effects);
+            self.admit_or_queue_activation(&local.id, &mut cell, effects);
             self.cells.insert(local.id, cell);
         }
         if self.confirming_cells.is_empty() {
@@ -3427,7 +3392,7 @@ impl State {
                 // at TXID 1 inside a populated prefix and mix two writer
                 // lineages (CelldWriterGeneration.tla, #158). The CAS also
                 // settles the older resume-vs-release race deterministically.
-                self.admit_or_queue_activation(id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(id, &mut cell, effects);
                 effects.push(Effect::ScheduleTimer {
                     timer: Timer::CellAlarm {
                         cell: id.to_string(),
@@ -3441,7 +3406,7 @@ impl State {
             Phase::Inactive => {
                 self.probe(Probe::AlarmTimerWokeCell);
                 cell.alarm_wake = true;
-                self.admit_or_queue_activation(id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(id, &mut cell, effects);
                 effects.push(Effect::ScheduleTimer {
                     timer: Timer::CellAlarm {
                         cell: id.to_string(),
@@ -3816,23 +3781,13 @@ impl State {
                         // requests already sent there. A draining ingress can
                         // still resolve a live remote owner during handoff;
                         // acquisition admission refuses new local ownership.
-                        self.admit_or_queue_activation(
-                            &id,
-                            &mut cell,
-                            ColdStart::ReadOwner,
-                            effects,
-                        );
+                        self.admit_or_queue_activation(&id, &mut cell, effects);
                     }
                     Phase::Dormant { .. } if !self.hands_off(&cell) => {
                         // A wake always claims a fresh epoch. The preserved
                         // snapshot remains reusable as the previous epoch's
                         // baseline after the claim succeeds.
-                        self.admit_or_queue_activation(
-                            &id,
-                            &mut cell,
-                            ColdStart::ReadOwner,
-                            effects,
-                        );
+                        self.admit_or_queue_activation(&id, &mut cell, effects);
                     }
                     _ => {}
                 }
@@ -3883,7 +3838,7 @@ impl State {
         cell.alarm_wake = true;
         match cell.phase {
             Phase::Inactive | Phase::Remote { .. } | Phase::Dormant { .. } => {
-                self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(&id, &mut cell, effects);
             }
             _ => {}
         }
@@ -3919,7 +3874,6 @@ impl State {
             && !cell.resume_demand
             && cell.phase == Phase::WaitingActivation
         {
-            cell.waiting_activation = None;
             set_phase(&mut self.occupied, cell, Phase::Inactive);
             self.activation_waiters.retain(|queued| queued != &id);
         } else if cell.requests.is_empty()
@@ -3985,7 +3939,6 @@ impl State {
                 // recovery episode that preserve just retired.
                 cell.owner_log_recovery_attempts = 0;
                 cell.waiting_for = None;
-                cell.waiting_activation = None;
                 cell.alarm_wake = false;
                 cell.resume_demand = false;
                 self.resuming_cells.remove(&id);
@@ -4131,7 +4084,6 @@ impl State {
                 let phase = match result {
                     Ok(Some(record)) if record.node.as_deref() == Some(self.node.as_str()) => {
                         self.probe(Probe::DormantConfirmedUnrestored);
-                        cell.parked_unproven = Some(Probe::DormantReleasedConfirmed);
                         Phase::Dormant {
                             epoch: record.epoch,
                         }
@@ -4720,7 +4672,7 @@ impl State {
             cell.owner_log_recovery_attempts = 0;
             set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
         } else {
-            self.admit_or_queue_activation(id, &mut cell, ColdStart::ReadOwner, effects);
+            self.admit_or_queue_activation(id, &mut cell, effects);
         }
         self.cells.insert(id.to_string(), cell);
     }
@@ -5140,7 +5092,7 @@ impl State {
             // requests it parked take the ordinary path: a wake if the
             // record still names this node, an owner read if it does not.
             if std::mem::take(&mut cell.handoff) && !cell.requests.is_empty() {
-                self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(&id, &mut cell, effects);
             }
         }
         self.cells.insert(id, cell);
@@ -5205,7 +5157,7 @@ impl State {
                 self.activity.rebalance_failed = self.activity.rebalance_failed.saturating_add(1);
                 set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
                 if !cell.requests.is_empty() {
-                    self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
+                    self.admit_or_queue_activation(&id, &mut cell, effects);
                 }
             }
             _ => {
@@ -5290,7 +5242,7 @@ impl State {
                 self.eviction_permits.remove(&id);
                 // The stop discarded the LTX metadata. Re-read ownership and
                 // claim epoch+1 before reusing the preserved SQLite image.
-                self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(&id, &mut cell, effects);
             }
             // The swap's second half: the same epoch, the same owner record,
             // the same replica, a new isolate. `Starting` without `Restore`
@@ -5685,7 +5637,7 @@ impl State {
         let transitioning = cell.is_some_and(|cell| {
             cell.releasing.is_some()
                 || cell.waiting_for.is_some()
-                || cell.waiting_activation.is_some()
+                || cell.phase == Phase::WaitingActivation
                 || !cell.requests.is_empty()
                 || cell.quiescing
                 || cell.swapping
@@ -5929,9 +5881,6 @@ impl State {
     /// already stopped, so this is the record write alone.
     fn release_dormant(&mut self, id: &str, epoch: Epoch, effects: &mut Vec<Effect>) {
         self.probe(Probe::DormantReleased);
-        if let Some(probe) = self.cells.get(id).and_then(|cell| cell.parked_unproven) {
-            self.probe(probe);
-        }
         if self
             .cells
             .get(id)
@@ -6214,7 +6163,6 @@ impl State {
         let Some(queued) = self.cells.get_mut(cell) else {
             return;
         };
-        queued.waiting_activation = None;
         let dormant = match queued.waiting_for.take() {
             Some(Activation::Restore(spec)) => Some(spec.epoch),
             _ => None,
@@ -6884,7 +6832,6 @@ impl State {
             }
             set_phase(&mut self.occupied, &mut cell, Phase::Fenced);
             cell.waiting_for = None;
-            cell.waiting_activation = None;
             cell.alarm = None;
             cell.alarm_wake = false;
             cell.websockets.clear();
@@ -7268,9 +7215,6 @@ fn phase_requires_activation_permit(phase: &Phase, swapping: bool) -> bool {
 fn set_phase(occupied: &mut usize, cell: &mut Cell, phase: Phase) {
     if !matches!(&phase, Phase::Resident { .. }) {
         cell.quiescing = false;
-    }
-    if !matches!(&phase, Phase::Dormant { .. }) {
-        cell.parked_unproven = None;
     }
     // Ownership follows the confirmed phases and survives the transient
     // wake phases between them; a phase that names another owner, no owner,

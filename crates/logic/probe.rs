@@ -168,10 +168,10 @@ probes! {
     /// tail an earlier epoch left in this node's log stays unfolded.
     DormantKeptUnrestored,
     /// A restarted process confirmed a cell its record still names here and
-    /// parked it dormant, with no restore and no proof.
+    /// parked it dormant without a restore. Nothing is left to fold: the
+    /// process took its lease only after its predecessor's log was sealed
+    /// or recovered into the bucket.
     DormantConfirmedUnrestored,
-    /// Of dormant releases, one of a cell parked that way.
-    DormantReleasedConfirmed,
     /// An owner record release outlived its deadline.
     ReleaseDeadline,
     /// A successor's adoption outlived its deadline.
