@@ -66,6 +66,10 @@ probes! {
     AlarmFinishedFailed,
     /// A handler settled on an observation that arrived while it ran.
     AlarmSettledOnStagedObservation,
+    /// A handler failed or outlived its deadline, its fired alarm was
+    /// re-armed as covered, and the newest alarm state staged behind it was
+    /// not yet covered by a wake entry.
+    AlarmRearmedOverUncovered,
     /// An observation arrived while the alarm was firing and was staged.
     AlarmObservationStaged,
     /// An observation from a runtime being reset was ignored.

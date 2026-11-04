@@ -3580,6 +3580,9 @@ impl State {
             }
             Err(_) => {
                 self.probe(Probe::AlarmFinishedFailed);
+                if covered && observed.as_ref().is_some_and(|(_, staged)| !staged) {
+                    self.probe(Probe::AlarmRearmedOverUncovered);
+                }
                 cell.alarm = Some(AlarmState::Armed {
                     at_ms,
                     generation,
