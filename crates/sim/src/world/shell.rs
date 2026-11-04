@@ -201,14 +201,25 @@ impl World {
                 p.watch.generations.insert(cell.clone(), p.generation);
                 let key = (cell.clone(), epoch);
                 // The second half of a swap runs the new generation's code,
-                // which may not load (`Faults::start_failures`).
+                // which may not load (`Faults::start_failures`). Any other
+                // start may fail too (`Faults::cold_start_failures`), each
+                // from its own stream so neither moves the other's draws.
                 let swap = p.swapped.remove(&key);
-                let new_code_fails = swap
-                    && self.t < self.config.chaos_ms
-                    && self.config.faults.start_failures > 0.0
-                    && (self.start_rng).chance(self.config.faults.start_failures);
+                let chaos = self.t < self.config.chaos_ms;
+                let start_fails = match swap {
+                    true => {
+                        chaos
+                            && self.config.faults.start_failures > 0.0
+                            && (self.start_rng).chance(self.config.faults.start_failures)
+                    }
+                    false => {
+                        chaos
+                            && self.config.faults.cold_start_failures > 0.0
+                            && (self.cold_start_rng).chance(self.config.faults.cold_start_failures)
+                    }
+                };
                 let result = match self.machines[node].proc().replicas.contains_key(&key) {
-                    true if !new_code_fails => Ok(()),
+                    true if !start_fails => Ok(()),
                     _ => Err(Failure::Definite),
                 };
                 // The generation and the heap the runtime was placed on.

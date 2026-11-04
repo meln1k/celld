@@ -394,6 +394,11 @@ pub struct Faults {
     /// the second half of a swap, fails to start: the new code does not
     /// load. Only in the chaos window.
     pub start_failures: f64,
+    /// Chance that any other runtime start fails, after a restore or a
+    /// clean reload: the code does not load, or the database does not
+    /// open. Production's `start_cell` then returns with the restored
+    /// database still open, and so does the shell. Only in the chaos window.
+    pub cold_start_failures: f64,
 }
 
 impl SimConfig {
@@ -524,6 +529,11 @@ impl SimConfig {
         if starting.chance(0.5) {
             faults.start_failures = *starting.pick(&[0.1, 0.5]).unwrap();
         }
+        // Failed starts of any other kind, likewise.
+        let mut cold = Rng::new(seed ^ 0x434f_4c44_5354_0000);
+        if cold.chance(0.5) {
+            faults.cold_start_failures = *cold.pick(&[0.05, 0.2]).unwrap();
+        }
         // Paging, likewise.
         let mut paging = Rng::new(seed ^ 0x5041_4745_0000_0000);
         let paged = match paging.chance(0.5) {
@@ -597,6 +607,7 @@ impl Faults {
             surges: 0.0,
             max_surge_mb: 0,
             start_failures: 0.0,
+            cold_start_failures: 0.0,
         }
     }
 }

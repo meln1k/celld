@@ -133,6 +133,9 @@ probes! {
     /// still open at the epoch the swap stopped without a proof, so a
     /// cleanup stop proves and closes it.
     SwapRestartFailed,
+    /// A runtime start failed outside a swap: a cleanup stop closes the
+    /// database its restore opened.
+    StartFailed,
     /// A request arrived mid-eviction, so the cell activates again.
     EvictionTurnedAround,
     /// An eviction made for room released the cell's owner record.
@@ -159,11 +162,6 @@ probes! {
     DormantConfirmedUnrestored,
     /// Of dormant releases, one of a cell parked that way.
     DormantReleasedConfirmed,
-    /// A runtime start failed outside a swap, and the cell parked dormant
-    /// with no proof.
-    StartFailedParked,
-    /// Of dormant releases, one of a cell parked that way.
-    DormantReleasedAfterFailedStart,
     /// An owner record release outlived its deadline.
     ReleaseDeadline,
     /// A successor's adoption outlived its deadline.

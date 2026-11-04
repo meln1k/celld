@@ -242,6 +242,12 @@ empty, and a heap is freed, with its memory, when its last cell leaves.
 Production lets a heap hold 32 cells, which a fleet this small never fills,
 so the swarm also draws a limit of 1, 2 or 3.
 
+A runtime can fail to start during the faults: a swap's restart in half the
+swarm seeds (the new generation's code does not load), and any other start
+in another half (the code does not load, or the database does not open).
+As production's `start_cell` does, a failed start leaves the database its
+restore opened, or the swap left, open.
+
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
 residency caps, the eviction policy, and which faults happen. The faults are
@@ -852,6 +858,25 @@ the deadline re-armed the fired alarm as covered, and the balancer evicted
 c3). Now the re-arm is covered only if the staged state was too (probe
 `AlarmRearmedOverUncovered`), so the cell stays until the retry or a later
 observation settles the alarm and its entry. The suite runs swarm 7053222.
+
+A runtime start that failed outside a swap parked its cell dormant with the
+database its restore had opened still open, and nothing ever closed it:
+the next activation here opened the next epoch beside it. The leaked
+replica held its memory for good, so a node that leaked enough shed
+forever and served nothing (swarm 30), and a restarted process listed both
+epochs as live (`activation waiter … queued twice`, swarm 84). Data was
+safe: the restore had already uploaded the fold, and the epoch never
+served. The simulator failed only swap restarts until this fault
+(`cold_start_failures`); with it and no fix, 100,000 swarm seeds failed
+liveness in 2,269 seeds instead of 1,065 with validation compiled out
+(memory-not-relieved watches 1,426 to 3,415), and `queued twice` broke in
+335 with it on. Now every failed start takes the cleanup stop a failed swap
+restart already took, which proves and closes the database before the cell
+parks dormant (probe `StartFailed`). With the fix, liveness is at 1,095 and
+949 against 1,065 and 927, `queued twice` at 0, and no kind is new; every
+seed that newly fails diverges from the parent at a failed start and fails
+a known kind (traced samples: a wedged walk-down, a fold that never succeeds, a lease lost
+mid-handoff). The suite runs swarms 30 and 84.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

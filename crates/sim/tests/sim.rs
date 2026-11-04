@@ -103,6 +103,15 @@ fn crashes_and_pauses_lose_no_acknowledged_write() {
     assert!(retried_recoveries > 0, "no failed log recovery");
 }
 
+/// A swarm seed's configuration without `Faults::cold_start_failures`,
+/// for a seed found before that fault: it draws from its own streams, so
+/// without it the seed runs exactly as it did when it was found.
+fn before_cold_start_failures(seed: u64) -> SimConfig {
+    let mut config = SimConfig::swarm(seed);
+    config.faults.cold_start_failures = 0.0;
+    config
+}
+
 #[test]
 fn a_restore_links_only_the_epoch_a_paged_epoch_continued() {
     // In each seed a fenced owner's last upload, after a pause or suspend,
@@ -110,7 +119,7 @@ fn a_restore_links_only_the_epoch_a_paged_epoch_continued() {
     // the paged epoch restored. A restore that linked it on the cut alone
     // opened writes no database ever held in that order (swarm 240955).
     for seed in [240_955, 1_744_217, 2_889_492] {
-        let outcome = run(seed, &SimConfig::swarm(seed));
+        let outcome = run(seed, &before_cold_start_failures(seed));
         assert!(outcome.passed(), "seed {seed}: {:?}", outcome.violations);
         assert!(outcome.stats.paged > 0, "seed {seed} paged no restore");
         // The seed still reaches the case: a restore passes the stale epoch
@@ -129,7 +138,7 @@ fn a_drain_keeps_a_cell_whose_claim_here_never_restored() {
     // epoch unrestored: the tail its reset epoch left in this node's log is
     // unfolded. Releasing that record let a peer restore without it.
     let seed = 138_032;
-    let outcome = run(seed, &SimConfig::swarm(seed));
+    let outcome = run(seed, &before_cold_start_failures(seed));
     assert!(outcome.passed(), "{:?}", outcome.violations);
     let kept = outcome.probes[celld_logic::Probe::DormantKeptUnrestored as usize];
     assert!(kept > 0, "the seed no longer reaches the unrestored claim");
@@ -149,6 +158,21 @@ fn a_failed_alarm_handler_keeps_a_newer_uncovered_alarm_from_eviction() {
         rearmed > 0,
         "the seed no longer re-arms over an uncovered alarm"
     );
+}
+
+#[test]
+fn a_failed_start_closes_the_database_its_restore_opened() {
+    // A runtime fails to start after its restore. Parked dormant with that
+    // database open, the cell's next epoch opened beside it: the leaked
+    // replica held its memory for good (30: the node shed forever and c2
+    // was never served) and a restart listed both epochs (84: c2 queued
+    // twice).
+    for seed in [30, 84] {
+        let outcome = run(seed, &SimConfig::swarm(seed));
+        assert!(outcome.passed(), "{seed}: {:?}", outcome.violations);
+        let failed = outcome.probes[celld_logic::Probe::StartFailed as usize];
+        assert!(failed > 0, "{seed} no longer fails a start");
+    }
 }
 
 #[test]

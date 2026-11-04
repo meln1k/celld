@@ -493,6 +493,7 @@ pub struct World {
     call_rng: Rng,
     /// Which swap restarts fail.
     start_rng: Rng,
+    cold_start_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -531,6 +532,7 @@ impl World {
         let recovery_rng = master.fork();
         let call_rng = master.fork();
         let start_rng = master.fork();
+        let cold_start_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -566,6 +568,7 @@ impl World {
             recovery_rng,
             call_rng,
             start_rng,
+            cold_start_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),

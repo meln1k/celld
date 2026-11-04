@@ -4963,14 +4963,19 @@ impl State {
                     epoch,
                 });
             }
-            // The second half of a swap failed. The swap stop proved
-            // nothing, so the epoch's last writes may live only in its log
-            // and bundles, and its database is still open. Parked dormant
-            // straight away, a release or the next activation restored past
-            // them. A cleanup stop proves and closes it first, as a failed
-            // publish does.
-            Err(_) if cell.swapping => {
-                self.probe(Probe::SwapRestartFailed);
+            // The runtime did not start, and the database it was to open is
+            // still open: the restore opened it, or a swap stop left it open.
+            // Parked dormant straight away, nothing closed it, and the next
+            // activation here opened the next epoch beside it. After a swap
+            // it is also unproven: the swap stop proved nothing, so the
+            // epoch's last writes may live only in its log and bundles, and a
+            // release or the next activation restored past them. A cleanup
+            // stop proves and closes it first, as a failed publish does.
+            Err(_) => {
+                self.probe(match cell.swapping {
+                    true => Probe::SwapRestartFailed,
+                    false => Probe::StartFailed,
+                });
                 let next = self.cell_op(&id);
                 set_phase(
                     &mut self.occupied,
@@ -4988,13 +4993,6 @@ impl State {
                     cause: StopCause::Cleanup,
                     bounded: false,
                 });
-                self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
-                resume_failed = cell.resume_demand;
-            }
-            Err(_) => {
-                self.probe(Probe::StartFailedParked);
-                cell.parked_unproven = Some(Probe::DormantReleasedAfterFailedStart);
-                set_phase(&mut self.occupied, &mut cell, Phase::Dormant { epoch });
                 self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
                 resume_failed = cell.resume_demand;
             }
