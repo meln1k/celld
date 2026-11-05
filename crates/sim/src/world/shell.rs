@@ -167,7 +167,10 @@ impl World {
                 };
                 self.store_call(node, req)
             }
-            Effect::Restore { op, cell, spec } => self.restore(node, op, cell, spec),
+            Effect::Restore { op, cell, spec } => {
+                self.machines[node].proc_mut().restoring.insert(op);
+                self.restore(node, op, cell, spec)
+            }
             Effect::StopRuntime {
                 op,
                 cell,

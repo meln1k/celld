@@ -18,7 +18,7 @@
 //! Both kinds have a deadline. A process that reaches it exits as it
 //! stands, and its cells recover as a crashed node's do.
 
-use celld_logic::Event;
+use celld_logic::{Epoch, Event};
 
 use super::{Pending, Time, Work, World};
 
@@ -137,15 +137,21 @@ impl World {
                     return self.exit(node, None);
                 }
             }
-            // A preserve waits for its requests and its cold work.
+            // A preserve waits for its requests and its cold work, and, as
+            // `close_activations_for_reload` does, for every restore still
+            // running, the ones the core retired too.
             Phase::Preserving => {
                 if !p.pending.values().any(|p| matches!(p, Pending::Client(_)))
                     && s.activating() == 0
                     && s.evicting() == 0
+                    && p.restoring.is_empty()
                 {
-                    // `prepare_clean_reload`: upload each database's final
-                    // position, and keep its file.
-                    let open = self.open_epochs(node);
+                    // `prepare_clean_reload`: upload the final position of
+                    // each cell the core lists as resident, and keep its
+                    // file. Any other open database, a restore the preserve
+                    // retired, is pruned at exit.
+                    let open = self.prepared_epochs(node);
+                    self.machines[node].proc_mut().prepared = open.clone();
                     self.machines[node].proc_mut().shutdown = Some(Shutdown {
                         phase: Phase::Closing,
                         deadline,
@@ -156,7 +162,7 @@ impl World {
                 }
             }
             Phase::Closing => {
-                if self.all_uploaded(node) {
+                if self.all_uploaded(node, &p.prepared) {
                     // The marker is written only while the node still holds
                     // its lease.
                     let marker = s
@@ -176,7 +182,19 @@ impl World {
     fn exit(&mut self, node: usize, mut marker: Option<String>) {
         let who = self.who(node);
         if marker.is_some() {
-            let keep: Vec<_> = self.open_epochs(node);
+            // An eviction that began after the inventory was read and has
+            // since closed its database leaves a snapshot the prune refuses,
+            // as before: only what is still open is kept.
+            let open = self.open_epochs(node);
+            let p = self.machines[node].proc();
+            let keep: Vec<_> = (p.prepared.iter())
+                .filter(|key| open.contains(key))
+                .cloned()
+                .collect();
+            // `prune_stale_live` deletes the file of every database it does
+            // not keep, open or not: the process exits holding the handle of
+            // a pruned one, and nothing of it stays on disk.
+            (self.machines[node].proc_mut().replicas).retain(|key, _| keep.contains(key));
             if !self.machines[node].disk.prune_except(&keep) {
                 marker = None;
             }
@@ -189,6 +207,19 @@ impl World {
         self.seal_own_log(node);
         self.machines[node].reload = marker;
         self.crash(node, false);
+    }
+}
+
+impl World {
+    /// The cells a clean reload keeps, as `main.rs` hands them to
+    /// `prepare_clean_reload`: the core's resident inventory
+    /// (`presence_snapshot`) when the preserve has drained, not every
+    /// database the process has open.
+    fn prepared_epochs(&self, node: usize) -> Vec<(String, Epoch)> {
+        let presence = self.machines[node].proc().state.presence_snapshot();
+        (presence.cells.into_iter())
+            .map(|cell| (cell.id, cell.epoch))
+            .collect()
     }
 }
 

@@ -308,6 +308,12 @@ struct Process {
     pending: BTreeMap<RequestId, Pending>,
     /// A graceful shutdown under way.
     shutdown: Option<Shutdown>,
+    /// The cells a clean reload keeps, read from the core once as its
+    /// preserve drained (`prepared_epochs`).
+    prepared: Vec<(String, Epoch)>,
+    /// Restores the shell is still running, whether or not the core still
+    /// waits for them: a preserve retires its restores in the core only.
+    restoring: BTreeSet<OpId>,
     /// Released cells this process is finding a successor for.
     adoptions: BTreeMap<OpId, Adoption>,
     /// The WebSockets this process holds open.
@@ -348,6 +354,8 @@ impl Process {
             published: BTreeMap::new(),
             pending: BTreeMap::new(),
             shutdown: None,
+            prepared: Vec::new(),
+            restoring: BTreeSet::new(),
             adoptions: BTreeMap::new(),
             sockets: BTreeMap::new(),
             generation: 0,
@@ -785,6 +793,9 @@ impl World {
                 }
             }
             self.record(node, "<-", &event);
+            if let Event::RestoreCompleted { op, .. } = &event {
+                self.machines[node].proc_mut().restoring.remove(op);
+            }
             self.alarm_event_taken(node, &event);
             self.stats.events += 1;
             let before = self.phases(node);

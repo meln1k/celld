@@ -530,12 +530,10 @@ impl World {
         Some((replica.start_len as u64, replica.content.len() as u64))
     }
 
-    /// Every open database's writes are all in the bucket.
-    pub(super) fn all_uploaded(&self, node: usize) -> bool {
-        self.machines[node]
-            .proc()
-            .replicas
-            .values()
+    /// Every write of these open databases is in the bucket.
+    pub(super) fn all_uploaded(&self, node: usize, keys: &[(String, Epoch)]) -> bool {
+        let replicas = &self.machines[node].proc().replicas;
+        (keys.iter().filter_map(|key| replicas.get(key)))
             .all(|replica| !replica.uploading && replica.uploaded >= replica.content.len())
     }
 

@@ -86,9 +86,14 @@ impl World {
 
     /// Watched: a cell the core holds dormant has no database open here.
     /// Every path to dormant either stops the runtime, which proves and
-    /// closes the database, or never opened one; an open one is leaked.
+    /// closes the database, or never opened one; an open one is leaked. A
+    /// preserving process is exempt: the restores its preserve retired run
+    /// to the end, and the clean reload's prune deletes what they opened.
     pub(super) fn judge_dormant(&mut self, node: usize) {
         let p = self.machines[node].proc();
+        if p.shutdown.is_some() {
+            return;
+        }
         let open: Vec<(String, Epoch, Epoch)> = (p.replicas.keys())
             .filter_map(|(cell, epoch)| match p.state.phase(cell) {
                 Some(Phase::Dormant { epoch: dormant }) => Some((cell.clone(), *epoch, *dormant)),

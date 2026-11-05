@@ -359,11 +359,8 @@ core, not to the simulator or to the property itself.
   folds.
 - **dormant-replica-open**: at a load sample, the core held a cell dormant
   while its node still had a database of the cell open.
-  A preserve that begins while a restore is in flight hits it: the core
-  retires the restore and parks the cell dormant, and the restore then
-  opens the database, which nothing closes before the process exits (229
-  of 100,000 swarm seeds with validation compiled out, 200 with it on).
-  Data is safe, since the epoch never served.
+  A preserving process is exempt: the restores its preserve retired still
+  run to the end, and the clean reload's prune deletes what they opened.
 - **socket-outlives-runtime**: an outbound WebSocket stayed open after its
   cell's runtime stopped.
 - **memory-not-relieved**: a node with no socket open stayed latched on
@@ -907,6 +904,26 @@ on, **alarm-not-fired** from 177 to 105 and 140 to 84, and
 **memory-not-relieved** watches from 1,452 to 38 and 1,246 to 36. Every one
 of the 30 seeds that newly fail takes the re-cut and fails a known kind. The
 suite runs swarm 19.
+
+A clean reload could keep a database no owner had served. A preserve retires
+the cell's restore in the core and parks it dormant, but the restore still
+runs in the shell. `prepare_clean_reload` keeps only the core's resident
+cells and prunes every other live file, so a restore that wrote its file
+after the prune had listed the directories left it live behind the marker,
+and the replacement reused it as an eviction snapshot, a sparse one if the
+restore was paged. The simulator kept every open database instead, so it
+reused each such file (229 of 100,000 swarm seeds hit
+**dormant-replica-open** that way). Now the prepare closes the activation gate first
+(`close_activations_for_reload`): it waits for the activations in flight
+and refuses later ones, so the prune comes after every restore's last
+write. The simulator keeps only the core's resident inventory, read once
+as the preserve drains, and waits for its running restores as the gate
+does. The epoch never served, so no seed lost data either way. Of the
+2,200 reference runs, the 28 whose hash changed all had a restore in
+flight when a node began a preserve; in 100,000 swarm seeds no kind is
+new, and every changed FAIL line follows a preserve (with validation on,
+58 of 67 with a restore in flight, the rest a preserve that no longer
+waits for a cleanup stop's upload of a cell the core does not list).
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

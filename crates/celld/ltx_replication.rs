@@ -92,6 +92,10 @@ impl Replication {
         self.ltx.local_cells()
     }
 
+    pub(crate) async fn close_activations_for_reload(&self) {
+        self.ltx.close_activations_for_reload().await
+    }
+
     pub fn prune_stale_live(&self, keep: &BTreeSet<(String, u64)>) -> anyhow::Result<usize> {
         self.ltx.prune_stale_live(keep)
     }
