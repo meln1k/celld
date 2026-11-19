@@ -2132,12 +2132,21 @@ type PendingOp = std::pin::Pin<
 
 /// The ops one request is waiting on. Per request, not per isolate: that is
 /// what deleting the pump means, and it is why no attribution table exists.
-type Ops = futures_util::stream::FuturesUnordered<PendingOp>;
+type Ops = futures_util::stream::FuturesUnordered<crate::pool::TurnlessOp<PendingOp>>;
 
 fn adopt(ops: &mut Ops, started: Vec<js::Op>) {
     for (id, future) in started {
-        ops.push(Box::pin(async move { (id, future.await) }));
+        push_op(ops, async move { (id, future.await) });
     }
+}
+
+/// The driver polls its ops only between its turns, so an op must not wait
+/// for a turn itself (`pool::TurnlessOp`).
+fn push_op(
+    ops: &mut Ops,
+    op: impl std::future::Future<Output = (u64, Result<asyncrt::OpOut, String>)> + Send + 'static,
+) {
+    ops.push(crate::pool::TurnlessOp(Box::pin(op)));
 }
 
 /// Cancel native futures and remove their JavaScript resolvers together.
@@ -3283,10 +3292,10 @@ fn adopt_cell_ops_for_test(
         let probe = observer
             .take()
             .map(|observer| NativeOpDropProbe(Some(observer)));
-        ops.push(Box::pin(async move {
+        push_op(ops, async move {
             let _probe = probe;
             (id, future.await)
-        }));
+        });
     }
 }
 

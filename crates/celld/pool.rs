@@ -38,6 +38,12 @@ use celld_logic::isolate::Refusal;
 
 use crate::js;
 
+mod turns;
+
+use turns::TurnLane;
+use turns::TurnScheduler;
+pub(crate) use turns::TurnlessOp;
+
 pub use crate::engine_api::AdmitError;
 pub use crate::engine_api::PoolCensus;
 
@@ -60,95 +66,6 @@ fn next_heap_id() -> HeapId {
 /// durability proof. Four 64-call groups can overlap, and a stopped bucket
 /// still cannot retain an unbounded number of promises or copied bodies.
 pub(crate) const MAX_QUEUE_PRODUCER_EVENTS_PER_CELL: usize = 256;
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum TurnLane {
-    Stateless,
-    Cell(String),
-}
-
-#[derive(Default)]
-struct TurnSchedule {
-    current: Option<TurnLane>,
-    ready: std::collections::VecDeque<TurnLane>,
-    waiting: std::collections::HashMap<
-        TurnLane,
-        std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>,
-    >,
-}
-
-#[derive(Default)]
-struct TurnScheduler {
-    schedule: Mutex<TurnSchedule>,
-}
-
-struct TurnPermit<'a>(&'a TurnScheduler);
-
-impl TurnScheduler {
-    async fn acquire(&self, lane: TurnLane) -> TurnPermit<'_> {
-        let receive = {
-            let mut schedule = self.schedule.lock().expect("turn scheduler poisoned");
-            if schedule.current.is_none() {
-                schedule.current = Some(lane);
-                None
-            } else {
-                let (send, receive) = tokio::sync::oneshot::channel();
-                if !schedule.waiting.contains_key(&lane) && schedule.current.as_ref() != Some(&lane)
-                {
-                    schedule.ready.push_back(lane.clone());
-                }
-                schedule.waiting.entry(lane).or_default().push_back(send);
-                Some(receive)
-            }
-        };
-        if let Some(receive) = receive {
-            // Cancellation leaves a closed sender in this lane. `release`
-            // skips it, so a dropped waiter cannot strand the active token.
-            let _ = receive.await;
-        }
-        TurnPermit(self)
-    }
-
-    fn release(&self) {
-        let mut schedule = self.schedule.lock().expect("turn scheduler poisoned");
-        let current = schedule
-            .current
-            .take()
-            .expect("a released turn scheduler has a current lane");
-        if schedule
-            .waiting
-            .get(&current)
-            .is_some_and(|waiters| !waiters.is_empty())
-        {
-            schedule.ready.push_back(current);
-        }
-        while let Some(lane) = schedule.ready.pop_front() {
-            let (send, keep_lane) = {
-                let waiters = schedule
-                    .waiting
-                    .get_mut(&lane)
-                    .expect("a ready turn lane has waiters");
-                (waiters.pop_front().unwrap(), !waiters.is_empty())
-            };
-            if !keep_lane {
-                schedule.waiting.remove(&lane);
-            }
-            if send.send(()).is_ok() {
-                schedule.current = Some(lane);
-                return;
-            }
-            if keep_lane {
-                schedule.ready.push_back(lane);
-            }
-        }
-    }
-}
-
-impl Drop for TurnPermit<'_> {
-    fn drop(&mut self) {
-        self.0.release();
-    }
-}
 
 pub(crate) struct QueueProducerPermit {
     slot: Arc<Slot>,
@@ -243,6 +160,7 @@ impl Slot {
     }
 
     async fn turn_in<T>(&self, lane: TurnLane, f: impl FnOnce(&mut js::Worker) -> T) -> T {
+        turns::refuse_turn_in_turnless_op();
         struct Counted<'a>(&'a Slot);
         impl Drop for Counted<'_> {
             fn drop(&mut self) {
@@ -349,7 +267,7 @@ impl Slot {
         Self::outside_pool(worker, false)
     }
 
-    #[cfg(all(test, celld_internal_tests))]
+    #[cfg(test)]
     pub(crate) fn vacant_for_request_cancellation_test() -> Arc<Self> {
         Arc::new_cyclic(|me| Slot {
             me: me.clone(),
@@ -366,6 +284,7 @@ impl Slot {
             cells: AtomicUsize::new(0),
             adopted_cells: AtomicUsize::new(0),
             retiring: AtomicBool::new(false),
+            #[cfg(celld_internal_tests)]
             turn_observations: Mutex::new(Vec::new()),
         })
     }

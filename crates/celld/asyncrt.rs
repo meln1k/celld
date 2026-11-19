@@ -534,6 +534,34 @@ pub fn enqueue<T: Into<OpOut>>(
     enqueue_with_lifetime(future, OpLifetime::Handler)
 }
 
+/// Register an operation whose body runs on a task of its own, aborted when
+/// the operation is dropped.
+///
+/// An operation is polled only by its event's driver, and only between that
+/// driver's turns. A body that waits for a turn on an isolate needs this: on
+/// the driver, the scheduler could grant it the turn while the driver waits
+/// for a turn of its own, and nothing would poll it again
+/// (`pool::TurnlessOp`). A panic in the body still panics the driver.
+pub fn enqueue_on_own_task<T: Into<OpOut> + Send + 'static>(
+    body: impl Future<Output = Result<T, String>> + Send + 'static,
+) -> u64 {
+    struct AbortOnDrop(tokio::task::AbortHandle);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    enqueue(async move {
+        let task = current_domain().owner.handle.spawn(body);
+        let _abort = AbortOnDrop(task.abort_handle());
+        match task.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(format!("the operation's task ended: {error}")),
+        }
+    })
+}
+
 /// Register an operation that keeps its `IoContext` alive after the handler ends.
 pub(crate) fn enqueue_io_context<T: Into<OpOut>>(
     future: impl Future<Output = Result<T, String>> + Send + 'static,

@@ -8390,7 +8390,7 @@ fn op_facet_rpc(
     };
     let host = FacetHost::of(loader);
     let trace = current_trace_context(scope);
-    let async_id = asyncrt::enqueue(async move {
+    let async_id = asyncrt::enqueue_on_own_task(async move {
         let facet = prepare_facet(
             host?,
             FacetStart {
@@ -8494,7 +8494,7 @@ fn op_facet_fetch(
     let host = FacetHost::of(loader);
     let trace = current_trace_context(scope);
     let stream_service = http_stream_service();
-    let async_id = asyncrt::enqueue(async move {
+    let async_id = asyncrt::enqueue_on_own_task(async move {
         let facet = prepare_facet(
             host?,
             FacetStart {
@@ -8573,7 +8573,7 @@ fn op_facet_abort(
             path.push(name.clone());
             (parent.root_scope, parent.epoch, path)
         });
-    let async_id = asyncrt::enqueue(async move {
+    let async_id = asyncrt::enqueue_on_own_task(async move {
         let host = host?;
         let recorded = host.is_loaded_worker();
         let slot = host.slot().await?;
