@@ -230,6 +230,7 @@ pub(crate) fn drain_step_output(
     out: &mut StepOutput,
     effects: &mut FuturesUnordered<EffectFuture>,
     delays: &mut DelayQueue<TimerArm>,
+    leases: &mut DelayQueue<TimerArm>,
     timers: &mut TimerSlots<delay_queue::Key>,
 ) {
     for job in out.effects.drain(..) {
@@ -246,6 +247,17 @@ pub(crate) fn drain_step_output(
         }
     }
     for arm in out.timers.drain(..) {
+        // Slots never change timer kind, so a displaced key belongs to the
+        // same queue as its replacement. Lease authority must not queue behind
+        // thousands of earlier expired cell alarms or operation deadlines.
+        let delays = if matches!(
+            arm.slot,
+            super::TimerSlot::NodeLeaseRenew | super::TimerSlot::NodeLeaseFence
+        ) {
+            &mut *leases
+        } else {
+            &mut *delays
+        };
         let delay = std::time::Duration::from_millis(
             arm.at_mono_ms.saturating_sub(crate::asyncrt::mono_ms()),
         );
@@ -253,5 +265,82 @@ pub(crate) fn drain_step_output(
         if let Some(displaced) = timers.install(&arm, key) {
             delays.remove(&displaced);
         }
+    }
+}
+
+// This exercises the production timer queues, not the simulated clock.
+#[cfg(all(test, not(celld_internal_tests)))]
+mod tests {
+    use super::super::TimerSlot;
+    use super::*;
+    use celld_logic::Timer;
+    use futures_util::StreamExt;
+    use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn lease_renewal_is_not_queued_behind_expired_cell_deadlines() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                crate::asyncrt::set_host_handle(tokio::runtime::Handle::current());
+                let mut out = StepOutput::default();
+                let now = crate::asyncrt::mono_ms();
+                for op in 0..800 {
+                    out.timers.push(TimerArm {
+                        slot: TimerSlot::OperationDeadline(op),
+                        ordinal: op,
+                        timer: Timer::OperationDeadline { op },
+                        at_mono_ms: now,
+                    });
+                }
+                // Replacement must remove the old lease key, not an unrelated
+                // cell deadline with the same queue-local key.
+                for (ordinal, generation, delay) in [(800, 1, 5_000), (801, 2, 100)] {
+                    out.timers.push(TimerArm {
+                        slot: TimerSlot::NodeLeaseRenew,
+                        ordinal,
+                        timer: Timer::NodeLeaseRenew { generation },
+                        at_mono_ms: now + delay,
+                    });
+                }
+                let mut effects = FuturesUnordered::new();
+                let mut delays = DelayQueue::new();
+                let mut leases = DelayQueue::new();
+                let mut slots = TimerSlots::default();
+                drain_step_output(&mut out, &mut effects, &mut delays, &mut leases, &mut slots);
+                let started = Instant::now();
+                let mut delivered = BTreeSet::new();
+                loop {
+                    let arm = tokio::select! {
+                        Some(expired) = delays.next(), if !delays.is_empty() => expired.into_inner(),
+                        Some(expired) = leases.next(), if !leases.is_empty() => expired.into_inner(),
+                    };
+                    assert!(slots.fire(&arm.slot, arm.ordinal).is_some());
+                    match arm.timer {
+                        Timer::NodeLeaseRenew { generation } => {
+                            assert_eq!(generation, 2);
+                            assert!(started.elapsed() < Duration::from_secs(1), "lease timer starved by cell deadline backlog");
+                            assert!(delivered.len() < 800);
+                            assert!(leases.is_empty());
+                            break;
+                        }
+                        Timer::OperationDeadline { op } => { assert!(delivered.insert(op)); }
+                        other => panic!("unexpected timer: {other:?}"),
+                    }
+                    let step = Instant::now();
+                    while step.elapsed() < Duration::from_millis(2) { std::hint::spin_loop(); }
+                    tokio::task::yield_now().await;
+                }
+                while let Some(expired) = delays.next().await {
+                    let arm = expired.into_inner();
+                    assert!(slots.fire(&arm.slot, arm.ordinal).is_some());
+                    let Timer::OperationDeadline { op } = arm.timer else { panic!("unexpected timer"); };
+                    assert!(delivered.insert(op));
+                }
+                assert_eq!(delivered, (0..800).collect());
+            });
     }
 }
