@@ -23,9 +23,11 @@ RUN --mount=type=cache,id=celld-cargo-registry,target=/usr/local/cargo/registry,
 FROM build AS test
 ARG TARGETARCH
 RUN rustup component add clippy
-# The ltx fault-injection oracle diffs databases with the sqlite3 CLI.
+# The facet integration test copies the example and bundles it with esbuild;
+# the ltx fault-injection oracle diffs databases with the sqlite3 CLI.
+COPY examples/facets ./examples/facets
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends sqlite3 && \
+    apt-get install -y --no-install-recommends esbuild sqlite3 && \
     rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,id=celld-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=celld-cargo-git,target=/usr/local/cargo/git,sharing=locked \

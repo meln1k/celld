@@ -267,7 +267,7 @@ impl Slot {
         Self::outside_pool(worker, false)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, debug_assertions))]
     pub(crate) fn vacant_for_request_cancellation_test() -> Arc<Self> {
         Arc::new_cyclic(|me| Slot {
             me: me.clone(),
