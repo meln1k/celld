@@ -227,12 +227,20 @@ mod tests {
         assert!(poll_once(&mut next).is_ready());
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "an op polled by its event's driver waits for a turn")]
     fn a_turn_inside_a_turnless_op_is_refused() {
         let slot = crate::pool::Slot::vacant_for_request_cancellation_test();
         let mut op = TurnlessOp(Box::pin(slot.turn(|_| ())));
         let _ = poll_once(&mut op);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn the_turnless_op_guard_is_debug_only() {
+        let mut op = TurnlessOp(Box::pin(async { refuse_turn_in_turnless_op() }));
+        assert!(poll_once(&mut op).is_ready());
     }
 
     #[test]
