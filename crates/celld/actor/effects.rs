@@ -276,7 +276,6 @@ mod tests {
     use celld_logic::Timer;
     use futures_util::StreamExt;
     use std::collections::BTreeSet;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn lease_renewal_is_not_queued_behind_expired_cell_deadlines() {
@@ -311,10 +310,10 @@ mod tests {
                 let mut leases = DelayQueue::new();
                 let mut slots = TimerSlots::default();
                 drain_step_output(&mut out, &mut effects, &mut delays, &mut leases, &mut slots);
-                let started = Instant::now();
+                let started = crate::asyncrt::mono_ms();
                 let mut delivered = BTreeSet::new();
                 loop {
-                    let arm = tokio::select! {
+                    let arm = crate::asyncrt::select! {
                         Some(expired) = delays.next(), if !delays.is_empty() => expired.into_inner(),
                         Some(expired) = leases.next(), if !leases.is_empty() => expired.into_inner(),
                     };
@@ -322,7 +321,7 @@ mod tests {
                     match arm.timer {
                         Timer::NodeLeaseRenew { generation } => {
                             assert_eq!(generation, 2);
-                            assert!(started.elapsed() < Duration::from_secs(1), "lease timer starved by cell deadline backlog");
+                            assert!(crate::asyncrt::mono_ms() - started < 1_000, "lease timer starved by cell deadline backlog");
                             assert!(delivered.len() < 800);
                             assert!(leases.is_empty());
                             break;
@@ -330,8 +329,8 @@ mod tests {
                         Timer::OperationDeadline { op } => { assert!(delivered.insert(op)); }
                         other => panic!("unexpected timer: {other:?}"),
                     }
-                    let step = Instant::now();
-                    while step.elapsed() < Duration::from_millis(2) { std::hint::spin_loop(); }
+                    let step = crate::asyncrt::mono_ms();
+                    while crate::asyncrt::mono_ms() - step < 2 { std::hint::spin_loop(); }
                     tokio::task::yield_now().await;
                 }
                 while let Some(expired) = delays.next().await {
