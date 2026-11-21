@@ -18,6 +18,10 @@ RUN --mount=type=cache,id=celld-cargo-registry,target=/usr/local/cargo/registry,
     cargo build --profile "${CELLD_PROFILE}" --locked -p celld && \
     install -m 755 "target/${CELLD_PROFILE}/celld" /out/celld
 
+# Debian bookworm's esbuild predates the es2024 target celld uses.
+FROM node:22-bookworm-slim AS esbuild
+RUN npm install --global esbuild@0.28.2
+
 # The final image depends on this stage, so a break in the engine's tests or
 # lints stops the build.
 FROM build AS test
@@ -26,8 +30,9 @@ RUN rustup component add clippy
 # The facet integration test copies the example and bundles it with esbuild;
 # the ltx fault-injection oracle diffs databases with the sqlite3 CLI.
 COPY examples/facets ./examples/facets
+COPY --from=esbuild /usr/local/lib/node_modules/esbuild/bin/esbuild /usr/local/bin/esbuild
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends esbuild sqlite3 && \
+    apt-get install -y --no-install-recommends sqlite3 && \
     rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,id=celld-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=celld-cargo-git,target=/usr/local/cargo/git,sharing=locked \
