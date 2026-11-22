@@ -174,6 +174,12 @@ probes! {
     DormantConfirmedUnrestored,
     /// An owner record release outlived its deadline.
     ReleaseDeadline,
+    /// A balancing release finished with demand parked, after the cell had
+    /// already left dormancy for another lifecycle operation.
+    OwnerReleaseWhileBusy,
+    /// An alarm timer or wake hint reached a dormant cell reserved for a
+    /// balancing handoff, while its owner-record release was in flight.
+    WakeDuringHandoff,
     /// A successor's adoption outlived its deadline.
     AdoptDeadline,
 
