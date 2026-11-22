@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The LTX fault oracle compares databases with SQLite's CLI.
+if ! dpkg-query -W -f='${Status}' sqlite3 2>/dev/null | grep -qx 'install ok installed'; then
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends sqlite3
+fi
+
+# The facet integration test bundles an example with the release image's version.
+if [[ "$(esbuild --version 2>/dev/null || true)" != "0.28.2" ]]; then
+  sudo npm install --global esbuild@0.28.2
+fi
+
+if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+    sh -s -- -y --profile minimal --default-toolchain none
+fi
+source "$HOME/.cargo/env"
+
+# Use the same toolchain as the simulation workflow.
+rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+rustup default 1.98.1
+cargo build -p celld-sim --locked
