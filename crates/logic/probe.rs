@@ -66,6 +66,10 @@ probes! {
     AlarmFinishedFailed,
     /// A handler settled on an observation that arrived while it ran.
     AlarmSettledOnStagedObservation,
+    /// A handler failed or outlived its deadline, its fired alarm was
+    /// re-armed as covered, and the newest alarm state staged behind it was
+    /// not yet covered by a wake entry.
+    AlarmRearmedOverUncovered,
     /// An observation arrived while the alarm was firing and was staged.
     AlarmObservationStaged,
     /// An observation from a runtime being reset was ignored.
@@ -121,6 +125,16 @@ probes! {
     /// The read that settles an ambiguous claim outlived its deadline.
     ReconcileDeadline,
 
+    // Memory pressure.
+    /// A latched node's last cut landed, and the futility stop judged that
+    /// shedding cannot reach the resume line: it holds the latch, cuts
+    /// nothing more and evicts no idle cell.
+    ShedStoppedFutile,
+    /// The stop would have held, but a cell on its way in at the last cut
+    /// has landed since, hiding what the cut gave back, so the walk down
+    /// takes a fresh cut instead.
+    ShedRecutAfterActivationLanded,
+
     // Stops and handoffs.
     /// A swap stop ended on a draining node: the cell starts again at the
     /// same epoch, for the drain to prove and evict.
@@ -129,6 +143,9 @@ probes! {
     /// still open at the epoch the swap stopped without a proof, so a
     /// cleanup stop proves and closes it.
     SwapRestartFailed,
+    /// A runtime start failed outside a swap: a cleanup stop closes the
+    /// database its restore opened.
+    StartFailed,
     /// A request arrived mid-eviction, so the cell activates again.
     EvictionTurnedAround,
     /// An eviction made for room released the cell's owner record.
@@ -150,6 +167,11 @@ probes! {
     /// Of those, a cell whose claim here landed with no restore, so the
     /// tail an earlier epoch left in this node's log stays unfolded.
     DormantKeptUnrestored,
+    /// A restarted process confirmed a cell its record still names here and
+    /// parked it dormant without a restore. Nothing is left to fold: the
+    /// process took its lease only after its predecessor's log was sealed
+    /// or recovered into the bucket.
+    DormantConfirmedUnrestored,
     /// An owner record release outlived its deadline.
     ReleaseDeadline,
     /// A successor's adoption outlived its deadline.

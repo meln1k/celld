@@ -308,6 +308,12 @@ struct Process {
     pending: BTreeMap<RequestId, Pending>,
     /// A graceful shutdown under way.
     shutdown: Option<Shutdown>,
+    /// The cells a clean reload keeps, read from the core once as its
+    /// preserve drained (`prepared_epochs`).
+    prepared: Vec<(String, Epoch)>,
+    /// Restores the shell is still running, whether or not the core still
+    /// waits for them: a preserve retires its restores in the core only.
+    restoring: BTreeSet<OpId>,
     /// Released cells this process is finding a successor for.
     adoptions: BTreeMap<OpId, Adoption>,
     /// The WebSockets this process holds open.
@@ -348,6 +354,8 @@ impl Process {
             published: BTreeMap::new(),
             pending: BTreeMap::new(),
             shutdown: None,
+            prepared: Vec::new(),
+            restoring: BTreeSet::new(),
             adoptions: BTreeMap::new(),
             sockets: BTreeMap::new(),
             generation: 0,
@@ -493,6 +501,7 @@ pub struct World {
     call_rng: Rng,
     /// Which swap restarts fail.
     start_rng: Rng,
+    cold_start_rng: Rng,
     checker: Checker,
     stats: Stats,
     hash: Fnv,
@@ -531,6 +540,7 @@ impl World {
         let recovery_rng = master.fork();
         let call_rng = master.fork();
         let start_rng = master.fork();
+        let cold_start_rng = master.fork();
         let skew = config.faults.max_skew_ms;
         let machines = (0..config.nodes)
             .map(|index| Machine::new(index, fault_rng.range(0, 2 * skew) as i64 - skew as i64))
@@ -566,6 +576,7 @@ impl World {
             recovery_rng,
             call_rng,
             start_rng,
+            cold_start_rng,
             checker: Checker::default(),
             stats: Stats::default(),
             coverage: Coverage::new(),
@@ -782,6 +793,9 @@ impl World {
                 }
             }
             self.record(node, "<-", &event);
+            if let Event::RestoreCompleted { op, .. } = &event {
+                self.machines[node].proc_mut().restoring.remove(op);
+            }
             self.alarm_event_taken(node, &event);
             self.stats.events += 1;
             let before = self.phases(node);

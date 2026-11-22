@@ -242,6 +242,12 @@ empty, and a heap is freed, with its memory, when its last cell leaves.
 Production lets a heap hold 32 cells, which a fleet this small never fills,
 so the swarm also draws a limit of 1, 2 or 3.
 
+A runtime can fail to start during the faults: a swap's restart in half the
+swarm seeds (the new generation's code does not load), and any other start
+in another half (the code does not load, or the database does not open).
+As production's `start_cell` does, a failed start leaves the database its
+restore opened, or the swap left, open.
+
 A seed fixes the whole run. With `--swarm`, the seed also draws the run's
 configuration: the fleet size, the cell count, the lease lifetime, the
 residency caps, the eviction policy, and which faults happen. The faults are
@@ -347,6 +353,14 @@ core, not to the simulator or to the property itself.
   older generation.
 - **idle-not-evicted**: a cell with nothing in flight, no socket and no alarm
   stayed resident long past its idle limit.
+- **released-with-tail**: the core released a cell's owner record while its
+  node held an unfolded tail of the cell: acknowledged writes from an epoch
+  that ended without its final upload, which only that node's next restore
+  folds.
+- **dormant-replica-open**: at a load sample, the core held a cell dormant
+  while its node still had a database of the cell open.
+  A preserving process is exempt: the restores its preserve retired still
+  run to the end, and the clean reload's prune deletes what they opened.
 - **socket-outlives-runtime**: an outbound WebSocket stayed open after its
   cell's runtime stopped.
 - **memory-not-relieved**: a node with no socket open stayed latched on
@@ -556,15 +570,16 @@ The core on `main` fails some seeds.
     `prune_stale_live`.
   - `activation waiter … is queued twice`: the same scan, for a cell that
     a request is also waiting on.
-- **A memory walk-down that wedges.** A node latches on pressure while a cell
-  is still activating: the cell counts as occupied but holds no memory yet.
-  The walk-down evicts one cell, the activating cell's memory lands, and the
-  next sample is unchanged. The futility stop
-  (`shedding_can_reach_resume_line`) reads that as zero yield per eviction
-  and stops shedding with the latch held, so the node refuses every new cell
-  and never evicts an idle one. Nothing measures differently again, so it
-  stays that way (**memory-not-relieved**, and **liveness** or
-  **alarm-not-fired** when the cells it refuses have nowhere else to go).
+- **A memory walk-down that wedges.** A latched node holds the latch while
+  shedding no more, so it refuses every new cell and never evicts an idle
+  one, and nothing measures differently again (**memory-not-relieved**, and
+  **liveness** or **alarm-not-fired** when the cells it refuses have nowhere
+  else to go). One way in is left of the futility stop's, below: a cut
+  sampled after an eviction's memory left but before its stop reached the
+  core counts the cell and not its bytes, so the stop that lands next reads
+  as zero yield (swarm 34741, after a pause). Most wedges left, 34 of 38 in
+  100,000 seeds, never take the futility stop, and are not traced yet
+  (swarm 2515).
 - **A capacity livelock.** When every node is at its residency cap, a new
   cell is refused with `CapacityExhausted` indefinitely: no full node evicts
   an idle resident to make room, so the cell is never served (seed 1227).
@@ -840,6 +855,75 @@ probe `DormantKeptUnrestored`) until a restore here succeeds. The branch is
 rare: 1 seed in 100,000 swarm seeds takes it besides 138032, and in both
 modes every failing line of those 100,000 is the same as the parent's. The
 suite runs swarm 138032.
+
+A failed alarm handler's re-arm hid a newer alarm from eviction. A handler
+that fails, or outlives its operation deadline, re-arms the alarm it fired
+with that alarm's wake coverage, and drops the observation staged while it
+ran. When that observation was a newer alarm no wake entry covered yet, the
+cell looked covered, so eviction let it go with an alarm in its database
+that nothing in the bucket named (**uncovered-alarm**, swarm 7053222: a
+request armed c3 for 22560 while its handler ran 15 s through a partition;
+the deadline re-armed the fired alarm as covered, and the balancer evicted
+c3). Now the re-arm is covered only if the staged state was too (probe
+`AlarmRearmedOverUncovered`), so the cell stays until the retry or a later
+observation settles the alarm and its entry. The suite runs swarm 7053222.
+
+A runtime start that failed outside a swap parked its cell dormant with the
+database its restore had opened still open, and nothing ever closed it:
+the next activation here opened the next epoch beside it. The leaked
+replica held its memory for good, so a node that leaked enough shed
+forever and served nothing (swarm 30), and a restarted process listed both
+epochs as live (`activation waiter … queued twice`, swarm 84). Data was
+safe: the restore had already uploaded the fold, and the epoch never
+served. The simulator failed only swap restarts until this fault
+(`cold_start_failures`); with it and no fix, 100,000 swarm seeds failed
+liveness in 2,269 seeds instead of 1,065 with validation compiled out
+(memory-not-relieved watches 1,426 to 3,415), and `queued twice` broke in
+335 with it on. Now every failed start takes the cleanup stop a failed swap
+restart already took, which proves and closes the database before the cell
+parks dormant (probe `StartFailed`). With the fix, liveness is at 1,095 and
+949 against 1,065 and 927, `queued twice` at 0, and no kind is new; every
+seed that newly fails diverges from the parent at a failed start and fails
+a known kind (traced samples: a wedged walk-down, a fold that never succeeds, a lease lost
+mid-handoff). The suite runs swarms 30 and 84.
+
+The memory walk-down's futility stop held its latch on a cut that a cell
+still on its way in had made meaningless. A cell counts as occupied from its
+claim, but its database and heap open only as it starts. When the cut
+evicted one cell and an activating cell's memory then landed, the next
+sample read flat, the stop took that for zero yield per eviction, and the
+node held the latch with no cut left to measure, refusing every cell for
+good (swarm 19: one more eviction would have reached the resume line, and
+c5 was never served). Now a cut remembers how many cells were on their way
+in, and a stop whose cut has seen one land since takes a fresh cut instead
+(probe `ShedRecutAfterActivationLanded`). Admission is closed while
+latched, so it re-cuts only as often as those cells land, and a stop on a
+fully weighed cut holds as before. In 100,000 swarm seeds, liveness went
+from 1,095 to 218 with validation compiled out and from 949 to 198 with it
+on, **alarm-not-fired** from 177 to 105 and 140 to 84, and
+**memory-not-relieved** watches from 1,452 to 38 and 1,246 to 36. Every one
+of the 30 seeds that newly fail takes the re-cut and fails a known kind. The
+suite runs swarm 19.
+
+A clean reload could keep a database no owner had served. A preserve retires
+the cell's restore in the core and parks it dormant, but the restore still
+runs in the shell. `prepare_clean_reload` keeps only the core's resident
+cells and prunes every other live file, so a restore that wrote its file
+after the prune had listed the directories left it live behind the marker,
+and the replacement reused it as an eviction snapshot, a sparse one if the
+restore was paged. The simulator kept every open database instead, so it
+reused each such file (229 of 100,000 swarm seeds hit
+**dormant-replica-open** that way). Now the prepare closes the activation gate first
+(`close_activations_for_reload`): it waits for the activations in flight
+and refuses later ones, so the prune comes after every restore's last
+write. The simulator keeps only the core's resident inventory, read once
+as the preserve drains, and waits for its running restores as the gate
+does. The epoch never served, so no seed lost data either way. Of the
+2,200 reference runs, the 28 whose hash changed all had a restore in
+flight when a node began a preserve; in 100,000 swarm seeds no kind is
+new, and every changed FAIL line follows a preserve (with validation on,
+58 of 67 with a restore in flight, the rest a preserve that no longer
+waits for a cleanup stop's upload of a cell the core does not list).
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

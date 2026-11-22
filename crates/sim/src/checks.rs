@@ -292,6 +292,35 @@ impl Checker {
         );
     }
 
+    /// Watched: **a released record leaves no tail behind.** An epoch that
+    /// ended without its final upload leaves acknowledged writes only this
+    /// process's next restore folds; a peer that adopts a released record
+    /// restores without them.
+    pub fn released_with_tail(&mut self, t: u64, who: &str, cell: &str, epochs: &[Epoch]) {
+        self.watch(
+            t,
+            "released-with-tail",
+            format!("{who} {cell}"),
+            format!(
+                "{who} released {cell}'s record holding its unfolded tail of epochs {epochs:?}"
+            ),
+        );
+    }
+
+    /// Watched: **a dormant cell holds no open database.** Nothing closes
+    /// one the core no longer runs: it holds memory and a restart lists it
+    /// live.
+    pub fn dormant_open(&mut self, t: u64, who: &str, cell: &str, open: Epoch, dormant: Epoch) {
+        self.watch(
+            t,
+            "dormant-replica-open",
+            format!("{who} {cell} {open}"),
+            format!(
+                "{who} holds {cell} dormant at epoch {dormant} with epoch {open}'s database open"
+            ),
+        );
+    }
+
     /// Watched: **an idle cell is given back.** celld removes a cell from
     /// memory after `CELLD_IDLE_EVICT_S` without use (README).
     pub fn idle_kept(&mut self, t: u64, who: &str, cell: &str, idle_ms: u64) {

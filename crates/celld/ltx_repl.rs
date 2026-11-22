@@ -1315,6 +1315,10 @@ pub struct LtxRepl {
     dirty_tails: Mutex<BTreeMap<String, BTreeMap<u64, RetainedTail>>>,
     registration: Arc<Mutex<RegistrationState>>,
     stop: StopToken,
+    /// Set once a clean reload prepares (`close_activations_for_reload`).
+    /// Every activation holds a read guard for its whole run, so taking the
+    /// write guard waits out the ones in flight, and none starts after.
+    reload_gate: tokio::sync::RwLock<bool>,
     task_owner: Mutex<Option<LtxTaskOwner>>,
     #[cfg(celld_internal_tests)]
     activation_install_pause: Mutex<Option<Arc<LtxActivationInstallPause>>>,
@@ -1626,6 +1630,7 @@ impl LtxRepl {
             dirty_tails: Mutex::new(BTreeMap::new()),
             registration,
             stop: stop.clone(),
+            reload_gate: tokio::sync::RwLock::new(false),
             task_owner: Mutex::new(Some(LtxTaskOwner {
                 tasks,
                 replica_close_tasks,
@@ -2313,6 +2318,11 @@ impl LtxRepl {
         anyhow::ensure!(
             !self.stop.is_stopped(),
             "LTX replication stopped before activation started"
+        );
+        let reload_gate = self.reload_gate.read().await;
+        anyhow::ensure!(
+            !*reload_gate,
+            "a clean reload is preparing; no activation starts"
         );
         let ActivationOptions {
             cell,
@@ -4064,6 +4074,17 @@ impl LtxRepl {
 
     /// Delete stale live-named epochs after the runtime has identified and
     /// closed its exact resident set. Remote replicas remain authoritative.
+    /// Stop every activation before a clean reload's prune: wait for the
+    /// ones in flight, and refuse any later one. The core retires a restore
+    /// when its preserve begins, but the restore still runs here, and one
+    /// that wrote its database after `prune_stale_live` listed the cell
+    /// directories left it live behind the marker. The replacement then
+    /// reused it as an eviction snapshot, a sparse one if the restore was
+    /// paged. The process exits after preparing, so the gate never reopens.
+    pub(crate) async fn close_activations_for_reload(&self) {
+        *self.reload_gate.write().await = true;
+    }
+
     pub fn prune_stale_live(
         &self,
         keep: &std::collections::BTreeSet<(String, u64)>,

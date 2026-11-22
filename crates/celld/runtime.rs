@@ -1145,6 +1145,9 @@ impl RuntimeManager {
             keep.len() == cells.len(),
             "clean reload resident inventory contains duplicates"
         );
+        // A restore the preserve retired can still be running. Let it end
+        // before the prune, or the file it writes outlives the prune.
+        replication.close_activations_for_reload().await;
         let mut closes = futures_util::stream::iter(cells.iter().cloned())
             .map(|cell| {
                 let runtime = self.clone();

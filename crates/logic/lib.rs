@@ -47,11 +47,6 @@ enum Activation {
     Restore(RestoreSpec),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ColdStart {
-    ReadOwner,
-}
-
 /// What a node does for a cell that needs a residency slot it does not have.
 ///
 /// Every caller of `State::activate_or_wait` states this, because the answer
@@ -433,7 +428,6 @@ struct Cell {
     requests: BTreeSet<RequestId>,
     websockets: BTreeMap<WebSocketId, WebSocketKind>,
     waiting_for: Option<Activation>,
-    waiting_activation: Option<ColdStart>,
     /// The in-flight release of this cell's ownership record, if any.
     releasing: Option<OpId>,
     /// Whether the eviction now under way hands this cell to the fleet.
@@ -633,7 +627,6 @@ impl Default for Cell {
             requests: BTreeSet::new(),
             websockets: BTreeMap::new(),
             waiting_for: None,
-            waiting_activation: None,
             releasing: None,
             evict_rebalance: false,
             held_epoch: None,
@@ -673,6 +666,9 @@ struct ShedCut {
     bytes: u64,
     /// The residency the cut was taken at.
     cells: usize,
+    /// Of those, cells still on their way in (`unweighed_cells`): counted
+    /// as occupied, but holding no memory in `bytes` yet.
+    unweighed: usize,
 }
 
 /// All authoritative coordination state for the first vertical slice.
@@ -1402,7 +1398,7 @@ impl State {
             let Some(cell) = self.cells.get(id) else {
                 return Err(format!("activation waiter {id:?} has no cell state"));
             };
-            if cell.phase != Phase::WaitingActivation || cell.waiting_activation.is_none() {
+            if cell.phase != Phase::WaitingActivation {
                 return Err(format!("activation waiter {id:?} is not waiting"));
             }
             if self.activation_permits.contains(id) {
@@ -2024,42 +2020,24 @@ impl State {
         }
     }
 
-    fn begin_cold_route(
-        &mut self,
-        id: &str,
-        cell: &mut Cell,
-        start: ColdStart,
-        effects: &mut Vec<Effect>,
-    ) {
+    fn begin_cold_route(&mut self, id: &str, cell: &mut Cell, effects: &mut Vec<Effect>) {
         debug_assert!(self.activation_permits.contains(id));
-        cell.waiting_activation = None;
-        match start {
-            ColdStart::ReadOwner => {
-                let op = self.cell_op(id);
-                set_phase(&mut self.occupied, cell, Phase::ReadingOwner { op });
-                effects.push(Effect::ReadOwner {
-                    op,
-                    cell: id.to_string(),
-                });
-            }
-        }
+        let op = self.cell_op(id);
+        set_phase(&mut self.occupied, cell, Phase::ReadingOwner { op });
+        effects.push(Effect::ReadOwner {
+            op,
+            cell: id.to_string(),
+        });
     }
 
-    fn admit_or_queue_activation(
-        &mut self,
-        id: &str,
-        cell: &mut Cell,
-        start: ColdStart,
-        effects: &mut Vec<Effect>,
-    ) {
+    fn admit_or_queue_activation(&mut self, id: &str, cell: &mut Cell, effects: &mut Vec<Effect>) {
         if self.activation_permits.contains(id) {
-            self.begin_cold_route(id, cell, start, effects);
+            self.begin_cold_route(id, cell, effects);
         } else if self.activation_permits.len() < self.config.max_activations {
             self.activation_permits.insert(id.to_string());
-            self.begin_cold_route(id, cell, start, effects);
+            self.begin_cold_route(id, cell, effects);
         } else {
             set_phase(&mut self.occupied, cell, Phase::WaitingActivation);
-            cell.waiting_activation = Some(start);
             self.activation_waiters.push_back(id.to_string());
             self.watch_queued(id, cell, effects);
         }
@@ -2083,20 +2061,15 @@ impl State {
                 self.cells.insert(id, cell);
                 continue;
             }
-            let Some(start) = cell.waiting_activation.take() else {
-                self.cells.insert(id, cell);
-                continue;
-            };
             if cell.requests.is_empty()
                 && !cell.alarm_wake
                 && !cell.resume_demand
                 && !cell.confirming
             {
-                let ColdStart::ReadOwner = start;
                 set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
             } else {
                 self.activation_permits.insert(id.clone());
-                self.begin_cold_route(&id, &mut cell, start, effects);
+                self.begin_cold_route(&id, &mut cell, effects);
             }
             self.cells.insert(id, cell);
         }
@@ -2140,7 +2113,7 @@ impl State {
                 ..Cell::default()
             };
             self.resuming_cells.insert(local.id.clone());
-            self.admit_or_queue_activation(&local.id, &mut cell, ColdStart::ReadOwner, effects);
+            self.admit_or_queue_activation(&local.id, &mut cell, effects);
             self.cells.insert(local.id, cell);
         }
         if self.resuming_cells.is_empty() {
@@ -2175,7 +2148,7 @@ impl State {
                 ..Cell::default()
             };
             self.confirming_cells.insert(local.id.clone());
-            self.admit_or_queue_activation(&local.id, &mut cell, ColdStart::ReadOwner, effects);
+            self.admit_or_queue_activation(&local.id, &mut cell, effects);
             self.cells.insert(local.id, cell);
         }
         if self.confirming_cells.is_empty() {
@@ -3419,7 +3392,7 @@ impl State {
                 // at TXID 1 inside a populated prefix and mix two writer
                 // lineages (CelldWriterGeneration.tla, #158). The CAS also
                 // settles the older resume-vs-release race deterministically.
-                self.admit_or_queue_activation(id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(id, &mut cell, effects);
                 effects.push(Effect::ScheduleTimer {
                     timer: Timer::CellAlarm {
                         cell: id.to_string(),
@@ -3433,7 +3406,7 @@ impl State {
             Phase::Inactive => {
                 self.probe(Probe::AlarmTimerWokeCell);
                 cell.alarm_wake = true;
-                self.admit_or_queue_activation(id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(id, &mut cell, effects);
                 effects.push(Effect::ScheduleTimer {
                     timer: Timer::CellAlarm {
                         cell: id.to_string(),
@@ -3580,10 +3553,19 @@ impl State {
             }
             Err(_) => {
                 self.probe(Probe::AlarmFinishedFailed);
+                // The re-arm keeps the fired alarm for at-least-once, but the
+                // database may hold the newer state staged behind it, and a
+                // wake entry covers the cell only if it covers that state
+                // too. Until the retry or a later observation settles it,
+                // eviction must not take a cell nothing in the bucket wakes.
+                let staged_uncovered = observed.as_ref().is_some_and(|(_, staged)| !staged);
+                if covered && staged_uncovered {
+                    self.probe(Probe::AlarmRearmedOverUncovered);
+                }
                 cell.alarm = Some(AlarmState::Armed {
                     at_ms,
                     generation,
-                    covered,
+                    covered: covered && !staged_uncovered,
                 });
                 self.cells.insert(id.clone(), cell);
                 effects.push(Effect::ScheduleTimer {
@@ -3595,6 +3577,32 @@ impl State {
                 });
             }
         }
+    }
+
+    /// Stop a cell whose runtime failed to start or publish with a cleanup
+    /// stop, which proves its database durable and closes it before the cell
+    /// parks dormant (`runtime_stopped`).
+    fn begin_cleanup(
+        &mut self,
+        id: &str,
+        cell: &mut Cell,
+        epoch: Epoch,
+        effects: &mut Vec<Effect>,
+    ) {
+        let op = self.cell_op(id);
+        let cause = StopCause::Cleanup;
+        set_phase(
+            &mut self.occupied,
+            cell,
+            Phase::Cleaning { op, epoch, cause },
+        );
+        effects.push(Effect::StopRuntime {
+            op,
+            cell: id.to_string(),
+            epoch,
+            cause,
+            bounded: false,
+        });
     }
 
     fn fence_node(&mut self, reason: HaltReason, effects: &mut Vec<Effect>) {
@@ -3799,23 +3807,13 @@ impl State {
                         // requests already sent there. A draining ingress can
                         // still resolve a live remote owner during handoff;
                         // acquisition admission refuses new local ownership.
-                        self.admit_or_queue_activation(
-                            &id,
-                            &mut cell,
-                            ColdStart::ReadOwner,
-                            effects,
-                        );
+                        self.admit_or_queue_activation(&id, &mut cell, effects);
                     }
                     Phase::Dormant { .. } if !self.hands_off(&cell) => {
                         // A wake always claims a fresh epoch. The preserved
                         // snapshot remains reusable as the previous epoch's
                         // baseline after the claim succeeds.
-                        self.admit_or_queue_activation(
-                            &id,
-                            &mut cell,
-                            ColdStart::ReadOwner,
-                            effects,
-                        );
+                        self.admit_or_queue_activation(&id, &mut cell, effects);
                     }
                     _ => {}
                 }
@@ -3866,7 +3864,7 @@ impl State {
         cell.alarm_wake = true;
         match cell.phase {
             Phase::Inactive | Phase::Remote { .. } | Phase::Dormant { .. } => {
-                self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(&id, &mut cell, effects);
             }
             _ => {}
         }
@@ -3902,7 +3900,6 @@ impl State {
             && !cell.resume_demand
             && cell.phase == Phase::WaitingActivation
         {
-            cell.waiting_activation = None;
             set_phase(&mut self.occupied, cell, Phase::Inactive);
             self.activation_waiters.retain(|queued| queued != &id);
         } else if cell.requests.is_empty()
@@ -3968,7 +3965,6 @@ impl State {
                 // recovery episode that preserve just retired.
                 cell.owner_log_recovery_attempts = 0;
                 cell.waiting_for = None;
-                cell.waiting_activation = None;
                 cell.alarm_wake = false;
                 cell.resume_demand = false;
                 self.resuming_cells.remove(&id);
@@ -4113,6 +4109,7 @@ impl State {
                 // and the next request wakes it through the usual claim.
                 let phase = match result {
                     Ok(Some(record)) if record.node.as_deref() == Some(self.node.as_str()) => {
+                        self.probe(Probe::DormantConfirmedUnrestored);
                         Phase::Dormant {
                             epoch: record.epoch,
                         }
@@ -4701,7 +4698,7 @@ impl State {
             cell.owner_log_recovery_attempts = 0;
             set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
         } else {
-            self.admit_or_queue_activation(id, &mut cell, ColdStart::ReadOwner, effects);
+            self.admit_or_queue_activation(id, &mut cell, effects);
         }
         self.cells.insert(id.to_string(), cell);
     }
@@ -4947,36 +4944,20 @@ impl State {
                     epoch,
                 });
             }
-            // The second half of a swap failed. The swap stop proved
-            // nothing, so the epoch's last writes may live only in its log
-            // and bundles, and its database is still open. Parked dormant
-            // straight away, a release or the next activation restored past
-            // them. A cleanup stop proves and closes it first, as a failed
-            // publish does.
-            Err(_) if cell.swapping => {
-                self.probe(Probe::SwapRestartFailed);
-                let next = self.cell_op(&id);
-                set_phase(
-                    &mut self.occupied,
-                    &mut cell,
-                    Phase::Cleaning {
-                        op: next,
-                        epoch,
-                        cause: StopCause::Cleanup,
-                    },
-                );
-                effects.push(Effect::StopRuntime {
-                    op: next,
-                    cell: id.clone(),
-                    epoch,
-                    cause: StopCause::Cleanup,
-                    bounded: false,
-                });
-                self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
-                resume_failed = cell.resume_demand;
-            }
+            // The runtime did not start, and the database it was to open is
+            // still open: the restore opened it, or a swap stop left it open.
+            // Parked dormant straight away, nothing closed it, and the next
+            // activation here opened the next epoch beside it. After a swap
+            // it is also unproven: the swap stop proved nothing, so the
+            // epoch's last writes may live only in its log and bundles, and a
+            // release or the next activation restored past them. A cleanup
+            // stop proves and closes it first, as a failed publish does.
             Err(_) => {
-                set_phase(&mut self.occupied, &mut cell, Phase::Dormant { epoch });
+                self.probe(match cell.swapping {
+                    true => Probe::SwapRestartFailed,
+                    false => Probe::StartFailed,
+                });
+                self.begin_cleanup(&id, &mut cell, epoch, effects);
                 self.finish_requests(&id, &mut cell, Err(RequestError::RuntimeFailed), effects);
                 resume_failed = cell.resume_demand;
             }
@@ -5037,23 +5018,7 @@ impl State {
             }
             Err(_) => {
                 self.probe(Probe::PublishFailed);
-                let next = self.cell_op(&id);
-                set_phase(
-                    &mut self.occupied,
-                    &mut cell,
-                    Phase::Cleaning {
-                        op: next,
-                        epoch,
-                        cause: StopCause::Cleanup,
-                    },
-                );
-                effects.push(Effect::StopRuntime {
-                    op: next,
-                    cell: id.clone(),
-                    epoch,
-                    cause: StopCause::Cleanup,
-                    bounded: false,
-                });
+                self.begin_cleanup(&id, &mut cell, epoch, effects);
             }
         }
         self.cells.insert(id.clone(), cell);
@@ -5121,7 +5086,7 @@ impl State {
             // requests it parked take the ordinary path: a wake if the
             // record still names this node, an owner read if it does not.
             if std::mem::take(&mut cell.handoff) && !cell.requests.is_empty() {
-                self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(&id, &mut cell, effects);
             }
         }
         self.cells.insert(id, cell);
@@ -5186,7 +5151,7 @@ impl State {
                 self.activity.rebalance_failed = self.activity.rebalance_failed.saturating_add(1);
                 set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
                 if !cell.requests.is_empty() {
-                    self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
+                    self.admit_or_queue_activation(&id, &mut cell, effects);
                 }
             }
             _ => {
@@ -5271,7 +5236,7 @@ impl State {
                 self.eviction_permits.remove(&id);
                 // The stop discarded the LTX metadata. Re-read ownership and
                 // claim epoch+1 before reusing the preserved SQLite image.
-                self.admit_or_queue_activation(&id, &mut cell, ColdStart::ReadOwner, effects);
+                self.admit_or_queue_activation(&id, &mut cell, effects);
             }
             // The swap's second half: the same epoch, the same owner record,
             // the same replica, a new isolate. `Starting` without `Restore`
@@ -5666,7 +5631,7 @@ impl State {
         let transitioning = cell.is_some_and(|cell| {
             cell.releasing.is_some()
                 || cell.waiting_for.is_some()
-                || cell.waiting_activation.is_some()
+                || cell.phase == Phase::WaitingActivation
                 || !cell.requests.is_empty()
                 || cell.quiescing
                 || cell.swapping
@@ -5772,18 +5737,18 @@ impl State {
         // application cell carries no comparable background obligation.
         #[cfg(celld_internal_tests)]
         self.record_drain_table_visits(self.cells.len());
+        let mut kept = KeptRecords::default();
         let dormant_queues: Vec<(CellId, Epoch)> = self
             .cells
             .iter()
             .filter_map(|(id, cell)| match cell.phase {
-                Phase::Dormant { epoch }
-                    if cell.releasing.is_none() && !cell.keeps_record() && is_queue_broker(id) =>
-                {
-                    Some((id.clone(), epoch))
+                Phase::Dormant { epoch } if cell.releasing.is_none() && is_queue_broker(id) => {
+                    kept_or_released(cell, &mut kept).then(|| (id.clone(), epoch))
                 }
                 _ => None,
             })
             .collect();
+        self.probe_kept_records(&kept);
         for (id, epoch) in dormant_queues {
             if in_flight >= self.config.max_releases {
                 return;
@@ -5874,35 +5839,34 @@ impl State {
         // directly.
         #[cfg(celld_internal_tests)]
         self.record_drain_table_visits(self.cells.len());
+        let mut kept = KeptRecords::default();
         let dormant: Vec<(CellId, Epoch)> = self
             .cells
             .iter()
             .filter_map(|(id, cell)| match cell.phase {
-                Phase::Dormant { epoch } if cell.releasing.is_none() && !cell.keeps_record() => {
-                    Some((id.clone(), epoch))
+                Phase::Dormant { epoch } if cell.releasing.is_none() => {
+                    kept_or_released(cell, &mut kept).then(|| (id.clone(), epoch))
                 }
                 _ => None,
             })
             .collect();
-        if (self.cells.values())
-            .any(|cell| cell.keeps_record() && matches!(cell.phase, Phase::Dormant { .. }))
-        {
-            self.probe(Probe::DormantKeptUnfolded);
-        }
-        if (self.cells.values()).any(|cell| {
-            cell.unrestored_claim
-                && !cell.restore_failed
-                && cell.releasing.is_none()
-                && matches!(cell.phase, Phase::Dormant { .. })
-        }) {
-            self.probe(Probe::DormantKeptUnrestored);
-        }
+        self.probe_kept_records(&kept);
         for (id, epoch) in dormant {
             if in_flight >= self.config.max_releases {
                 return;
             }
             self.release_dormant(&id, epoch, effects);
             in_flight += 1;
+        }
+    }
+
+    /// A release walk kept these cells' records (`kept_or_released`).
+    fn probe_kept_records(&mut self, kept: &KeptRecords) {
+        if kept.any {
+            self.probe(Probe::DormantKeptUnfolded);
+        }
+        if kept.unrestored {
+            self.probe(Probe::DormantKeptUnrestored);
         }
     }
 
@@ -5966,36 +5930,23 @@ impl State {
                 .max_releases
                 .saturating_sub(self.handoffs_in_flight()),
         );
+        let mut kept = KeptRecords::default();
         let mut dormant: Vec<(CellId, Epoch, u64)> = self
             .cells
             .iter()
             .filter_map(|(id, cell)| match cell.phase {
                 Phase::Dormant { epoch }
                     if cell.releasing.is_none()
-                        && !cell.keeps_record()
                         && cell.requests.is_empty()
                         && !self.alarm_is_imminent(cell) =>
                 {
-                    Some((id.clone(), epoch, cell.last_used_mono_ms))
+                    (kept_or_released(cell, &mut kept))
+                        .then(|| (id.clone(), epoch, cell.last_used_mono_ms))
                 }
                 _ => None,
             })
             .collect();
-        if (self.cells.values())
-            .any(|cell| cell.keeps_record() && matches!(cell.phase, Phase::Dormant { .. }))
-        {
-            self.probe(Probe::DormantKeptUnfolded);
-        }
-        if (self.cells.values()).any(|cell| {
-            cell.unrestored_claim
-                && !cell.restore_failed
-                && cell.releasing.is_none()
-                && cell.requests.is_empty()
-                && !self.alarm_is_imminent(cell)
-                && matches!(cell.phase, Phase::Dormant { .. })
-        }) {
-            self.probe(Probe::DormantKeptUnrestored);
-        }
+        self.probe_kept_records(&kept);
         dormant.sort_by(|left, right| (left.2, &left.0).cmp(&(right.2, &right.0)));
         for (id, epoch, _) in dormant.into_iter().take(budget) {
             self.release_dormant(&id, epoch, effects);
@@ -6192,7 +6143,6 @@ impl State {
         let Some(queued) = self.cells.get_mut(cell) else {
             return;
         };
-        queued.waiting_activation = None;
         let dormant = match queued.waiting_for.take() {
             Some(Activation::Restore(spec)) => Some(spec.epoch),
             _ => None,
@@ -6356,8 +6306,20 @@ impl State {
             // fresh baseline. The band absorbs the jitter of a live sample and
             // decides nothing about what a cut must achieve.
             let rose = sample_bytes > cut.bytes.saturating_add(cut.bytes / 100);
+            // A cell on its way in at the cut whose memory has landed since
+            // hides what the cut gave back: one cell left, one arrived, and
+            // the sample reads flat. Judged on that, the stop held the latch
+            // with no cut left to measure, and nothing changed again (swarm
+            // 19). Such a cut says nothing about yield, so take a fresh one.
+            // Admission is closed while latched, so this re-cuts only as
+            // often as cells already in flight land.
+            let landed_since = self.unweighed_cells() < cut.unweighed;
             if cut_landed && !rose && !self.shedding_can_reach_resume_line(cut, sample_bytes) {
-                return;
+                if !landed_since {
+                    self.probe(Probe::ShedStoppedFutile);
+                    return;
+                }
+                self.probe(Probe::ShedRecutAfterActivationLanded);
             }
         }
         // How far this resource sample asks the node to come down: a proportion
@@ -6368,8 +6330,26 @@ impl State {
             metric,
             bytes: sample_bytes,
             cells: load.resident_cells,
+            unweighed: self.unweighed_cells(),
         });
         self.shed_toward_floor(effects);
+    }
+
+    /// Cells that count as occupied but are still on their way in:
+    /// acquiring, restoring or starting, before their database and heap are
+    /// open, so a memory sample holds nothing of theirs yet.
+    fn unweighed_cells(&self) -> usize {
+        (self.cells.values())
+            .filter(|cell| {
+                matches!(
+                    cell.phase,
+                    Phase::Acquiring { dormant: false, .. }
+                        | Phase::ReconcilingAcquire { dormant: false, .. }
+                        | Phase::Restoring { .. }
+                        | Phase::Starting { .. }
+                )
+            })
+            .count()
     }
 
     /// Is there a heap this walk down can still take back whole?
@@ -6832,7 +6812,6 @@ impl State {
             }
             set_phase(&mut self.occupied, &mut cell, Phase::Fenced);
             cell.waiting_for = None;
-            cell.waiting_activation = None;
             cell.alarm = None;
             cell.alarm_wake = false;
             cell.websockets.clear();
@@ -7213,6 +7192,27 @@ fn phase_requires_activation_permit(phase: &Phase, swapping: bool) -> bool {
 /// The one gate every phase change passes through: it keeps `occupied`
 /// equal to the number of cells in a capacity-occupying phase, so nothing
 /// ever has to count them. `validate` asserts the equality by walking.
+/// The dormant cells a release walk kept rather than release, for its
+/// probes.
+#[derive(Default)]
+struct KeptRecords {
+    any: bool,
+    /// One kept because a claim here landed with no restore.
+    unrestored: bool,
+}
+
+/// Whether a release walk may release this dormant cell, which passed the
+/// walk's own filters. One that keeps its record (`Cell::keeps_record`) is
+/// noted in `kept` for the walk's probes.
+fn kept_or_released(cell: &Cell, kept: &mut KeptRecords) -> bool {
+    if !cell.keeps_record() {
+        return true;
+    }
+    kept.any = true;
+    kept.unrestored |= !cell.restore_failed;
+    false
+}
+
 fn set_phase(occupied: &mut usize, cell: &mut Cell, phase: Phase) {
     if !matches!(&phase, Phase::Resident { .. }) {
         cell.quiescing = false;
