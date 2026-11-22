@@ -543,7 +543,7 @@ The core on `main` fails some seeds.
   never activates on that node again (swarm 1809, 2864, 5099). Nor does it
   move: a cell whose last restore failed keeps its owner record (below),
   so no peer restores it without the tail either (swarm 2617).
-- **Eleven `State::validate` invariants:**
+- **Nine `State::validate` invariants:**
   - `indexed cell op N has no owning slot`.
   - `confirming cell … left the owner read in Fenced`.
   - The same in `Inactive`: a client gives up on the only request for a cell
@@ -559,12 +559,6 @@ The core on `main` fails some seeds.
   - `cell … is firing an alarm while not resident`: an ownership read fails
     while the cell's alarm handler is running, or while its reply waits for
     the wake entry of the alarm it re-armed.
-  - `handoff cell … is outside the pipeline in WaitingActivation`: a cell's
-    alarm timer fires after its node evicted it and released its owner
-    record.
-  - The same in `ReadingOwner`: a request brings a cell back to the node
-    that just released it, and the elected waker hints the cell while its
-    owner read is in flight.
   - `occupied counter N disagrees with the walk N`: the startup scan finds
     two live epochs of one cell on disk, which production leaves until
     `prune_stale_live`.
@@ -924,6 +918,40 @@ flight when a node began a preserve; in 100,000 swarm seeds no kind is
 new, and every changed FAIL line follows a preserve (with validation on,
 58 of 67 with a restore in flight, the rest a preserve that no longer
 waits for a cleanup stop's upload of a cell the core does not list).
+
+Alarm wakes could overtake a balancing handoff. Requests already waited
+behind its reservation, but an owned or fleet wake hint, or the cell's own
+alarm timer, could start another activation while the owner-record release
+was in flight. The release reply then started yet another owner read over
+the cell's current restore or stop. Its real completion no longer matched
+the phase and was dropped, leaving an old epoch's database open beside later
+epochs (**dormant-replica-open**). In swarm 477773 a late release replaced
+c5's restore; in 4839226 it replaced c1's eviction stop before the shell
+reported its cancellation. Neither lost data in the nightly sweep.
+
+Now every alarm wake waits behind the same handoff reservation as a
+request (probe `WakeDuringHandoff`). A late release never restarts a
+lifecycle already in progress (probe `OwnerReleaseWhileBusy`), and a failed
+release or adoption preserves alarm-only demand even when no client is
+waiting. The probe-only commit preserved all 2,200 reference runs in each
+mode. Both regression seeds now complete without violations or a dormant
+open database; the suite checks both and that they still wake during a
+handoff. A temporary public-event harness also checked owned hints, fleet
+hints and alarm timers across applied, rejected and failed releases, with
+and without a waiting client, and successful or failed successor adoption.
+
+In 100,000 swarm seeds per mode, the probe-only build changed no failure or
+watched result. The fix reduced validated failing seeds from 10,159 to
+10,104: all 62 changed runs first diverge at a handoff wake (60 hints and
+two alarm timers); 55 now pass, three reach the known fenced-handoff bug,
+three the release-ceiling bug and one the deferred fold deadlock (84201).
+With validation compiled out, all 859 failing-seed records are unchanged,
+while `OwnerReleaseWhileBusy` falls from 15 seeds to none. No failure kind
+is new, and neither mode reports a **lost-write**, **late-ack** or
+**torn-restore** violation. Only three of the 2,200 reference runs change in either mode,
+each at a handoff wake. In the known list, six seeds now pass and 2153
+reaches the existing fenced-handoff invariant instead; all seven were
+traced before their lines changed.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every

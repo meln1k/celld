@@ -3385,17 +3385,17 @@ impl State {
                 return;
             }
             Phase::Dormant { .. } => {
-                self.probe(Probe::AlarmTimerWokeCell);
                 cell.alarm_wake = true;
                 if self.hands_off(&cell) {
                     self.probe(Probe::WakeDuringHandoff);
+                } else {
+                    self.probe(Probe::AlarmTimerWokeCell);
+                    // Every activation takes a fresh epoch. The LTX metadata
+                    // does not survive an eviction, so a same-epoch wake
+                    // would mix writer lineages. A balancing handoff owns
+                    // this transition until its release and adoption settle.
+                    self.admit_or_queue_activation(id, &mut cell, effects);
                 }
-                // Every activation takes a fresh epoch. The LTX metadata does
-                // not survive an eviction, so a same-epoch wake would restart
-                // at TXID 1 inside a populated prefix and mix two writer
-                // lineages (CelldWriterGeneration.tla, #158). The CAS also
-                // settles the older resume-vs-release race deterministically.
-                self.admit_or_queue_activation(id, &mut cell, effects);
                 effects.push(Effect::ScheduleTimer {
                     timer: Timer::CellAlarm {
                         cell: id.to_string(),
@@ -3865,10 +3865,10 @@ impl State {
         }
         let mut cell = self.cells.remove(&id).unwrap_or_default();
         cell.alarm_wake = true;
-        if matches!(cell.phase, Phase::Dormant { .. }) && self.hands_off(&cell) {
-            self.probe(Probe::WakeDuringHandoff);
-        }
         match cell.phase {
+            Phase::Dormant { .. } if self.hands_off(&cell) => {
+                self.probe(Probe::WakeDuringHandoff);
+            }
             Phase::Inactive | Phase::Remote { .. } | Phase::Dormant { .. } => {
                 self.admit_or_queue_activation(&id, &mut cell, effects);
             }
@@ -5091,14 +5091,14 @@ impl State {
             // A balancing move that did not reach adoption is over. The
             // requests it parked take the ordinary path: a wake if the
             // record still names this node, an owner read if it does not.
-            if cell.handoff
-                && !cell.requests.is_empty()
-                && !matches!(cell.phase, Phase::Dormant { .. } | Phase::Inactive)
-            {
-                self.probe(Probe::OwnerReleaseWhileBusy);
-            }
-            if std::mem::take(&mut cell.handoff) && !cell.requests.is_empty() {
-                self.admit_or_queue_activation(&id, &mut cell, effects);
+            if std::mem::take(&mut cell.handoff) && (!cell.requests.is_empty() || cell.alarm_wake) {
+                if matches!(cell.phase, Phase::Dormant { .. } | Phase::Inactive) {
+                    self.admit_or_queue_activation(&id, &mut cell, effects);
+                } else {
+                    // A late release belongs to its old epoch, not to a
+                    // restore or stop already in flight for a newer one.
+                    self.probe(Probe::OwnerReleaseWhileBusy);
+                }
             }
         }
         self.cells.insert(id, cell);
@@ -5162,7 +5162,7 @@ impl State {
                 self.activity.handoff_failed = self.activity.handoff_failed.saturating_add(1);
                 self.activity.rebalance_failed = self.activity.rebalance_failed.saturating_add(1);
                 set_phase(&mut self.occupied, &mut cell, Phase::Inactive);
-                if !cell.requests.is_empty() {
+                if !cell.requests.is_empty() || cell.alarm_wake {
                     self.admit_or_queue_activation(&id, &mut cell, effects);
                 }
             }

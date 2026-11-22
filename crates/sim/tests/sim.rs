@@ -176,6 +176,30 @@ fn a_failed_start_closes_the_database_its_restore_opened() {
 }
 
 #[test]
+fn alarm_wakes_wait_for_an_inflight_balancing_handoff() {
+    // A wake used to bypass the handoff reservation. Its late ReleaseOwner
+    // reply then replaced Restoring (477773) or Cleaning (4839226) with
+    // ReadingOwner, so the real completion was dropped and its database
+    // stayed open beside the cell's later epochs.
+    for seed in [477_773, 4_839_226] {
+        let outcome = run(seed, &SimConfig::swarm(seed));
+        assert!(outcome.passed(), "seed {seed}: {outcome:?}");
+        assert!(
+            outcome.probes[celld_logic::Probe::WakeDuringHandoff as usize] > 0,
+            "seed {seed} no longer wakes a cell during handoff"
+        );
+        assert!(
+            !outcome
+                .watched
+                .iter()
+                .any(|w| w.kind == "dormant-replica-open"),
+            "seed {seed}: {:?}",
+            outcome.watched
+        );
+    }
+}
+
+#[test]
 fn a_walk_down_recuts_when_an_activating_cell_lands_after_its_cut() {
     // n0 latches on memory with c3's claim in flight. The cut evicts c5,
     // c3's memory lands, and the next sample reads flat. The futility stop
@@ -339,14 +363,9 @@ impl Judge {
 ///   counted.
 /// - An ownership read that fails while the cell's alarm handler runs
 ///   leaves the alarm firing on a cell that is no longer resident.
-/// - A cell's alarm timer that fires after its node evicted it and released
-///   its owner record puts the handoff cell in `WaitingActivation`.
-/// - A request that brings a cell back to the node that just released it,
-///   with a wake hint for it during the owner read, does the same in
-///   `ReadingOwner`.
 /// - A startup scan that finds two live epochs of one cell on disk counts
 ///   both as occupied, and can queue the cell for activation twice.
-const KNOWN_CORE_PANICS: [&str; 11] = [
+const KNOWN_CORE_PANICS: [&str; 9] = [
     "has no owning slot",
     "left the owner read in Fenced",
     "left the owner read in Inactive",
@@ -354,8 +373,6 @@ const KNOWN_CORE_PANICS: [&str; 11] = [
     "is outside the pipeline in Fenced",
     "has a live transport while not resident",
     "is firing an alarm while not resident",
-    "is outside the pipeline in WaitingActivation",
-    "is outside the pipeline in ReadingOwner",
     "disagrees with the walk",
     "is queued twice",
 ];
