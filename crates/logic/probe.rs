@@ -125,6 +125,18 @@ probes! {
     /// The read that settles an ambiguous claim outlived its deadline.
     ReconcileDeadline,
 
+    // Capacity placement.
+    /// A newer advisory sample made a previously refused peer eligible again.
+    CapacityRefusalRefreshed,
+    /// A successful capacity lookup found no eligible peer, so demand waits
+    /// locally and may shed an idle resident to make room.
+    CapacityPeersExhausted,
+    /// Demand needs a slot, but no idle resident is safe to shed.
+    CapacityShedNoCandidate,
+    /// Demand selected an idle resident, but its imminent alarm refused
+    /// the eviction even though another cell is waiting for room.
+    CapacityShedAlarmImminent,
+
     // Memory pressure.
     /// A latched node's last cut landed, and the futility stop judged that
     /// shedding cannot reach the resume line: it holds the latch, cuts

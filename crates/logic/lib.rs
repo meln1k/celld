@@ -4400,7 +4400,9 @@ impl State {
                 self.capacity_samples
                     .insert(peer.node.clone(), peer.sampled_ms);
                 self.capacity_reservations.remove(&peer.node);
-                self.capacity_rejections.remove(&peer.node);
+                if self.capacity_rejections.remove(&peer.node).is_some() {
+                    self.probe(Probe::CapacityRefusalRefreshed);
+                }
             }
         }
 
@@ -4476,6 +4478,7 @@ impl State {
                 effects,
             );
         } else {
+            self.probe(Probe::CapacityPeersExhausted);
             self.activate_or_wait(
                 &id,
                 &mut cell,
@@ -6077,7 +6080,13 @@ impl State {
             return;
         }
         if let Some(victim) = self.shed_candidate() {
-            let _ = self.begin_eviction(&victim, self.rebalances(), effects);
+            if self.begin_eviction(&victim, self.rebalances(), effects)
+                == Err(EvictRefusal::AlarmImminent)
+            {
+                self.probe(Probe::CapacityShedAlarmImminent);
+            }
+        } else {
+            self.probe(Probe::CapacityShedNoCandidate);
         }
     }
 
