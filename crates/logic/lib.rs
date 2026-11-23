@@ -426,6 +426,10 @@ struct Cell {
     /// which was already admitted finishes on this runtime.
     quiescing: bool,
     requests: BTreeSet<RequestId>,
+    /// Peers that refused this cell's unresolved placement. Fresh advisory
+    /// samples may make a peer worth trying for other cells, but must not
+    /// restart this cell's traversal before it can make room locally.
+    capacity_refusals: BTreeSet<NodeId>,
     websockets: BTreeMap<WebSocketId, WebSocketKind>,
     waiting_for: Option<Activation>,
     /// The in-flight release of this cell's ownership record, if any.
@@ -625,6 +629,7 @@ impl Default for Cell {
             owner_log_recovery_attempts: 0,
             quiescing: false,
             requests: BTreeSet::new(),
+            capacity_refusals: BTreeSet::new(),
             websockets: BTreeMap::new(),
             waiting_for: None,
             releasing: None,
@@ -2011,6 +2016,11 @@ impl State {
         result: Result<Route, RequestError>,
         effects: &mut Vec<Effect>,
     ) {
+        // Epoch-zero forwarding is only a placement attempt, not an owner.
+        // Keep its refusals until the route settles or fails outright.
+        if !matches!(result, Ok(Route::Remote { epoch: 0, .. })) {
+            cell.capacity_refusals.clear();
+        }
         for request in std::mem::take(&mut cell.requests) {
             self.request_cells.remove(&request);
             if result == Ok(Route::Local) {
@@ -4415,6 +4425,7 @@ impl State {
                     && peer.peer_protocol == self.config.peer_protocol
                     && peer.sampled_ms != 0
                     && !peer.pressured
+                    && !cell.capacity_refusals.contains(&peer.node)
                     && self
                         .capacity_rejections
                         .get(&peer.node)
@@ -4479,6 +4490,9 @@ impl State {
             );
         } else {
             self.probe(Probe::CapacityPeersExhausted);
+            // This traversal is over. If the local wait later expires, a
+            // new placement may try peers whose room has changed meanwhile.
+            cell.capacity_refusals.clear();
             self.activate_or_wait(
                 &id,
                 &mut cell,
@@ -6736,6 +6750,9 @@ impl State {
         let Some(cell) = self.cells.get_mut(id) else {
             return;
         };
+        if rejected_sample.is_some() {
+            cell.capacity_refusals.insert(node.to_string());
+        }
         if matches!(
             &cell.phase,
             Phase::Remote {

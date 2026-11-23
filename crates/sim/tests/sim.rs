@@ -50,6 +50,33 @@ fn calm_fleet_serves_every_request_and_breaks_nothing() {
 }
 
 #[test]
+fn fresh_load_samples_do_not_restart_a_full_fleets_capacity_traversal() {
+    // Each capacity refusal and re-resolution takes longer than a sample
+    // interval. A newer sample must not send the same placement back to a
+    // peer that already refused it: two slots must serve three cells by
+    // shedding an idle resident, rather than refusing the third forever.
+    let config = SimConfig {
+        nodes: 2,
+        cells: 3,
+        max_resident: 1,
+        max_activations: 1,
+        store_latency_ms: (300, 300),
+        alarm_probability: 0.0,
+        websocket_probability: 0.0,
+        effect_probability: 0.0,
+        worker_probability: 0.0,
+        operator: Operator::default(),
+        ..SimConfig::calm()
+    };
+    let outcome = run(0, &config);
+    assert!(outcome.passed(), "{outcome:?}");
+    assert!(
+        outcome.probes[celld_logic::Probe::CapacityRefusalRefreshed as usize] > 0,
+        "the run no longer refreshes a refused peer"
+    );
+}
+
+#[test]
 fn crashes_and_pauses_lose_no_acknowledged_write() {
     // Processes die, some with their disks, or stall past their leases, and
     // other nodes take their cells over and restore them from the bucket.
@@ -385,8 +412,7 @@ const KNOWN_CORE_PANICS: [&str; 9] = [
 ///   lost an acknowledged write, and reads miss it.
 /// - `lost-write` and `late-ack`, in the fleet posture: after a clock fault.
 /// - `liveness` and `alarm-not-fired`: a node whose memory walk-down wedged
-///   refuses every new cell, and a fleet at its residency cap evicts nothing
-///   to make room.
+///   refuses every new cell, or a degraded log cannot fold a retained tail.
 /// - `evicted-pinned`, with validation compiled out: the core evicts a cell
 ///   whose live transport `State::validate` would have caught.
 const KNOWN_CORE_KINDS: [&str; 6] = [

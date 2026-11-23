@@ -574,9 +574,6 @@ The core on `main` fails some seeds.
   as zero yield (swarm 34741, after a pause). Most wedges left, 34 of 38 in
   100,000 seeds, never take the futility stop, and are not traced yet
   (swarm 2515).
-- **A capacity livelock.** When every node is at its residency cap, a new
-  cell is refused with `CapacityExhausted` indefinitely: no full node evicts
-  an idle resident to make room, so the cell is never served (seed 1227).
 
 Three shell bugs fail no check, and the simulator models each as production
 behaves.
@@ -952,6 +949,34 @@ is new, and neither mode reports a **lost-write**, **late-ack** or
 each at a handoff wake. In the known list, six seeds now pass and 2153
 reaches the existing fenced-handoff invariant instead; all seven were
 traced before their lines changed.
+
+Capacity placement could traverse the same full peers forever instead of
+making room locally (swarm 1227). A capacity refusal disproves an advisory
+load sample, but every newer sample cleared that refusal, even when the
+peer's occupancy had not changed. If the bucket round trips outlasted the
+sample interval, the next lookup named the peer again before exhausting the
+fleet. The local demand-shedding fallback already existed; the traversal
+never reached it. Two nodes with one slot each, three cells, fixed 300 ms
+one-way bucket latency and no faults or alarms reproduce the failure.
+
+Each cell now remembers the peers that refused its current placement until
+it finds an owner, fails, or exhausts the traversal and waits locally. Fresh
+samples still clear the shared sample-level refusal, so other cells can try
+the peer again. A later placement after the local wait expires can do the
+same. Nothing changes the residency cap, eviction guards, or claim proofs.
+The suite runs the two-node reproduction; it failed before the fix and
+passes in both modes. A temporary public-event harness also checked fresh
+samples for another cell, mismatched route invalidations, an active resident
+that must not be shed, a timed-out local wait, and a failed capacity lookup.
+The probe-only commit preserved all 2,200 reference trace hashes per mode.
+
+In 100,000 swarm seeds per mode, failing seeds change from 10,104 to 10,105
+with validation and from 859 to 805 without it. The changed routing schedules
+reach only existing failure kinds. Seed 1227 now passes without validation;
+with validation it reaches the known alarm-reset invariant instead. All 139
+changed known-list entries were traced in both builds before updating them;
+each first diverges at a capacity-peer lookup. Both 10,000-seed known-failure
+sweeps then have zero mismatches.
 
 The known failures are listed seed by seed in
 [`crates/sim/known-failures.txt`](../crates/sim/known-failures.txt): every
